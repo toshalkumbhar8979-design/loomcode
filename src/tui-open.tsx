@@ -1,0 +1,48 @@
+#!/usr/bin/env bun
+// Loom Code — OpenTUI entry point.
+// Usage: bun run src/tui-open.tsx [prompt...]  OR  bun src/tui-open.tsx -s <session-id>
+import { render } from "@opentui/solid";
+import { App } from "./tui/App.tsx";
+import { defaultMcpInstall } from "./core/plugin-cmd.js";
+
+const args = process.argv.slice(2);
+
+if (args.includes("--version") || args.includes("-v")) {
+  console.log("loom-code v1.2.0");
+  process.exit(0);
+}
+
+if (args.includes("--help") || args.includes("-h")) {
+  console.log("loom - AI coding agent (OpenTUI edition)");
+  console.log("Usage: bun run src/tui-open.tsx [prompt...]");
+  console.log("  bun run src/tui-open.tsx            Start interactive TUI");
+  console.log("  bun run src/tui-open.tsx \"prompt\"   Start with prompt");
+  console.log("  bun run src/tui-open.tsx -s <id>    Resume session");
+  console.log("  bun run src/tui-open.tsx -p \"q\"     Print mode (one-shot)");
+  process.exit(0);
+}
+
+const pIdx = args.indexOf("-p");
+const printMode = pIdx !== -1;
+const sIdx = args.indexOf("-s");
+const sessionId = sIdx !== -1 ? args[sIdx + 1] : null;
+const initialPrompt = args.filter((a, i) => !a.startsWith("-") && (sIdx === -1 || i !== sIdx + 1)).join(" ");
+
+defaultMcpInstall();
+
+if (printMode) {
+  const { Session } = require("./core/session.js");
+  const sess = new Session();
+  const query = args[pIdx + 1] || initialPrompt || "Hello";
+  const resp = await sess.sendUserMessage(query);
+  if (resp.type === "text") console.log(resp.content);
+  else console.error(resp.content || "(error)");
+  process.exit(resp.type === "error" ? 1 : 0);
+}
+
+render(() => <App initialPrompt={initialPrompt} resumeSession={sessionId} />, {
+  targetFPS: 60,
+  useMouse: true,
+  autoFocus: true,
+  exitOnCtrlC: false,
+});

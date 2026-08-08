@@ -1,0 +1,84 @@
+{
+  "name": "loom-code",
+  "version": "1.2.0",
+  "description": "Loom Code — AI-powered coding agent for the terminal. Multi-provider support including NVIDIA. OpenTUI interface.",
+  "main": "src/index.js",
+  "bin": {
+    "loom": "bin/loom.js",
+    "loom-tui": "bin/loom-tui.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "setup": "node src/setup.js",
+    "test": "bun run src/tui/test-interactive.tsx",
+    "tui": "node bin/loom-tui.js",
+    "tui:win": "\"%USERPROFILE%\\..\\bun\\bin\\bun.exe\" run src/tui-open.tsx",
+    "prepublishOnly": "npm test",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.37.0",
+    "@open-pets/client": "^3.3.0",
+    "@opentui/core": "^0.5.1",
+    "@opentui/solid": "^0.5.1",
+    "boxen": "^8.0.0",
+    "chalk": "^5.3.0",
+    "cli-spinners": "^3.2.0",
+    "commander": "^12.1.0",
+    "dayjs": "^1.11.0",
+    "diff": "^7.0.0",
+    "dotenv": "^16.4.0",
+    "glob": "^11.0.0",
+    "inquirer": "^12.1.0",
+    "openai": "^4.73.0",
+    "ora": "^8.0.0",
+    "shell-quote": "^1.8.1",
+    "solid-js": "^1.9.14",
+    "strip-ansi": "^7.1.0",
+    "tiktoken": "^1.0.22",
+    "uuid": "^11.0.0",
+    "wrap-ansi": "^9.0.0"
+  },
+  "optionalDependencies": {
+    "@opentui/core-win32-x64": "^0.5.1",
+    "@opentui/core-darwin-arm64": "^0.5.1",
+    "@opentui/core-darwin-x64": "^0.5.1",
+    "@opentui/core-linux-x64": "^0.5.1",
+    "@opentui/core-linux-arm64": "^0.5.1"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.7.3"
+  },
+  "files": [
+    "bin/loom.js",
+    "bin/loom-tui.js",
+    "src/**/*.js",
+    "src/**/*.tsx",
+    "src/**/*.ts",
+    "!src/**/test-*",
+    "!src/**/*.test.*",
+    "!src/test-loop.js",
+    "!src/test-tools.js",
+    "README.md",
+    "LICENSE",
+    ".env.example",
+    "LOOM.md"
+  ],
+  "keywords": [
+    "ai",
+    "cli",
+    "coding-agent",
+    "loom-code",
+    "anthropic",
+    "openai",
+    "nvidia",
+    "terminal",
+    "opentui"
+  ],
+  "engines": {
+    "node": ">=18.0.0",
+    "bun": ">=1.0.0"
+  }
+}

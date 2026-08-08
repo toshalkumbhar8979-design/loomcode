@@ -1,0 +1,12 @@
+node_modules/
+.env
+.env.local
+*.log
+.DS_Store
+Thumbs.db
+.loom/config.json
+.loom/usage.json
+.loom/tui.json
+.loom/sessions/
+dist/
+*.tsbuildinfo
