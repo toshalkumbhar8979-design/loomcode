@@ -33,12 +33,12 @@ Loom Code is an AI-powered coding agent for the terminal — a Claude Code / Ope
 ```
 src/tui-open.tsx        Entry point (bun) — render(<App/>)
 src/tui/
-  App.tsx               Root component — layout, keyboard routing, session submit loop, slash commands
+  App.tsx               Root component — layout, keyboard routing, session submit loop, slash commands (command errors surface as toasts, not chat messages)
   store.ts              SolidJS signals: messages, input, thinking, modal, suggestions, provider state, todos, pets
   theme.ts              Color palette (loom dark/light), LOOM banner ASCII, VERSION
   components/
     SplashScreen.tsx    Full-screen banner + input prompt (shown when no messages)
-    ChatArea.tsx        Message list (user/assistant/tool/system bubbles, thinking indicator) — scrollbox (wheel + scrollbar)
+    ChatArea.tsx        Message list (user/assistant/tool/system bubbles, thinking indicator) — assistant bubbles render on a slightly darker patch; while the model edits files the view splits: chat left, diff panel right
     Sidebar.tsx         Right-hand panel: provider, model, tabs (Info/Todos/Files), companion pet
     InputBar.tsx        Bottom input with slash autocomplete (mouse click/wheel) + status line
     Modals.tsx          Provider picker, model picker, key input, base-URL editor, confirm dialogs (mouse click/wheel)

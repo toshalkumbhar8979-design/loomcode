@@ -8,7 +8,8 @@ import os from "os";
 import { execSync } from "child_process";
 import { palette, setTheme, themeOptions, LOOM_LOGO } from "./theme.ts";
 import {
-  messages, setMessages, input, setInput, thinking, setThinking,
+  messages, setMessages, input, setInput, cursor, setCursor, setDraft,
+  thinking, setThinking,
   thinkStart, setThinkStart,
   modal, openModal, closeModal,
   suggestions, setSuggestions, autoKind, setAutoKind, setAutoIndex,
@@ -22,19 +23,23 @@ import {
   SLASH_LIST, LEADER_CMDS, fuzzyFiles,
   leaderPending, setLeaderPending, Suggestion,
   notifyPet, registerSuggestionPicker, pickSuggestion,
+  recordPrompt, historyPrev, historyNext, historyReset,
   speedStats, setSpeedStats,
   permission, requestPermission,
+  userExpandedIdx, setUserExpandedIdx,
   showToast,
 } from "./store.ts";
 import { BreadcrumbBar } from "./components/BreadcrumbBar.tsx";
 import { SplashScreen } from "./components/SplashScreen.tsx";
-import { ChatArea } from "./components/ChatArea.tsx";
+import { ChatArea, estVisualLines, USER_PREVIEW_LINES } from "./components/ChatArea.tsx";
 import { Sidebar } from "./components/Sidebar.tsx";
 import { InputBar } from "./components/InputBar.tsx";
 import { ToastOverlay } from "./components/ToastOverlay.tsx";
+import { QuestionPopupOverlay } from "./components/PermissionPopup.tsx";
+import { formatToolLogLine } from "./toolname.ts";
 import {
   ProviderPicker, SelectModal, InputModal, SettingsModal, CompanionModal,
-  PaletteModal,
+  PaletteModal, McpModal,
   openModelPicker, openKeyModal, openBaseUrlEditor,
   openCompanionPicker, showProvidersText, showHelpText,
 } from "./components/Modals.tsx";
@@ -106,20 +111,23 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
 
   // While a turn is running, Enter does NOT consume the input: the typed text
   // stays in the bar (editable) and is sent normally once the task finishes.
+  // recordPrompt() runs only when the prompt is actually submitted, so a held
+  // draft that was never sent doesn't pollute the prompt history.
   function submit(text: string) {
     var raw = text.trim();
     if (!raw) return;
     setSuggestions([]); setAutoKind("none"); setAutoIndex(0);
 
-    if (raw.startsWith("/")) { setInput(""); processSlash(raw); return; }
-    if (raw.startsWith("!")) { setInput(""); appendMessage({ role: "user", content: raw }); appendMessage({ role: "system", content: runShell(raw.slice(1)) }); return; }
+    if (raw.startsWith("/")) { recordPrompt(raw); setDraft(""); processSlash(raw); return; }
+    if (raw.startsWith("!")) { recordPrompt(raw); setDraft(""); appendMessage({ role: "user", content: raw }); appendMessage({ role: "system", content: runShell(raw.slice(1)) }); return; }
     if (raw.startsWith("@")) raw = expandAt(raw);
 
     if (thinking()) {
       // Keep the text in the input bar — hint shown in the footer while held.
       return;
     }
-    setInput("");
+    recordPrompt(raw);
+    setDraft("");
     runPrompt(raw, false);
   }
 
@@ -158,7 +166,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
         }
       },
       onTool: function(name, inp) {
-        patchLastMessage({ toolLog: String(name) + " " + String(JSON.stringify(inp || "")).slice(0, 60) });
+        patchLastMessage({ toolLog: formatToolLogLine(name, inp) });
         notifyPet({ mood: "working" });
         if (name === "write" || name === "edit") {
           var fp = inp?.filePath;
@@ -263,7 +271,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
       case "connect": {
         var pv = args[0]?.toLowerCase();
         if (!pv) { openModal({ type: "provider" }); return; }
-        if (!PROVIDERS[pv]) { appendMessage({ role: "system", content: "Unknown provider: " + pv }); return; }
+        if (!PROVIDERS[pv]) { showToast("Unknown provider: " + pv + ". Try /connect to pick.", "error"); return; }
         cfg.provider = pv; saveConfig(cfg); refreshProviderState(); openKeyModal(pv);
         return;
       }
@@ -313,12 +321,37 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
       }
       case "budget": {
         const { LEVELS, pickModel, describeLevel } = require("../core/model-router.js");
-        const { budgetStatus, setMonthlyBudget, formatUsd } = require("../core/usage.js");
+        const { budgetStatus, setMonthlyBudget, setDailyAlert, dayStatus, requestOverride, formatUsd } = require("../core/usage.js");
         const cur = cfg.budgetLevel || "auto";
         const arg = args[0]?.toLowerCase();
+        if (arg === "override") {
+          requestOverride();
+          showToast("Budget override set — exactly one paid turn will go through despite the cap.", "ok");
+          refreshUsage();
+          return;
+        }
+        if (arg === "daily") {
+          // 0 is a valid value (disables the alert) — only a missing argument
+          // is invalid.
+          const num = args[1] === undefined ? NaN : parseFloat(args[1].replace(/^[$]/, ""));
+          if (!Number.isNaN(num)) {
+            setDailyAlert(num);
+            showToast("Daily spend alert: " + formatUsd(num) + " / day (0 disables)", "ok");
+            refreshUsage();
+            return;
+          }
+          const day = dayStatus();
+          showToast(
+            "Daily spend today: " + formatUsd(day.dayCostUsd) + (day.alertUsd > 0 ? " (alert at " + formatUsd(day.alertUsd) + ")" : " (no alert set)") + " — set one: /budget daily 3",
+            "ok"
+          );
+          return;
+        }
         // /budget <number> — set the monthly spend cap (Phase 2 governor).
-        const num = arg && parseFloat(arg.replace(/^[$]/, ""));
-        if (num && !Number.isNaN(num)) {
+        // 0 is a valid value (disables enforcement) — only a missing argument
+        // is invalid.
+        const num = arg === undefined ? NaN : parseFloat(arg.replace(/^[$]/, ""));
+        if (!Number.isNaN(num)) {
           setMonthlyBudget(num);
           showToast("Monthly budget: " + formatUsd(num), "ok");
           refreshUsage();
@@ -327,7 +360,9 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
         if (!arg) {
           const info = describeLevel(cur);
           const spend = budgetStatus();
+          const day = dayStatus();
           const picked = info.picked ? info.picked.provider + " / " + info.picked.model : "(none available)";
+          const dayLine = "Day:      " + formatUsd(day.dayCostUsd) + (day.alertUsd > 0 ? " today (alert at " + formatUsd(day.alertUsd) + ")" : " today") + (day.alert ? "  \u26a0 daily alert reached" : "");
           appendMessage({
             role: "system",
             content:
@@ -335,8 +370,9 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
               "Level:    " + cur + (cur === "auto" ? "  (explicit picks, no routing)" : "  (auto-routed per turn)") + "\n" +
               "Would pick: " + picked + (info.freeAvailable ? "" : "  \u2014 no free models reachable") + "\n" +
               "Spend:    " + formatUsd(spend.monthCostUsd) + " of " + formatUsd(spend.budgetUsd) + " this month (" + Math.round(spend.pct) + "%)" + (spend.over ? "  \u26a0 cap reached \u2014 paid turns blocked" : "") + "\n" +
+              dayLine + "\n" +
               "Levels:  free (only $0 models)  cheap (free + low-cost)  best (frontier)  auto (default)\n" +
-              "Try: /budget free  \u2014 every turn stays free, paid models are blocked.  /budget 50 \u2014 set the monthly cap."
+              "Try: /budget free  \u2014 every turn stays free, paid models are blocked.  /budget 50 \u2014 set the monthly cap.  /budget override \u2014 one paid turn past the cap.  /budget daily 3 \u2014 alert when a day spends $3."
           });
           return;
         }
@@ -351,7 +387,25 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
         }
         return;
       }
-      case "new": case "clear": sess.reset(); setMessages([]); showToast("Session cleared.", "ok"); refreshUsage(); return;
+      case "new": case "clear": {
+        // Warn before wiping the session — one wrong /clear loses the whole
+        // transcript. A compact confirm modal with explicit Keep/Clear options.
+        var msgCount = messages().length;
+        openModal({
+          type: "select", title: "Clear session?",
+          searchable: false,
+          options: [
+            { label: "Keep it", sub: "esc / enter to keep", value: "keep" },
+            { label: "Clear session (" + msgCount + " messages)", sub: "irreversible", value: "clear" },
+          ],
+          onPick: function(val: any) {
+            closeModal();
+            if (val !== "clear") { showToast("Session kept.", "info"); return; }
+            sess.reset(); setMessages([]); showToast("Session cleared.", "ok"); refreshUsage();
+          },
+        });
+        return;
+      }
       case "compact": {
         sess.compact().then(function(res) {
           if (res.compacted) {
@@ -366,7 +420,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
             appendMessage({ role: "system", content: "Nothing to compact \u2014 conversation too short." });
           }
         }).catch(function(e) {
-          appendMessage({ role: "system", content: "Compact failed: " + String(e?.message || e).slice(0, 300) });
+          showToast("Compact failed: " + String(e?.message || e).slice(0, 300), "error");
         });
         return;
       }
@@ -389,7 +443,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
           onPick: function(id) {
             const r = restoreTo(id);
             closeModal();
-            if (!r.ok) { appendMessage({ role: "system", content: "Restore failed: " + r.error }); return; }
+            if (!r.ok) { closeModal(); showToast("Restore failed: " + r.error, "error"); return; }
             var line = "Restored to earlier state: " + r.restored.length + " files written back";
             if (r.deleted.length) line += ", " + r.deleted.length + " files removed";
             if (r.errors.length) line += "\nErrors: " + r.errors.join("; ").slice(0, 300);
@@ -438,30 +492,63 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
         if (sub === "install") { appendMessage({ role: "system", content: plugin.installSkillCmd(args.slice(1)) }); return; }
         if (sub === "remove") { appendMessage({ role: "system", content: plugin.removeSkillCmd(args.slice(1)) }); return; }
         if (sub === "help") { appendMessage({ role: "system", content: plugin.skillHelp() }); return; }
-        // Interactive skill browser: searchable list + enable/disable toggle.
-        var list = plugin.listSkills();
+        // Skill browser popup (same window as the model selector): grouped by
+        // source (global ~/.loom, agents ~/.agents, project .loom), Enter
+        // toggles on/off, and an "install" row opens the add flow.
+        var cfgNow = loadConfig();
+        var disabledNow = (cfgNow.skillDisabled || []);
+        var list = listSkills();
         if (!list.length) { appendMessage({ role: "system", content: plugin.listSkillsText() }); return; }
+        var bySource: Record<string, any[]> = { global: [], agents: [], project: [] };
+        for (var sk of list) (bySource[sk.source] = bySource[sk.source] || []).push(sk);
+        var skillOptions: any[] = [];
+        var sourceTitles: Record<string, string> = { global: "Global (~/.loom/skills)", agents: "Agents (~/.agents/skills)", project: "Project (.loom/skills)" };
+        var firstHeader = true;
+        for (var srcKey of ["global", "agents", "project"]) {
+          if (!bySource[srcKey].length) continue;
+          skillOptions.push({ isHeader: true, header: sourceTitles[srcKey] });
+          firstHeader = false;
+          for (var sk3 of bySource[srcKey]) {
+            var off3 = disabledNow.includes(sk3.name);
+            skillOptions.push({ label: sk3.name, value: sk3.name,
+              sub: "[" + (off3 ? "off" : "on") + "] " + sk3.description.slice(0, 44), tags: [srcKey] });
+          }
+        }
+        skillOptions.push({ label: "+ Install skill", value: "__install__", sub: "from a local folder or git URL (--trust for remote)" });
         openModal({
-          type: "select", title: "Skills — Enter toggles on/off, / to search",
+          type: "select", title: "Skills — Enter toggle on/off",
           searchable: true,
-          options: list.map(function(s) {
-            var disabled = (cfg.skillDisabled || []).includes(s.name);
-            return { label: s.name, value: s.name,
-              sub: "[" + (disabled ? "off" : "on") + "] " + s.description.slice(0, 50) };
-          }),
+          options: skillOptions,
           onPick: function(val: any) {
+            if (val === "__install__") {
+              closeModal();
+              openModal({
+                type: "input", title: "Install skill",
+                placeholder: "folder path or git URL [--trust]",
+                onCancel: function() { setTimeout(function() { processSlash("/skills"); }, 10); },
+                onPick: function(target: string) {
+                  if (!target.trim()) { closeModal(); return; }
+                  var out = plugin.installSkillCmd(target.trim().split(/\s+/));
+                  showToast(out.split("\n")[0].slice(0, 90), out.indexOf("blocked") >= 0 || out.indexOf("failed") >= 0 ? "error" : "ok", 6000);
+                  appendMessage({ role: "system", content: out });
+                  closeModal();
+                  setTimeout(function() { processSlash("/skills"); }, 10); // reopen refreshed
+                },
+              });
+              return;
+            }
             var cfg2 = loadConfig();
-            var disabledNow = (cfg2.skillDisabled || []);
-            if (disabledNow.includes(val)) {
-              cfg2.skillDisabled = disabledNow.filter(function(n: string) { return n !== val; });
-              showToast("skill enabled: " + val, "ok");
+            var d = (cfg2.skillDisabled || []);
+            if (d.includes(val)) {
+              cfg2.skillDisabled = d.filter(function(n: string) { return n !== val; });
+              showToast("skill ON: " + val, "ok");
             } else {
-              cfg2.skillDisabled = (cfg2.skillDisabled || []).concat([val]);
-              showToast("skill disabled: " + val, "ok");
+              cfg2.skillDisabled = d.concat([val]);
+              showToast("skill OFF: " + val, "ok");
             }
             saveConfig(cfg2);
             sess.config = cfg2;
-            openModal(null); setTimeout(function() { processSlash("/skills"); }, 10); // reopen with fresh state
+            closeModal(); setTimeout(function() { processSlash("/skills"); }, 10); // reopen refreshed
           },
         });
         return;
@@ -472,7 +559,10 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
         if (sub2 === "remove") { appendMessage({ role: "system", content: plugin.mcpRemoveCmd(args.slice(1)) }); return; }
         if (sub2 === "toggle") { appendMessage({ role: "system", content: plugin.mcpToggleCmd(args.slice(1)) }); return; }
         if (sub2 === "help") { appendMessage({ role: "system", content: plugin.mcpHelp() }); return; }
-        appendMessage({ role: "system", content: plugin.listMcpText() }); return;
+        // MCP browser popup: list every server (defaults + added), toggle
+        // on/off with Enter, add new servers with A.
+        openModal({ type: "mcp" });
+        return;
       }
       case "diff": appendMessage({ role: "system", content: plugin.diffCmd() }); return;
       case "debug": appendMessage({ role: "system", content: plugin.debugCmd() }); return;
@@ -505,7 +595,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
         setTimeout(function() { quit(); }, 500);
         return;
       }
-      default: appendMessage({ role: "system", content: "Unknown command: /" + cmd + ". Try /help." }); return;
+      default: showToast("Unknown command: /" + cmd + ". Try /help.", "error"); return;
     }
   }
   // ═══════════════════════ Keyboard handler ═══════════════════════
@@ -536,12 +626,26 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
     // handles up/down/enter/typing/esc) — the input bar must not receive them.
     if (permission()) return;
 
+    // Ctrl+E — keyboard expand/collapse for the most recent collapsed user
+    // bubble (clicking a bubble toggles it too).
+    if (key.ctrl && k === "e") {
+      const msgs = messages();
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        const um = msgs[i];
+        if (um.role === "user" && estVisualLines(String(um.content || "")) > USER_PREVIEW_LINES) {
+          setUserExpandedIdx(cur => (cur === i ? null : i));
+          return;
+        }
+      }
+      return;
+    }
+
     // Escape
     if (k === "escape") {
       if (leaderPending()) { setLeaderPending(false); return; }
       if (thinking()) { try { getSession().interrupt(); } catch {} setThinking(false); return; }
       if (ma) { closeModal(); return; }
-      setInput(""); setSuggestions([]); setAutoKind("none"); setAutoIndex(0);
+      setDraft(""); setSuggestions([]); setAutoKind("none"); setAutoIndex(0); historyReset();
       return;
     }
 
@@ -577,28 +681,78 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
       return;
     }
 
+    // Cursor movement: left/right always; up/down surf lines when the draft
+    // is multi-line (otherwise they recall prompt history).
+    if (k === "left") { setCursor(function(c) { return Math.max(0, c - 1); }); return; }
+    if (k === "right") { setCursor(function(c) { return Math.min(input().length, c + 1); }); return; }
+    if (k === "home") { setCursor(0); return; }
+    if (k === "end") { setCursor(input().length); return; }
+
+    if ((k === "up" || k === "down") && !s2.length) {
+      if (input().includes("\n")) {
+        // Multi-line draft: move the caret one line, keeping the column.
+        const text = input();
+        const pos = Math.min(cursor(), text.length);
+        const upto = text.slice(0, pos);
+        const lineIdx = (upto.match(/\n/g) || []).length;
+        const col = pos - (upto.lastIndexOf("\n") + 1);
+        const rows = text.split("\n");
+        const target = Math.max(0, Math.min(rows.length - 1, lineIdx + (k === "up" ? -1 : 1)));
+        let tp = 0;
+        for (let li = 0; li < target; li++) tp += rows[li].length + 1;
+        setCursor(tp + Math.min(col, rows[target].length));
+        return;
+      }
+      const recall = k === "up" ? historyPrev() : historyNext();
+      if (recall !== null) setDraft(recall);
+      return;
+    }
+
     // Enter
     if (k === "return") {
       if (pickSuggestion()) return;
+      // Shift+Enter inserts a newline instead of submitting — the chatbox
+      // grows with the text (up to its limit) and scrolls beyond it.
+      if (key.shift) {
+        const p = Math.min(cursor(), input().length);
+        const v = input();
+        const n = v.slice(0, p) + "\n" + v.slice(p);
+        setDraft(n, p + 1);
+        historyReset();
+        return;
+      }
       var text = input().trim();
       if (!text) return;
       var wantsCmd = text.startsWith("/") || text.startsWith("!");
       // Busy: hold the draft in the input bar — nothing is consumed or sent.
       if (thinking() && !wantsCmd) return;
-      setInput("");
+      setDraft("");
       submit(text);
       return;
     }
 
-    // Backspace
+    // Backspace / Delete — operate at the caret, not at the end.
     if (k === "backspace" || k === "delete") {
-      setInput(function(v) { var n = v.slice(0, -1); updateAutocomplete(n); return n; });
+      const p = Math.min(cursor(), input().length);
+      const v = input();
+      let n: string, np: number;
+      if (k === "backspace") { if (p === 0) return; n = v.slice(0, p - 1) + v.slice(p); np = p - 1; }
+      else { if (p >= v.length) return; n = v.slice(0, p) + v.slice(p + 1); np = p; }
+      setDraft(n, np);
+      updateAutocomplete(n);
+      historyReset();
       return;
     }
 
-    // Typing
-    if (!key.ctrl && !key.meta && key.sequence && key.sequence.length <= 10 && key.sequence !== "\r" && key.sequence !== "\n" && key.sequence !== "\t") {
-      setInput(function(v) { var n = v + key.sequence; updateAutocomplete(n); return n; });
+    // Typing — insert at the caret. Sequences containing ESC (e.g. arrow
+    // keys or \x1b]52; clipboard OSC) must never be treated as text.
+    if (!key.ctrl && !key.meta && key.sequence && key.sequence.indexOf("\x1b") < 0 && key.sequence.length <= 10 && key.sequence !== "\r" && key.sequence !== "\n" && key.sequence !== "\t") {
+      const p = Math.min(cursor(), input().length);
+      const v = input();
+      const n = v.slice(0, p) + key.sequence + v.slice(p);
+      setDraft(n, p + key.sequence.length);
+      updateAutocomplete(n);
+      historyReset();
     }
   });
 
@@ -627,9 +781,16 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
   // ═══════════════════════ Paste ═══════════════════════
   usePaste(event => {
     if (modal()) return;
-    const txt = new TextDecoder().decode((event as any).bytes || "").replace(/[\r\n]+/g, "");
+    // Multi-line paste is kept: the chatbox grows up to its height limit and
+    // scrolls beyond it, showing a "~N lines" indicator to save space.
+    const txt = new TextDecoder().decode((event as any).bytes || "").replace(/\r\n?/g, "\n");
     if (!txt) return;
-    setInput(function(v) { const n = v + txt; updateAutocomplete(n); return n; });
+    const p = Math.min(cursor(), input().length);
+    const v = input();
+    const n = v.slice(0, p) + txt + v.slice(p);
+    setDraft(n, p + txt.length);
+    updateAutocomplete(n);
+    historyReset();
   });
 
   // ═══════════════════════ Lifecycle ═══════════════════════
@@ -641,7 +802,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
     registerSuggestionPicker(function(label: string) {
       if (label.startsWith("/")) processSlash(label);
       else if (label.startsWith("!")) { appendMessage({ role: "user", content: label }); appendMessage({ role: "system", content: runShell(label.slice(1)) }); }
-      else if (label.startsWith("@")) setInput(label + " ");
+      else if (label.startsWith("@")) setDraft(label + " ");
     });
     if (props.resumeSession) {
       var data = loadSession(props.resumeSession);
@@ -656,7 +817,8 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
     openPetsConnect();
     _skillToastOff = on("trigger:skill", function(d: any) {
       const names = (d?.skills || []).join(", ");
-      showToast("skill activated: " + names + " — injecting instructions for this turn", "ok");
+      showToast("skill: " + names, "ok", 5000);
+      setSkillActive(d?.skills || []);
     });
     _skillDoneOff = on("turn:end", function(d: any) {
       if (d?.skills?.length) showToast("skill handled: " + d.skills.join(", "), "ok");
@@ -689,8 +851,11 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
           {modal().type === "settings" ? <SettingsModal /> : null}
           {modal().type === "companion" ? <CompanionModal /> : null}
           {modal().type === "palette" ? <PaletteModal onPick={modal().onPick} /> : null}
+          {modal().type === "mcp" ? <McpModal /> : null}
         </box>
       )}
+
+      <QuestionPopupOverlay />
 
       <ToastOverlay />
     </box>

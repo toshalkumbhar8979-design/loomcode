@@ -56,14 +56,16 @@ class ProviderRouter {
 
   getChatFn() {
     if (!this.active) this.init();
-    const { name } = this.active;
-    return this.providers[name].chat;
+    const active = this.active;
+    if (!active) throw new Error('No active provider');
+    return this.providers[active.name].chat;
   }
 
   getStreamFn() {
     if (!this.active) this.init();
-    const { name } = this.active;
-    return this.providers[name].stream;
+    const active = this.active;
+    if (!active) throw new Error('No active provider');
+    return this.providers[active.name].stream;
   }
 
   getModels(providerName) {

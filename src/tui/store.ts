@@ -18,6 +18,49 @@ export const [messages, setMessages] = createSignal<any[]>([]);
 export const [input, setInput] = createSignal("");
 export const [thinking, setThinking] = createSignal(false);
 export const [thinkStart, setThinkStart] = createSignal<number | null>(null);
+// Index (into messages()) of the user bubble whose collapsed preview is
+// expanded. Ctrl+E toggles the most recent collapsed one; clicking a bubble
+// also sets this. Null = everything collapsed.
+export const [userExpandedIdx, setUserExpandedIdx] = createSignal<number | null>(null);
+
+// ─── Prompt history (Up/Down recall of earlier prompts) ───
+export const [promptHistory, setPromptHistory] = createSignal<string[]>([]);
+export const [historyIndex, setHistoryIndex] = createSignal(-1);
+let historyDraft = "";
+
+// Record every submitted prompt (deduped, capped at 50) and reset navigation
+// so the next Up arrow starts from the newest entry.
+export function recordPrompt(text: string) {
+  const t = text.trim();
+  if (!t) return;
+  setPromptHistory(h => (h[h.length - 1] === t ? h : [...h.slice(-49), t]));
+  setHistoryIndex(-1);
+  historyDraft = "";
+}
+
+// Up arrow: walk toward older prompts; the first Up saves the current draft so
+// Down past the end restores it.
+export function historyPrev(): string | null {
+  const h = promptHistory();
+  if (!h.length) return null;
+  if (historyIndex() === -1) historyDraft = input();
+  const ni = historyIndex() === -1 ? h.length - 1 : Math.max(0, historyIndex() - 1);
+  setHistoryIndex(ni);
+  return h[ni];
+}
+
+// Down arrow: walk toward newer prompts; past the newest restores the draft.
+export function historyNext(): string | null {
+  const h = promptHistory();
+  if (historyIndex() === -1) return null;
+  const ni = historyIndex() + 1;
+  if (ni >= h.length) { setHistoryIndex(-1); return historyDraft; }
+  setHistoryIndex(ni);
+  return h[ni];
+}
+
+// Typing fresh text (or escaping) abandons history navigation.
+export function historyReset() { setHistoryIndex(-1); historyDraft = ""; }
 
 // ─── Autocomplete (slash / @file / !shell) ───
 export type AutoKind = "none" | "slash" | "file" | "shell";
@@ -83,6 +126,33 @@ export type PermissionRequest = {
 };
 export const [permission, setPermission] = createSignal<PermissionRequest | null>(null);
 
+// Draft caret position (index into input) — the chatbox is a real editing
+// surface: left/right arrows move it, typing inserts at it, backspace deletes
+// before it. Kept in the store so history/paste/submit paths can sync it.
+export const [cursor, setCursor] = createSignal(0);
+
+// Set the draft and place the cursor (defaults to the end).
+export function setDraft(text: string, pos?: number) {
+  setInput(text);
+  setCursor(typeof pos === "number" ? Math.max(0, Math.min(text.length, pos)) : text.length);
+}
+
+// Typing an answer to a permission request switches to a separate centered
+// "Question" popup; the state lives here so the popup can render at the App
+// root (overlay) while the permission prompt keeps owning the keyboard.
+export const [questionOpen, setQuestionOpen] = createSignal(false);
+export const [questionText, setQuestionText] = createSignal("");
+
+export function openQuestion(initial: string) {
+  setQuestionText(initial);
+  setQuestionOpen(true);
+}
+
+export function closeQuestion() {
+  setQuestionOpen(false);
+  setQuestionText("");
+}
+
 // Raised by the session's onPermissionRequest callback; resolves once the user
 // answers the popup (Allow / Always allow / Deny / typed answer).
 export function requestPermission(tool: string, command: string, label: string): Promise<boolean> {
@@ -137,6 +207,8 @@ export const [sessionUsage, setSessionUsage] = createSignal<{ tokens: number; pc
 export const [lifetimeUsage, setLifetimeUsage] = createSignal<{ tokens: number; cost: number; monthCost: number; pct: number; budget: number }>({ tokens: 0, cost: 0, monthCost: 0, pct: 0, budget: 25 });
 export const [modelMeta, setModelMeta] = createSignal<any>(null);
 export const [budgetLevel, setBudgetLevel] = createSignal<string>("auto");
+// Phase 2.4: the last skill(s) that fired this turn — drives the sidebar Skills row.
+export const [skillActive, setSkillActive] = createSignal<string[]>([]);
 
 const { PROVIDERS, PROVIDER_ORDER, PROVIDER_LABELS } = require("../providers/index.js");
 export { PROVIDERS, PROVIDER_ORDER, PROVIDER_LABELS };

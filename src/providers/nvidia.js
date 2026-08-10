@@ -5,13 +5,13 @@ function getKey() {
   return getApiKey('nvidia') || process.env.NVIDIA_API_KEY || process.env.NVIDIA_NIM_API_KEY;
 }
 
-const provider = createOpenAICompatProvider({
-  getKey,
-  providerId: 'nvidia',
-  envKeyHint: 'NVIDIA',
-});
-
-provider.models = [
+const provider = {
+  ...createOpenAICompatProvider({
+    getKey,
+    providerId: 'nvidia',
+    envKeyHint: 'NVIDIA',
+  }),
+  models: [
   // ── DeepSeek ──
   { id: 'deepseek-ai/deepseek-v4-flash', name: 'DeepSeek V4 Flash (Free)', provider: 'nvidia', tags: ['free', 'fast'], context: 200000, priceIn: 0, priceOut: 0 },
   { id: 'deepseek-ai/deepseek-v4-pro', name: 'DeepSeek V4 Pro', provider: 'nvidia', tags: ['pro'], context: 200000, priceIn: 0.45, priceOut: 1.8 },
@@ -58,6 +58,7 @@ provider.models = [
   { id: 'microsoft/phi-4', name: 'Phi-4 14B', provider: 'nvidia', tags: [], context: 16384, priceIn: 0.1, priceOut: 0.2 },
   // ── Zhipu ──
   { id: 'zai-org/glm-5.2', name: 'GLM-5.2', provider: 'nvidia', tags: [], context: 131072, priceIn: 0.3, priceOut: 1.2 },
-];
+  ],
+};
 
 module.exports = provider;

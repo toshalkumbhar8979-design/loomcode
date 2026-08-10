@@ -6,7 +6,7 @@ process.env.LOOM_MCP_NO_WARM = "1";
 process.env.LOOM_MEM_AUTO = "0";
 import { testRender } from "@opentui/solid";
 import { App } from "./App.tsx";
-import { input, setInput, suggestions, autoKind, autoIndex, messages, modal, getSession, setMessages, inputMode, refreshUsage, modelName, appendMessage, thinking, toasts, refreshProviderState } from "./store.ts";
+import { input, setInput, suggestions, autoKind, autoIndex, messages, modal, getSession, setMessages, inputMode, refreshUsage, modelName, appendMessage, thinking, toasts, refreshProviderState, setPromptHistory } from "./store.ts";
 import { getToolDefinitions, executeTool } from "../tools/index.js";
 import { formatTokens, formatUsd } from "../core/usage.js";
 import { execSync } from "child_process";
@@ -15,7 +15,7 @@ import os from "os";
 import fs from "fs";
 const fs_mkdirSync = fs.mkdirSync, fs_writeFileSync = fs.writeFileSync, fs_rmSync = fs.rmSync;
 
-const strip = (s: string) => s.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").replace(/\x1b\][^\x07]*\x07/g, "");
+const strip = (s: string) => s.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "");
 
 async function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -211,6 +211,64 @@ console.assert(sess.messages.length === 2, "FAIL: /redo should restore the excha
 console.assert(redoC, "FAIL: /redo should show a toast confirmation");
 ok("undo/redo roundtrip");
 
+header("10b: unknown command â†’ error toast, not a chat message");
+setup.mockInput.typeText("/settingd");
+await sleep(150);
+setup.mockInput.pressEnter();
+await sleep(300);
+const unknownToast10b = toasts().some(t => String(t.text).includes("Unknown command: /settingd"));
+const unknownInChat10b = messages().some(m => String(m.content).includes("Unknown command"));
+console.assert(unknownToast10b, "FAIL: unknown command should show an error toast");
+console.assert(!unknownInChat10b, "FAIL: unknown command must NOT be added to the chat area");
+ok("unknown command toasts, chat stays clean");
+
+header("10c: prompt history — Up recalls earlier prompts, Down returns");
+setMessages([]);
+setInput("");
+setPromptHistory([]); // isolate from prompts submitted earlier in the suite
+setup.mockInput.typeText("history-one");
+await sleep(150);
+setup.mockInput.pressEnter();
+await sleep(250);
+setup.mockInput.typeText("history-two");
+await sleep(150);
+setup.mockInput.pressEnter();
+await sleep(250);
+// Up: newest → older → oldest (clamped).
+setup.mockInput.pressArrow("up");
+await sleep(120);
+console.assert(input() === "history-two", "FAIL: first Up should recall the newest prompt, got " + JSON.stringify(input()));
+setup.mockInput.pressArrow("up");
+await sleep(120);
+console.assert(input() === "history-one", "FAIL: second Up should recall the older prompt, got " + JSON.stringify(input()));
+setup.mockInput.pressArrow("up");
+await sleep(120);
+console.assert(input() === "history-one", "FAIL: Up past the oldest prompt should clamp, got " + JSON.stringify(input()));
+// Down: newer → draft (empty) → stays empty.
+setup.mockInput.pressArrow("down");
+await sleep(120);
+console.assert(input() === "history-two", "FAIL: Down should walk back to the newest prompt, got " + JSON.stringify(input()));
+setup.mockInput.pressArrow("down");
+await sleep(120);
+console.assert(input() === "", "FAIL: Down past the newest should restore the draft (empty), got " + JSON.stringify(input()));
+// Draft is preserved: type a draft, Up, then Down → draft comes back.
+setInput("my-draft");
+await sleep(120);
+setup.mockInput.pressArrow("up");
+await sleep(120);
+console.assert(input() === "history-two", "FAIL: Up from a draft should recall the newest prompt, got " + JSON.stringify(input()));
+setup.mockInput.pressArrow("down");
+await sleep(120);
+console.assert(input() === "my-draft", "FAIL: Down past the newest should restore the draft, got " + JSON.stringify(input()));
+// Typing a fresh char abandons navigation: next Up starts from newest.
+setInput("");
+await sleep(120);
+setup.mockInput.pressArrow("up");
+await sleep(120);
+console.assert(input() === "history-two", "FAIL: Up after clearing should start from the newest prompt, got " + JSON.stringify(input()));
+setInput(""); // leave the input clean for the next test
+ok("prompt history recall");
+
 header("11: /skills and /mcp subcommands");
 setup.mockInput.typeText("/skills help");
 await sleep(150);
@@ -221,7 +279,23 @@ setup.mockInput.typeText("/mcp");
 await sleep(150);
 setup.mockInput.pressEnter();
 await sleep(250);
-console.assert(messages().some(m => String(m.content).includes("MCP servers")), "FAIL: /mcp should list servers");
+// /mcp with no args opens the MCP browser popup (list + toggle + add).
+console.assert(modal() !== null && modal()!.type === "mcp", "FAIL: /mcp should open the MCP browser popup");
+frame = strip(setup.captureCharFrame());
+console.assert(frame.includes("MCP Servers"), "FAIL: MCP popup should show its title, got:\n" + frame);
+console.assert(frame.includes("[on]") || frame.includes("[off]"), "FAIL: MCP popup should list server on/off state, got:\n" + frame);
+// Enter toggles the selected (first) server; toggle it twice to restore.
+const mcp11 = require("../mcp/mcp-manager.js");
+const was11 = mcp11.listServers()[0].enabled;
+setup.mockInput.pressEnter();
+await sleep(250);
+console.assert(mcp11.listServers()[0].enabled === !was11, "FAIL: MCP popup Enter should toggle the selected server");
+setup.mockInput.pressEnter();
+await sleep(250);
+console.assert(mcp11.listServers()[0].enabled === was11, "FAIL: MCP popup second Enter should toggle back");
+setup.mockInput.pressEscape();
+await sleep(150);
+console.assert(modal() === null, "FAIL: Esc should close the MCP popup");
 setup.mockInput.typeText("/mcp add tmpsrv echo hello");
 await sleep(150);
 setup.mockInput.pressEnter();
@@ -270,7 +344,16 @@ header("14: typed text stays inside the input box (chat view)");
 setup.mockInput.typeText("regression check");
 await sleep(250);
 frame = strip(setup.captureCharFrame());
-console.assert(frame.includes("\u2502 B |  regression check"), "FAIL: typed text should render inside the input box, not on its border");
+// Multiline chatbox: "B |" header row, typed text on its own content row
+// inside the border — never interpolated into the border line itself.
+{
+  const lines14 = frame.split("\n");
+  const textRow = lines14.find(l => l.includes("regression check")) || "";
+  console.assert(textRow.includes("regression check"), "FAIL: typed text should render in the input box");
+  console.assert(/^[│\u2502]/.test(textRow.trimStart()), "FAIL: typed text row should start with a box border (inside the box)");
+  console.assert(textRow.trimEnd().endsWith("│") || textRow.trimEnd().endsWith("\u2502"), "FAIL: typed text row should end with a box border, got " + JSON.stringify(textRow));
+  console.assert(frame.split("\n").some(l => /│\s*B\s*\|/.test(l)), "FAIL: input box should render the 'B |' header row");
+}
 ok("text inside input box");
 
 header("15: blinking cursor + select-to-copy");
@@ -476,12 +559,12 @@ setInput("");
 await sleep(200);
 setup.mockInput.pressEscape();
 await sleep(150);
-// Single-file change â†’ normal chat area, compact inline note (no split panel).
+// Single-file change → split view: chat left, diff panel right with hunks.
 appendMessage({ role: "assistant", content: "Edited the file for you.", fileDiffs: [d] });
 await sleep(250);
 frame = strip(setup.captureCharFrame());
-console.assert(frame.includes("app.ts"), "FAIL: single-file diff should still show the path inline");
-console.assert(!frame.includes("CHANGED"), "FAIL: single-file diff must NOT render hunk lines / split panel");
+console.assert(frame.includes("app.ts"), "FAIL: single-file diff should show the path in the split panel");
+console.assert(frame.includes("CHANGED"), "FAIL: single-file diff should render hunk lines in the split panel");
 // Two files changed â†’ vertical split: text left, diff panel right with hunks.
 const d2 = buildFileDiff("C:\\proj\\src\\util.ts", "const a = 1;\nconst b = 2;\n", "const a = 1;\nconst b = 22;\nconst c = 3;\n");
 setMessages([]);
@@ -830,8 +913,11 @@ header("34: busy submit â€” Enter holds text in the input bar, sends after 
 const q34 = await import("./store.ts");
 const sess34 = q34.getSession();
 const realSend34 = sess34.sendUserMessage;
+// Long mock turn: the busy-hold only works while thinking() is still true, so
+// the typing + sleep below must land well inside the window. 3000ms keeps this
+// robust even when the test machine is under load.
 sess34.sendUserMessage = function() {
-  return new Promise((res) => setTimeout(() => res({ type: "success", content: "mock-done" }), 800));
+  return new Promise((res) => setTimeout(() => res({ type: "success", content: "mock-done" }), 3000));
 };
 setMessages([]);
 await waitFor(() => q34.toasts().length === 0, "toasts to clear before busy-submit test");
@@ -846,13 +932,14 @@ const tx34 = async (txt: string) => {
 await tx34("first-turn prompt");
 await waitFor(() => thinking() === true, "first turn to start thinking");
 console.assert(thinking() === true, "FAIL: first submit should set thinking");
-await tx34("held-while-busy");
-console.assert(q34.input() === "held-while-busy", "FAIL: busy Enter must keep text in the input bar (got " + JSON.stringify(q34.input()) + ")");
+await tx34("held");
+console.assert(q34.input() === "held", "FAIL: busy Enter must keep text in the input bar (got " + JSON.stringify(q34.input()) + ")");
 console.assert(messages().filter((m) => m.role === "user").length === 1, "FAIL: busy Enter must not send the message");
 await waitFor(() => thinking() === false, "first turn to settle");
 setup.mockInput.pressEnter(); // enter with the held text still in the bar
-await waitFor(() => messages().some(m => m.role === "user" && String(m.content) === "held-while-busy"), "held text to send");
+await waitFor(() => messages().some(m => m.role === "user" && String(m.content) === "held"), "held text to send");
 console.assert(q34.input() === "", "FAIL: after the turn, Enter should consume the text");
+await waitFor(() => thinking() === false && messages().some(m => String(m.content) === "mock-done"), "second turn to settle");
 sess34.sendUserMessage = realSend34;
 ok("busy submit holds input");
 
@@ -896,6 +983,16 @@ await sleep(100);
 await pumpRenders();
 console.assert(q36.input() === inputBefore36, "FAIL: typing while popup open must not reach the input bar");
 console.assert(q36.permission() !== null, "FAIL: popup should stay open while typing the answer");
+frame = strip(setup.captureCharFrame());
+console.assert(frame.includes("Question"), "FAIL: typing an answer should switch to the Question popup, got:\n" + frame);
+console.assert(frame.includes("no thanks"), "FAIL: Question popup should show the typed answer");
+// Esc returns to the permission options (no resolve yet).
+setup.mockInput.pressEscape();
+await sleep(100);
+await pumpRenders();
+console.assert(q36.permission() !== null, "FAIL: Esc in Question popup should return to options, not resolve");
+setup.mockInput.typeText("no thanks");
+await sleep(100);
 setup.mockInput.pressEnter();
 const res36a = await p36a;
 console.assert(res36a === false, "FAIL: typed denial should deny");
@@ -1058,6 +1155,234 @@ try {
   getSession().config = cfg38k;
   refreshProviderState();
 }
+
+header("39: /skills — browser modal, enable/disable toggle, auto-trigger toast");
+function pluginListSkills39(): any[] {
+  try { return require("../skills/skills-manager.js").listSkills(); } catch { return []; }
+}
+try {
+  // Seed a project skill so listSkills() has at least one entry to browse.
+  // Tests run with cwd === repo root, which is the projectSkillsDir().
+  const skSeedDir = path.join(process.cwd(), ".loom", "skills", "gcodex");
+  fs_mkdirSync(skSeedDir, { recursive: true });
+  fs_writeFileSync(path.join(skSeedDir, "SKILL.md"),
+    "---\nname: gcodex\ndescription: gcode slicing + STL post-processing\n---\n\nexpert instructions here.\n");
+  let list: any[] = pluginListSkills39();
+  console.assert(list.length > 0, "FAIL: no skills visible after seeding " + skSeedDir);
+
+  // 39a: /skills opens the select modal listing installed skills.
+  setup.mockInput.pressEscape();
+  await sleep(100);
+  setMessages([]);
+  setInput("");
+  await sleep(200);
+  setup.mockInput.typeText("/skills");
+  await sleep(150);
+  setup.mockInput.pressEnter();
+  await sleep(400);
+  console.assert(modal()?.type === "select", "FAIL: /skills should open the select modal");
+  frame = strip(setup.captureCharFrame());
+  console.assert(frame.includes("Skills"), "FAIL: skill browser title missing");
+  if (list.length) {
+    const first = list[0].name;
+    const gotFirst = frame.split("\n").some(l => l.includes(first));
+    console.assert(gotFirst, "FAIL: first skill '" + first + "' not in modal frame");
+  }
+  setup.mockInput.pressEscape();
+  await sleep(150);
+
+  // 39b: real keyboard toggle through the modal — Enter on the highlighted
+  // (first selectable, header-skipped) row flips the skill and persists it.
+  if (list.length) {
+    const target = list[0].name;
+    setup.mockInput.typeText("/skills");
+    await sleep(150);
+    setup.mockInput.pressEnter();
+    await sleep(400);
+    console.assert(modal()?.type === "select", "FAIL: /skills should reopen for keyboard toggle");
+    // The first row must be highlighted (">" marker) even though row 0 is a header.
+    frame = strip(setup.captureCharFrame());
+    console.assert(frame.split("\n").some(l => /│\s*>/.test(l)), "FAIL: skill modal should show a highlight on a selectable row, got:\n" + frame);
+    setup.mockInput.pressEnter(); // toggle target OFF
+    await sleep(400);
+    const on = settings37.loadConfig().skillDisabled || [];
+    console.assert(on.includes(target), "FAIL: keyboard Enter should persist " + target + " to skillDisabled, got " + JSON.stringify(on));
+    setup.mockInput.pressEnter(); // toggle back ON
+    await sleep(400);
+    const off = settings37.loadConfig().skillDisabled || [];
+    console.assert(!off.includes(target), "FAIL: second Enter should un-disable " + target);
+    setup.mockInput.pressEscape();
+    await sleep(150);
+    console.assert(modal() === null, "FAIL: Esc should close the skill modal");
+  }
+
+  // 39c: auto-trigger fires the toast chain. We can't run the network model from a test,
+  // but the App subscribes to trigger:skill → emit it directly and assert the toast.
+  const ev39 = require("../core/events.js");
+  const before39 = toasts().length;
+  ev39.emit("trigger:skill", { skills: ["gcode one"], latencyMs: 1 });
+  await sleep(300);
+  const sawToast = toasts().some((t: any) =>
+    String(t.text || "").toLowerCase().includes("skill activated") ||
+    String(t.text || "").toLowerCase().includes("gcode one")
+  );
+  console.assert(sawToast, "FAIL: trigger:skill should fire a toast; current toasts=" + toasts().map((t: any) => t.text).join("|"));
+  ok("skill auto-trigger fires toast");
+} finally {
+  const cfg39k = settings37.loadConfig();
+  cfg39k.skillDisabled = [];
+  settings37.saveConfig(cfg39k);
+  getSession().config = cfg39k;
+  refreshProviderState();
+  try { fs_rmSync(path.join(process.cwd(), ".loom", "skills"), { recursive: true, force: true }); } catch {}
+}
+
+header("40: multiline chatbox \u2014 Shift+Enter newline, ~N lines badge, paste, submit");
+// 40a: Shift+Enter inserts a newline instead of submitting.
+// (pressEnter({shift}) can't encode the modifier on \r, so send the kitty
+// keyboard sequence "\x1b[13;2u" which the parser maps to shift+return.)
+setInput("");
+await sleep(100);
+setup.mockInput.typeText("line one");
+setup.mockInput.pressKeys(["\x1b[13;2u"]);
+await sleep(100);
+setup.mockInput.typeText("line two");
+await sleep(100);
+console.assert(input() === "line one\nline two", "FAIL: Shift+Enter should insert a newline, got " + JSON.stringify(input()));
+frame = strip(setup.captureCharFrame());
+console.assert(frame.includes("~2 lines"), "FAIL: chatbox should show the ~2 lines badge, got:\n" + frame);
+ok("multiline chatbox shift-enter");
+
+// 40b: multi-line bracketed paste keeps its newlines in the draft.
+setup.mockInput.pasteBracketedText("\r\npasted a\r\npasted b\r\n");
+await sleep(100);
+console.assert(input().includes("pasted a\npasted b"), "FAIL: paste should keep newlines, got " + JSON.stringify(input()));
+ok("multiline paste preserved");
+
+// 40c: Enter submits the whole multi-line draft as one message.
+setup.mockInput.pressEnter();
+await waitFor(() => messages().some(m => m.role === "user" && String(m.content).includes("line one")), "multiline submit");
+console.assert(messages().some(m => m.role === "user" && String(m.content).includes("pasted b")), "FAIL: submit should carry the full multi-line draft");
+console.assert(input() === "", "FAIL: chatbox should clear after submit");
+await sleep(200);
+ok("multiline submit as one message");
+
+header("41: caret editing — left/right move, insert/backspace at cursor, home/end");
+setInput("");
+await sleep(100);
+setup.mockInput.typeText("helo");
+await sleep(150);
+setup.mockInput.pressArrow("left");
+await sleep(60);
+setup.mockInput.pressArrow("left");
+await sleep(60);
+setup.mockInput.pressArrow("left");
+await sleep(60);
+setup.mockInput.typeText("l");
+await sleep(150);
+const { cursor } = await import("./store.ts");
+console.assert(input() === "hlelo", "FAIL: insert at caret should yield 'hlelo', got " + JSON.stringify(input()));
+console.assert(cursor() === 2, "FAIL: caret should land after the inserted char");
+setup.mockInput.pressKeys(["\x1b[H"]);
+await sleep(100);
+console.assert(cursor() === 0, "FAIL: home should zero the caret");
+setup.mockInput.pressKeys(["\x1b[F"]);
+await sleep(100);
+console.assert(cursor() === input().length, "FAIL: end should put the caret at the end");
+setup.mockInput.pressBackspace();
+await sleep(150);
+console.assert(input() === "hlel", "FAIL: backspace at end should drop the last char, got " + JSON.stringify(input()));
+setup.mockInput.pressKeys(["\x1b[H"]);
+await sleep(100);
+setup.mockInput.typeText("H");
+await sleep(150);
+console.assert(input() === "Hhlel", "FAIL: typing at home should prepend, got " + JSON.stringify(input()));
+setInput("");
+await sleep(100);
+ok("caret editing");
+
+header("42: /clear asks before wiping the session");
+{
+  const before42 = messages().length;
+  setup.mockInput.typeText("/clear");
+  await sleep(150);
+  setup.mockInput.pressEnter();
+  await sleep(400);
+  console.assert(modal()?.type === "select", "FAIL: /clear should open the confirm modal");
+  frame = strip(setup.captureCharFrame());
+  console.assert(frame.includes("Clear session?"), "FAIL: /clear confirm should show a warning title, got:\n" + frame);
+  setup.mockInput.pressEscape();
+  await sleep(150);
+  console.assert(modal() === null, "FAIL: /clear modal Esc should close");
+  console.assert(messages().length === before42, "FAIL: /clear on Esc must keep the session");
+
+  setup.mockInput.typeText("/clear");
+  await sleep(150);
+  setup.mockInput.pressEnter();
+  await sleep(400);
+  setup.mockInput.pressArrow("down");
+  await sleep(60);
+  setup.mockInput.pressEnter();
+  await sleep(400);
+  console.assert(modal() === null, "FAIL: /clear confirm Yes should close the modal");
+  console.assert(messages().length === 0, "FAIL: /clear Yes should actually clear, count=" + messages().length);
+}
+ok("clear confirmation modal");
+
+header("43: chat output renders markdown (bold/code/links) without raw markers");
+{
+  appendMessage({ role: "assistant", content: "Here is **bold** and `inline code` plus a link [docs](https://x.dev).\n\n- item one\n- item two" });
+  await pumpRenders();
+  frame = strip(setup.captureCharFrame());
+  console.assert(frame.includes("bold"), "FAIL: bold text should render its content");
+  console.assert(!frame.includes("**bold**"), "FAIL: raw ** markers must not leak into chat");
+  console.assert(frame.includes("inline code"), "FAIL: inline code should render its content");
+  console.assert(!frame.includes("`inline code`"), "FAIL: backticks must not leak into chat");
+  // The chat column wraps and the sidebar border glyphs slide between the two
+  // halves — assert on the two visible fragments instead of the full string.
+  const flat43 = frame.replace(/\s+/g, "");
+  console.assert(flat43.includes("docs(https://x.") && flat43.includes("dev)."), "FAIL: link should render as label (url), got:\n" + frame);
+  console.assert(!frame.includes("[docs]("), "FAIL: raw link markdown must not leak into chat");
+  console.assert(frame.split("\n").some(l => /•\s+item one/.test(l)), "FAIL: list bullet should render as • marker");
+  console.assert(frame.split("\n").some(l => /•\s+item two/.test(l)), "FAIL: second bullet should render too");
+  await sleep(200);
+}
+ok("chat markdown rendering");
+
+header("44: /mcp add preset picker (custom path)");
+
+setup.mockInput.typeText("/mcp");
+await sleep(150);
+setup.mockInput.pressEnter();
+await sleep(300);
+setup.mockInput.typeText("a");
+await sleep(400);
+frame = strip(setup.captureCharFrame());
+console.assert(modal()?.type === "select", "FAIL: /mcp + a should open the preset picker");
+console.assert(frame.includes("Supabase MCP"), "FAIL: preset picker should list Supabase MCP, got:\n" + frame);
+console.assert(frame.includes("Custom"), "FAIL: preset picker should include a Custom entry, got:\n" + frame);
+setup.mockInput.pressArrow("down");
+await sleep(60);
+setup.mockInput.pressArrow("down");
+await sleep(60);
+setup.mockInput.pressArrow("down");
+await sleep(60);
+setup.mockInput.pressArrow("down");
+await sleep(60);
+setup.mockInput.pressEnter();
+await sleep(300);
+console.assert(modal()?.type === "input", "FAIL: picking Custom… should open the free-form input");
+setup.mockInput.typeText("probe-mcp echo hello");
+await sleep(150);
+setup.mockInput.pressEnter();
+await sleep(400);
+console.assert(modal()?.type === "mcp", "FAIL: after adding the preset the flow should reopen the /mcp browser");
+const mcp44 = require("../mcp/mcp-manager.js");
+console.assert(mcp44.listServers().some(s => s.name === "probe-mcp"), "FAIL: preset add should persist the server");
+mcp44.removeServer("probe-mcp");
+setup.mockInput.pressEscape();
+await sleep(150);
+ok("mcp preset picker");
 
 console.log("");
 _sessMock.sendUserMessage = _realSendAll;

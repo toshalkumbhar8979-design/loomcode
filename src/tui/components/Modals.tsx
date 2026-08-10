@@ -10,6 +10,7 @@ import {
   showThinking, setShowThinking, persistUi, openPetsSync, setOpenPetsSync,
 } from "../store.ts";
 import { loadConfig, saveConfig, getBaseUrl, setBaseUrl } from "../../config/settings.js";
+import { MCP_PRESETS, presetSpawn } from "../mcp-presets.ts";
 
 const ui = palette("loom");
 
@@ -220,10 +221,27 @@ export function SelectModal(props: {
     });
   };
 
+  // The selection must never land on a section header: it would render with
+  // no highlight and Enter would do nothing. Always skip to the next row.
+  const firstSelectable = () => {
+    const list = filtered();
+    const i = list.findIndex(o => o && !o.isHeader);
+    return i < 0 ? 0 : i;
+  };
+  const stepSelectable = (i: number, dir: number) => {
+    const list = filtered();
+    let j = i + dir;
+    while (j >= 0 && j < list.length && list[j] && list[j].isHeader) j += dir;
+    if (j < 0 || j >= list.length) return i;
+    return j;
+  };
+  // Start on the first real row (not a header).
+  setIndex(firstSelectable());
+
   useKeyboard(key => {
     if (key.name === "escape") { closeModal(); return; }
-    if (key.name === "up") { setIndex(i => Math.max(0, i - 1)); return; }
-    if (key.name === "down") { setIndex(i => Math.min(filtered().length - 1, i + 1)); return; }
+    if (key.name === "up") { setIndex(i => stepSelectable(i, -1)); return; }
+    if (key.name === "down") { setIndex(i => stepSelectable(i, 1)); return; }
     if (key.name === "return") {
       const opt = filtered()[index()];
       if (!opt || opt.isHeader) return;
@@ -231,17 +249,27 @@ export function SelectModal(props: {
       return;
     }
     if (props.searchable) {
-      if (key.name === "backspace") { setQ(v => v.slice(0, -1)); setIndex(0); return; }
+      if (key.name === "backspace") { setQ(v => v.slice(0, -1)); setIndex(firstSelectable()); return; }
       const s = key.sequence;
       if (!key.ctrl && !key.meta && s && s.length <= 10 && s !== "\r" && s !== "\n") {
         setQ(v => v + s);
-        setIndex(0);
+        setIndex(firstSelectable());
         return;
       }
     }
   });
 
-  const scrollBy = (e: any) => { setIndex(i => Math.max(0, Math.min(filtered().length - 1, i + wheelStep(e, 1)))); };
+  const scrollBy = (e: any) => {
+    const step = wheelStep(e, 1);
+    const dir = step < 0 ? -1 : 1;
+    let i = index();
+    for (let n = 0; n < Math.abs(step); n++) {
+      const j = stepSelectable(i, dir);
+      if (j === i) break;
+      i = j;
+    }
+    setIndex(i);
+  };
   const clickRow = (i: number) => {
     if (i !== index()) return;
     const o = filtered()[i];
@@ -295,12 +323,13 @@ export function InputModal(props: {
   placeholder: string;
   onPick: (value: string) => void;
   isKey?: boolean;
+  onCancel?: () => void;
 }) {
   const [val, setVal] = createSignal("");
   const masked = () => props.isKey ? "x".repeat(Math.max(0, val().length)) : val();
 
   useKeyboard(key => {
-    if (key.name === "escape") { closeModal(); return; }
+    if (key.name === "escape") { closeModal(); if (props.onCancel) props.onCancel(); return; }
     if (key.name === "return") { props.onPick(val()); return; }
     if (key.name === "backspace") { setVal(v => v.slice(0, -1)); return; }
     const s = key.sequence;
@@ -357,6 +386,162 @@ export function showProvidersText() {
   }
   lines.push("", "/connect to pick interactively.");
   appendMessage({ role: "system", content: lines.join("\n") });
+}
+
+// ── MCP server browser popup ──
+// Lists every configured server (seeded defaults + user-added) with on/off
+// state; Enter toggles, A opens the add-server flow, Esc closes.
+const MCP_FIT = 52;
+function mcpFit(s: string, n = MCP_FIT) {
+  const flat = String(s || "").replace(/\s+/g, " ").trim();
+  return flat.length <= n ? flat : flat.slice(0, Math.max(1, n - 1)) + "\u2026";
+}
+
+export function McpModal() {
+  const { listServers, toggleServer } = require("../../mcp/mcp-manager.js");
+  const [servers, setServers] = createSignal(listServers());
+  const [sel, setSel] = createSignal(0);
+
+  const refresh = () => setServers(listServers());
+
+  useKeyboard(key => {
+    if (key.name === "escape") { closeModal(); return; }
+    if (key.name === "up") { setSel(i => Math.max(0, i - 1)); return; }
+    if (key.name === "down") { setSel(i => Math.min(servers().length - 1, i + 1)); return; }
+    if (key.name === "a" || key.name === "A") {
+      closeModal();
+      const picker = MCP_PRESETS.map(p => ({
+        label: p.label,
+        sub: p.prompts.length ? "needs a token" : "no key needed",
+        value: p.id,
+      })).concat([{ label: "Custom…", sub: "type name command args", value: "__custom__" }]);
+      openModal({
+        type: "select", title: "Add MCP server",
+        searchable: false,
+        options: picker,
+        onPick: function(val: any) {
+          closeModal();
+          if (val === "__custom__") {
+            openModal({
+              type: "input", title: "Add MCP server",
+              placeholder: "name command args...  (e.g. github docker run -i --rm ghcr.io/github/github-mcp-server)",
+              onCancel: function() { setTimeout(function() { openModal({ type: "mcp" }); }, 10); },
+              onPick: function(line: string) {
+                const parts = line.trim().split(/\s+/);
+                const name = parts[0];
+                const cmd = parts[1];
+                const { addServer } = require("../../mcp/mcp-manager.js");
+                const res = (name && cmd) ? addServer(name, cmd, parts.slice(2)) : { error: "usage: name command args..." };
+                if (res && !res.error) showToast("MCP server added: " + name, "ok");
+                else showToast(String(res && res.error ? res.error : "usage: name command args...").slice(0, 80), "error");
+                closeModal();
+                setTimeout(function() { openModal({ type: "mcp" }); }, 10);
+              },
+            });
+            return;
+          }
+          const preset = MCP_PRESETS.find(p => p.id === val);
+          if (!preset) { showToast("Unknown preset", "error"); closeModal(); setTimeout(function() { openModal({ type: "mcp" }); }, 10); return; }
+          const pendingEnv: Record<string, string> = {};
+          const collected: string[] = [];
+          const askNext = function(i: number) {
+            if (i >= preset.prompts.length) {
+              const { addServer } = require("../../mcp/mcp-manager.js");
+              const spawn = presetSpawn(preset, pendingEnv);
+              // Substitute "$KEY" placeholders in args with the collected values.
+              const finalSpawnArgs = spawn.args.map(function(a) {
+                if (typeof a === "string" && a.startsWith("$")) {
+                  const key = a.slice(1);
+                  return pendingEnv[key] !== undefined ? pendingEnv[key] : a;
+                }
+                return a;
+              });
+              const res = addServer(preset.id, spawn.command, finalSpawnArgs, { env: spawn.env });
+              if (res && !res.error) showToast("MCP added: " + preset.id, "ok");
+              else showToast(String(res && res.error ? res.error : "failed").slice(0, 80), "error");
+              closeModal();
+              setTimeout(function() { openModal({ type: "mcp" }); }, 10);
+              return;
+            }
+            const pr = preset.prompts[i];
+            const collectedText = collected.length ? collected.join("  ·  ") : "";
+            openModal({
+              type: "input",
+              title: preset.label + " — step " + (i + 1) + "/" + preset.prompts.length,
+              placeholder: pr.label + (collectedText ? "\n\n" + collectedText : ""),
+              isKey: true,
+              onCancel: function() {
+                // We keep collected values hidden and onCancel aborts the whole
+                // clone flow so the user can back out cleanly.
+                closeModal();
+                setTimeout(function() { openModal({ type: "mcp" }); }, 10);
+              },
+              onPick: function(val: string) {
+                const v = val.trim();
+                if (v) {
+                  pendingEnv[pr.key] = v;
+                  collected.push(pr.key + "=" + v.slice(0, 4) + "…");
+                  closeModal();
+                  setTimeout(function() { askNext(i + 1); }, 10);
+                  return;
+                }
+                // A required setup value left empty — re-ask instead of adding
+                // a broken server.
+                showToast(pr.label + " is required (Esc to cancel).", "error");
+                closeModal();
+                setTimeout(function() { askNext(i); }, 10);
+              },
+            });
+          };
+          askNext(0);
+        },
+      });
+      return;
+    }
+    if (key.name === "return") {
+      const s = servers()[sel()];
+      if (!s) return;
+      const res = toggleServer(s.name);
+      if (res && res.error) { showToast(String(res.error), "error"); return; }
+      showToast("MCP " + s.name + ": " + (s.enabled ? "off" : "on"), "ok");
+      refresh();
+      return;
+    }
+  });
+
+  const scrollBy = (e: any) => { setSel(i => Math.max(0, Math.min(servers().length - 1, i + wheelStep(e, 1)))); };
+  let winStart = 0;
+  const win = () => {
+    const total = servers().length;
+    winStart = windowFor(sel(), total, 12, winStart);
+    return { total, start: winStart, items: servers().slice(winStart, winStart + 12) };
+  };
+  const rangeSub = () => {
+    const w = win();
+    return w.total > 12 ? "  showing " + (w.start + 1) + "-" + Math.min(w.start + 12, w.total) + " of " + w.total : "";
+  };
+
+  return (
+    <ModalFrame title="MCP Servers" subtitle={"Enter toggles a server on/off" + rangeSub()} footer={"Enter toggle  |  A add server  |  wheel scroll  |  Esc close"}>
+      <box onMouseScroll={scrollBy}>
+        {win().items.map((s, i) => {
+          const abs = win().start + i;
+          return (
+            <box
+              key={s.name} flexDirection="row" paddingY={0}
+              onMouseDown={() => setSel(abs)}
+              onMouseUp={() => { if (abs === sel()) { const r = toggleServer(s.name); if (!r || !r.error) refresh(); } }}
+            >
+              <text fg={abs === sel() ? ui.primary : ui.fgDim} bold={abs === sel()}>
+                {"  " + (s.enabled ? "[on] " : "[off] ") + s.name}
+              </text>
+              <text fg={ui.fgMuted} dim>{"   \u2192  " + mcpFit(s.command + " " + (s.args || []).join(" "))}</text>
+            </box>
+          );
+        })}
+      </box>
+    </ModalFrame>
+  );
 }
 
 // Palette modal (ctrl+p) - proper popup window

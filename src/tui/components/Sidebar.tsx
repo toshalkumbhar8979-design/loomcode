@@ -3,7 +3,7 @@ import { Show } from "solid-js";
 import { palette } from "../theme.ts";
 import {
   sidebarTab, todos, messages, providerName, modelName, openPetsLinked,
-  cwdShort, getProjectFiles, petEnabled, speedStats, sessionUsage, budgetLevel,
+  cwdShort, getProjectFiles, petEnabled, speedStats, sessionUsage, budgetLevel, skillActive,
 } from "../store.ts";
 import { Companion } from "./Companion.tsx";
 import { formatUsd } from "../../core/usage.js";
@@ -54,6 +54,9 @@ export function Sidebar(props: { show: boolean }) {
           <box flexDirection="row"><text fg={ui.fgMuted}>{"Messages:  "}</text><text fg={ui.fg}>{String(messages().length)}</text></box>
           <box flexDirection="row"><text fg={ui.fgMuted}>{"Path:      "}</text><text fg={ui.fgDim}>{cwdShort() || "~"}</text></box>
           <box flexDirection="row"><text fg={ui.fgMuted}>{"OpenPets:  "}</text><text fg={openPetsLinked() ? "green" : "gray"}>{openPetsLinked() ? "linked" : "off"}</text></box>
+          {skillActive().length > 0 ? (
+            <box flexDirection="row"><text fg={ui.fgMuted}>{"Skills:    "}</text><text fg={ui.primary}>{skillActive().join(", ")}</text></box>
+          ) : null}
         </box>
 
         <Companion />

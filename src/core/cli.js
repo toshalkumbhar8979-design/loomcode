@@ -18,9 +18,17 @@ const LOOM_BASE = `
  ╚══════╝ ╚═════╝  ╚═════╝ ╚═╝     ╚═╝      ╚═════╝╚═════╝ ╚═════╝ ╚══════╝`;
 
 class LoomCLI {
+  /** @type {import('readline').Interface} */
+  rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    prompt: '\x1b[36m> \x1b[0m',
+    completer: (line) => this.completer(line),
+    terminal: true,
+  });
+  /** @type {import('./session').Session} */
+  session = new Session();
   constructor() {
-    this.session = null;
-    this.rl = null;
     this.running = true;
     this.config = loadConfig();
     this.initialPrompt = null;
@@ -32,21 +40,12 @@ class LoomCLI {
     console.log(`\n  Loom Code v1.0.0 — AI Coding Agent for the terminal`);
     console.log(`  Press Ctrl+C or ESC to interrupt | /help for commands\n`);
 
-    this.rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-      prompt: '\x1b[36m> \x1b[0m',
-      completer: (line) => this.completer(line),
-      terminal: true,
-    });
-
-    this.rl.input.on('keypress', (str, key) => {
+    process.stdin.on('keypress', (str, key) => {
       if (key && key.name === 'escape') {
         this.onEscape();
       }
     });
 
-    this.session = new Session();
     if (this.initialSession) {
       this.session.messages = this.initialSession.messages || [];
       this.session.conversationId = this.initialSession.id || this.session.conversationId;
@@ -230,7 +229,7 @@ class LoomCLI {
     if (!fs.existsSync(target)) fs.writeFileSync(target, MEMORY_TEMPLATE);
     try {
       const { execSync } = require('child_process');
-      if (process.platform === 'win32') execSync('start "" "' + target + '"', { shell: true, stdio: 'ignore' });
+      if (process.platform === 'win32') execSync('start "" "' + target + '"', { stdio: 'ignore' });
       else if (process.platform === 'darwin') execSync('open "' + target + '"', { stdio: 'ignore' });
       else execSync('xdg-open "' + target + '"', { stdio: 'ignore' });
       console.log(`Opened ${target} in your default editor.`);
@@ -391,6 +390,7 @@ function findBun() {
   }
   // Search PATH (Windows: where.exe, POSIX: which)
   try {
+    const { execSync } = require('child_process');
     const isWin = process.platform === 'win32';
     const result = execSync(isWin ? 'where.exe bun 2>nul' : 'which bun 2>/dev/null', { encoding: 'utf8', timeout: 5000, windowsHide: true }).trim();
     if (result && fs.existsSync(result.split('\n')[0].trim())) return result.split('\n')[0].trim();

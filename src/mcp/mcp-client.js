@@ -3,14 +3,40 @@ const { loadServers } = require('./mcp-manager');
 
 let toolCachePromise = null;
 
+// Kill the whole process tree. On Windows, spawn kill leaves grandchildren
+// (npx -> node) running as orphans that hold ports and memory. On POSIX the
+// child is spawned detached as a process-group leader, so killing the group
+// (-pid) takes down every descendant.
+function killTree(child) {
+  if (!child || child.killed) return;
+  if (process.platform === 'win32') {
+    try {
+      const { execSync } = require('child_process');
+      execSync('taskkill /PID ' + child.pid + ' /T /F', { stdio: 'ignore', windowsHide: true });
+      return;
+    } catch {}
+  }
+  try { process.kill(-child.pid, 'SIGKILL'); } catch {}
+  child.kill('SIGKILL');
+}
+
 function connectToJson(cfg, timeoutMs) {
   return new Promise((resolve, reject) => {
     const child = spawn(cfg.command, cfg.args || [], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: Object.assign({}, process.env, cfg.env || {}),
+      // No console window for stdio MCP servers: on Windows spawn() would
+      // otherwise pop a flashing console up and down while chats happen.
+      windowsHide: true,
+      // POSIX only: make the server a process-group leader so killTree can
+      // kill the whole tree (npx + its node child) with one -pid signal.
+      detached: process.platform !== 'win32',
     });
+    // A server that dies mid-conversation can emit EPIPE on stdin — without
+    // a listener that 'error' would crash the whole app.
+    child.stdin.on('error', () => {});
     const timeout = setTimeout(() => {
-      child.kill();
+      killTree(child);
       reject(new Error('Timed out connecting to ' + (cfg.command || '') + ' (is it installed?)'));
     }, timeoutMs || 8000);
     child.on('error', (e) => {
@@ -24,12 +50,41 @@ function connectToJson(cfg, timeoutMs) {
   });
 }
 
-function callRpc(child, method, params) {
+let rpcSeq = 0;
+const DEFAULT_RPC_TIMEOUT = 60000;
+
+function callRpc(child, method, params, timeoutMs) {
   return new Promise((resolve, reject) => {
-    const id = (callRpc.__seq = (callRpc.__seq || 0) + 1);
+    const id = (rpcSeq += 1);
     let buf = '';
+    let timer = null;
+    let settled = false;
+    const onStderr = () => {};
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      child.stdout.off('data', onData);
+      child.stderr.off('data', onStderr);
+      child.off('close', onClose);
+      child.off('error', onChildError);
+    };
+    const onClose = (code, signal) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error('MCP server exited (code ' + code + (signal ? ', signal ' + signal : '') + ') during ' + method));
+    };
+    const onChildError = (e) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(e);
+    };
     const onData = (chunk) => {
-      buf += chunk.toString();
+      let text = chunk.toString();
+      // Some Windows stdio servers emit a UTF-8 BOM on the first line, which
+      // would break JSON.parse and stall the RPC until timeout.
+      if (!buf) text = text.replace(/^\uFEFF/, '');
+      buf += text;
       let idx;
       while ((idx = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, idx).trim();
@@ -38,17 +93,27 @@ function callRpc(child, method, params) {
         let msg;
         try { msg = JSON.parse(line); } catch { continue; }
         if (msg.id === id) {
-          child.stdout.off('data', onData);
+          settled = true;
+          cleanup();
           if (msg.error) reject(new Error((msg.error && msg.error.message) || 'MCP error'));
           else resolve(msg.result);
         }
       }
     };
+    timer = setTimeout(() => {
+      settled = true;
+      cleanup();
+      reject(new Error('MCP RPC timed out: ' + method));
+    }, timeoutMs || DEFAULT_RPC_TIMEOUT);
     child.stdout.on('data', onData);
-    child.stderr.on('data', () => {});
+    child.stderr.on('data', onStderr);
+    child.once('close', onClose);
+    child.once('error', onChildError);
     try {
       child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
     } catch (e) {
+      settled = true;
+      cleanup();
       reject(e);
     }
   });
@@ -63,22 +128,27 @@ function notify(child, method, params) {
 async function getTools() {
   const { servers } = loadServers();
   const out = [];
+  const failed = [];
   for (const [name, cfg] of Object.entries(servers)) {
     if (cfg.enabled === false) continue;
     const entry = { server: name };
     let child;
     try {
       child = await connectToJson(cfg, 8000);
-      await callRpc(child, 'initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'loom', version: '1.0.0' } }).catch(() => ({}));
+      await callRpc(child, 'initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'loom', version: '1.0.0' } }, 10000).catch(() => ({}));
       notify(child, 'notifications/initialized', {});
-      const toolsRes = await callRpc(child, 'tools/list', {}).catch(() => ({ tools: [] }));
+      const toolsRes = await callRpc(child, 'tools/list', {}, 10000).catch(() => ({ tools: [] }));
       entry.tools = (toolsRes && toolsRes.tools) || [];
     } catch (e) {
       entry.error = e.message;
+      failed.push({ server: name, error: e.message });
     } finally {
-      if (child) child.kill();
+      killTree(child);
     }
     out.push(entry);
+  }
+  if (failed.length) {
+    try { require('../core/events').emit('mcp:failed', { servers: failed }); } catch {}
   }
   return out;
 }
@@ -89,9 +159,9 @@ async function callTool(server, toolName, input) {
   let child;
   try {
     child = await connectToJson(cfg, 8000);
-    await callRpc(child, 'initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'loom', version: '1.0.0' } }).catch(() => ({}));
+    await callRpc(child, 'initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'loom', version: '1.0.0' } }, 10000).catch(() => ({}));
     notify(child, 'notifications/initialized', {});
-    const res = await callRpc(child, 'tools/call', { name: toolName, arguments: input }).catch(() => ({ isError: true, content: [] }));
+    const res = await callRpc(child, 'tools/call', { name: toolName, arguments: input }, DEFAULT_RPC_TIMEOUT).catch(() => ({ isError: true, content: [] }));
     if (res === undefined || res.isError) {
       const text = ((res && res.content) || []).filter((c) => c.type === 'text').map((c) => c.text).join('\n');
       return { error: text || 'MCP tool error' };
@@ -101,7 +171,7 @@ async function callTool(server, toolName, input) {
   } catch (e) {
     return { error: e.message };
   } finally {
-    if (child) child.kill();
+    killTree(child);
   }
 }
 
@@ -125,4 +195,4 @@ function getCachedTools() {
   return warm();
 }
 
-module.exports = { getTools, getCachedTools, clearCache, buildToolName, callTool, warm };
+module.exports = { getTools, getCachedTools, clearCache, buildToolName, callTool, warm, callRpc, killTree };

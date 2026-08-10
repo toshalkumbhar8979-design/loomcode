@@ -4,7 +4,7 @@ import { useTerminalDimensions } from "@opentui/solid";
 import { palette } from "../theme.ts";
 import { PermissionPopup } from "./PermissionPopup.tsx";
 import {
-  input, thinking, suggestions, autoIndex, autoKind,
+  input, cursor, thinking, suggestions, autoIndex, autoKind,
   providerName, modelName, inputMode, sessionUsage, lifetimeUsage, modelMeta,
   selectSuggestionAt, moveSuggestionIndex, pickSuggestionAt, windowFor,
 } from "../store.ts";
@@ -27,6 +27,23 @@ function rangeHint(start: number, total: number) {
   if (total <= POPUP_ROWS) return "";
   const end = Math.min(start + POPUP_ROWS, total);
   return "  (" + (start + 1) + "-" + end + "/" + total + ")";
+}
+
+// The chatbox grows with its content: header row (mode letter + "~N lines"
+// badge) + scrollable content rows, all inside the border. The opentui
+// "height" prop is the TOTAL rows including the border, so add 2 (borders) +
+// 1 (header) to the visible content rows, with sane min/max bounds.
+const MIN_INPUT_HEIGHT = 4;               // 2 border rows + header + 1 content row
+const MAX_INPUT_HEIGHT = 12;              // generous scroll area for long drafts
+
+function visualLines(text: string, boxWidth: number): number {
+  if (!text) return 1;
+  const w = Math.max(20, boxWidth - 10);
+  let n = 0;
+  for (const ln of text.split("\n")) {
+    n += Math.max(1, Math.ceil((ln.length + 1) / w));
+  }
+  return n;
 }
 
 export function InputBar() {
@@ -79,6 +96,10 @@ export function InputBar() {
     winStart = windowFor(autoIndex(), total, POPUP_ROWS, winStart);
     return { total, start: winStart, items: suggestions().slice(winStart, winStart + POPUP_ROWS) };
   });
+
+  // Chatbox height: 2 border rows + 1 header row + clamped content rows.
+  const inputLines = createMemo(() => visualLines(input(), dims().width || 100));
+  const inputHeight = createMemo(() => Math.max(MIN_INPUT_HEIGHT, Math.min(MAX_INPUT_HEIGHT, 3 + inputLines())));
 
   return (
     <box flexDirection="column" flexShrink={0}>
@@ -145,25 +166,54 @@ export function InputBar() {
         border borderStyle="rounded"
         borderColor={thinking() ? ui.warning : (MODE_COLORS[inputMode()] || ui.primary)}
         paddingX={1} paddingY={0}
-        flexDirection="row" alignItems="center" gap={1}
+        flexDirection="column"
         backgroundColor={ui.bgInput}
+        height={inputHeight()}
       >
-        <text fg={MODE_COLORS[inputMode()] || ui.primary} bold>{MODE_LABELS[inputMode()] || "B"}</text>
-        <text fg={ui.fgMuted}>{"| "}</text>
+        <box flexDirection="row" alignItems="center" gap={1} flexShrink={0}>
+          <text fg={MODE_COLORS[inputMode()] || ui.primary} bold>{MODE_LABELS[inputMode()] || "B"}</text>
+          <text fg={ui.fgMuted}>{"| "}</text>
+          <Show when={inputLines() > 1}>
+            <text fg={ui.fgMuted} dim flexGrow={1}>{"~" + inputLines() + " lines \u00B7 Shift+Enter newline"}</text>
+          </Show>
+          <Show when={thinking()}>
+            <text fg={ui.warning}>{"\u25C6"}</text>
+          </Show>
+        </box>
         <Show
           when={input().length > 0}
           fallback={
-            <text fg={ui.fgMuted} dim flexGrow={1}>
-              {(showCursor() ? "\u2588" : " ") + " Ask anything...  /commands  @file  !shell"}
-            </text>
+            <box flexGrow={1} flexDirection="column" justifyContent="center">
+              <text fg={ui.fgMuted} dim>
+                {(showCursor() ? "\u2588" : " ") + " Ask anything...  /commands  @file  !shell"}
+              </text>
+            </box>
           }
         >
-          <text fg={ui.fg} flexGrow={1}>
-            {input() + (showCursor() ? "\u2588" : " ")}
-          </text>
-        </Show>
-        <Show when={thinking()}>
-          <text fg={ui.warning}>{"\u25C6"}</text>
+          {(() => {
+            // Caret-aware render: the block sits where the caret is, over the
+            // character it covers (or after the last char when at the end).
+            const v = input();
+            const p = Math.max(0, Math.min(cursor(), v.length));
+            const before = v.slice(0, p);
+            const at = v[p] ?? "";
+            const after = v.slice(p + 1);
+            return (
+              <scrollbox
+                flexGrow={1}
+                stickyScroll
+                stickyStart="bottom"
+                scrollbarOptions={{ trackOptions: { style: { fg: ui.border } } }}
+                viewportOptions={{ flexGrow: 1 }}
+              >
+                <text fg={ui.fg} wrap>
+                  {before}
+                  <span fg={showCursor() ? ui.fg : ui.fgMuted}>{showCursor() ? "\u2588" : (at || " ")}</span>
+                  {after}
+                </text>
+              </scrollbox>
+            );
+          })()}
         </Show>
       </box>
 

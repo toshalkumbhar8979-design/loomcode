@@ -7,6 +7,7 @@ function skillHelp() {
     'Skill commands:',
     '  /skills                    List installed skills',
     '  /skills install <dir|git>  Install a skill (local folder or git URL)',
+    '  /skills install <git-url> --trust   Approve + install a remote skill (pinned to its commit)',
     '  /skills remove <name>      Uninstall a skill',
     '',
     'Skills live in ~/.loom/skills and are injected into the system prompt',
@@ -16,18 +17,58 @@ function skillHelp() {
 function listSkillsText() {
   const skills = listSkills();
   if (!skills.length) return 'No skills installed yet. Use /skills install <dir|git-url>.\n\n' + skillHelp();
+  const { loadConfig } = require('../config/settings');
+  const disabled = (loadConfig().skillDisabled || []);
   const lines = ['Installed skills (' + skills.length + '):', ''];
   for (const s of skills) {
-    lines.push('  ' + s.name.padEnd(28) + ' [' + s.source + ']  ' + s.description);
+    const status = disabled.includes(s.name) ? 'OFF' : 'ON';
+    lines.push('  [' + status + '] ' + s.name.padEnd(26) + ' [' + s.source + ']  ' + s.description);
   }
+  lines.push('', 'Toggle via /skills modal, or add the name to config.json skillDisabled[].');
   return lines.join('\n');
 }
 
+// A trust approval must be bound to the exact commit that was shown in the
+// block message — approving "the URL" again after the remote moved would
+// bless content the user never reviewed. Remember url → commit from the last
+// trustRequired response and require a matching --trust before installing.
+const pendingTrust = new Map();
+
 function installSkillCmd(args) {
-  const target = args[0];
-  if (!target) return 'Usage: /skills install <folder-path|git-url> [name]';
-  const res = require('../skills/skills-manager').installSkill(target, args[1]);
-  if (res.error) return 'Install failed: ' + res.error;
+  const rest = args.filter((a) => a !== '--trust' && a !== '-t');
+  const trust = rest.length !== args.length;
+  const target = rest[0];
+  const name = rest[1];
+  if (!target) return 'Usage: /skills install <folder-path|git-url> [name] [--trust]';
+  const res = require('../skills/skills-manager').installSkill(target, name, { trust: trust ? (pendingTrust.get(target) || true) : false });
+  if (res.error) {
+    if (res.trustRequired) {
+      pendingTrust.set(res.trustRequired.url, res.trustRequired.commit);
+      const lines = [
+        'Install blocked: ' + res.error + '.',
+        '',
+        'Remote skills run with full tool access, so the exact content must be',
+        'reviewed and approved once. Approval is pinned to the commit hash.',
+        '',
+        '  source:  ' + res.trustRequired.url,
+        '  commit:  ' + res.trustRequired.commit,
+      ];
+      if (res.trustRequired.previous) {
+        lines.push(
+          '',
+          '  WARNING: this content differs from the approved version:',
+          '    approved: ' + res.trustRequired.previous + ' (' + (res.trustRequired.approvedAt || '?') + ')',
+          '    now:      ' + res.trustRequired.commit
+        );
+      }
+      lines.push('', 'If you trust this source, approve this exact commit:');
+      lines.push('  /skills install ' + res.trustRequired.url + ' --trust');
+      return lines.join('\n');
+    }
+    pendingTrust.delete(target);
+    return 'Install failed: ' + res.error;
+  }
+  pendingTrust.delete(target);
   return 'Installed skill "' + res.name + '" to ' + res.dir;
 }
 
@@ -128,7 +169,7 @@ function editorCmd() {
   }
   try {
     if (process.platform === 'win32') {
-      execSync('start "" "' + loomMd + '"', { shell: true, stdio: 'ignore' });
+      execSync('start "" "' + loomMd + '"', { stdio: 'ignore' });
     } else if (process.platform === 'darwin') {
       execSync('open "' + loomMd + '"', { stdio: 'ignore' });
     } else {

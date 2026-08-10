@@ -7,7 +7,7 @@ import os from "os";
 import path from "path";
 
 export type Palette = {
-  bg: string; bgPanel: string; bgPanelAlt: string; bgInput: string; bgHover: string;
+  bg: string; bgMsg: string; bgPanel: string; bgPanelAlt: string; bgInput: string; bgHover: string;
   border: string; borderFocus: string;
   fg: string; fgDim: string; fgMuted: string;
   primary: string;   // brand accent
@@ -24,6 +24,7 @@ export type Theme = { id: string; label: string; desc: string; palette: Palette 
 const LOOM_DARK: Palette = {
   // Deep warm charcoal — terracotta accents
   bg: "#191817",
+  bgMsg: "#131211",
   bgPanel: "#211f1e",
   bgPanelAlt: "#2a2725",
   bgInput: "#25221f",
@@ -47,6 +48,7 @@ const LOOM_DARK: Palette = {
 const LIGHT: Palette = {
   // Paper light — warm parchment with terracotta
   bg: "#faf7f2",
+  bgMsg: "#efe9df",
   bgPanel: "#f3eee6",
   bgPanelAlt: "#eae3d8",
   bgInput: "#ffffff",
@@ -70,6 +72,7 @@ const LIGHT: Palette = {
 const OCEAN: Palette = {
   // Deep navy — cyan accents
   bg: "#0e1a26",
+  bgMsg: "#0a141d",
   bgPanel: "#132433",
   bgPanelAlt: "#182c3d",
   bgInput: "#16293a",
@@ -93,6 +96,7 @@ const OCEAN: Palette = {
 const FOREST: Palette = {
   // Dark evergreen — sage accents
   bg: "#0f1a12",
+  bgMsg: "#0b130d",
   bgPanel: "#152319",
   bgPanelAlt: "#1b2d20",
   bgInput: "#182a1e",
@@ -116,6 +120,7 @@ const FOREST: Palette = {
 const MIDNIGHT: Palette = {
   // Near-black violet — lavender accents
   bg: "#131019",
+  bgMsg: "#0f0c15",
   bgPanel: "#1a1625",
   bgPanelAlt: "#211c30",
   bgInput: "#1d1830",
@@ -139,6 +144,7 @@ const MIDNIGHT: Palette = {
 const MONO: Palette = {
   // Pure monochrome — greys only
   bg: "#111111",
+  bgMsg: "#0d0d0d",
   bgPanel: "#1a1a1a",
   bgPanelAlt: "#242424",
   bgInput: "#1c1c1c",

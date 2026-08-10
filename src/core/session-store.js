@@ -2,37 +2,84 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
+const SESSION_SCHEMA_VERSION = 2;
+
 const LOOM_DIR = path.join(os.homedir(), '.loom');
 const SESSIONS_DIR = path.join(LOOM_DIR, 'sessions');
 
+// Re-evaluated on every call so tests can isolate with LOOM_CONFIG_DIR.
+function sessionsDir() {
+  return path.join(process.env.LOOM_CONFIG_DIR || LOOM_DIR, 'sessions');
+}
+
 function ensureDir() {
-  if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+  const d = sessionsDir();
+  if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
 }
 
 function convId() {
   return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
 }
 
+// Coerce whatever came off disk (hand-edited, corrupt, older schema) into the
+// guaranteed current shape: { id, createdAt, schemaVersion, messages } with
+// every message having { role, content } while preserving any extra fields.
+function normalizeSession(data) {
+  if (!data || typeof data !== 'object') return null;
+  const raw = Array.isArray(data.messages) ? data.messages : [];
+  const messages = raw.map((m) => {
+    if (!m || typeof m !== 'object') return { role: 'user', content: '' };
+    const { role, content, ...rest } = m;
+    return { role: role || 'user', content: typeof content === 'undefined' ? '' : content, ...rest };
+  });
+  return {
+    id: typeof data.id === 'string' ? data.id : null,
+    createdAt: typeof data.createdAt === 'string' ? data.createdAt : null,
+    schemaVersion: typeof data.schemaVersion === 'number' ? data.schemaVersion : 1,
+    messages,
+  };
+}
+
+// Session IDs become file names — keep them strictly alphanumeric to rule out
+// path traversal via loadSession/deleteSession (e.g. "../../secrets").
+const ID_RX = /^[a-zA-Z0-9_-]{3,128}$/;
+function isValidSessionId(id) {
+  return typeof id === 'string' && ID_RX.test(id);
+}
+
 function saveSession(session) {
   ensureDir();
-  const id = session.conversationId || convId();
+  const id = isValidSessionId(session.conversationId) ? session.conversationId : convId();
+  const now = new Date().toISOString();
+  // Overwriting an existing session keeps its original createdAt (it is the
+  // same conversation); updatedAt always reflects this write.
+  let createdAt = now;
+  const existingFile = path.join(sessionsDir(), id + '.json');
+  if (fs.existsSync(existingFile)) {
+    try {
+      const prev = JSON.parse(fs.readFileSync(existingFile, 'utf8'));
+      if (prev && typeof prev.createdAt === 'string') createdAt = prev.createdAt;
+    } catch {}
+  }
   const data = {
     id,
-    createdAt: new Date().toISOString(),
+    schemaVersion: SESSION_SCHEMA_VERSION,
+    createdAt,
+    updatedAt: now,
     messages: session.messages || [],
     provider: session.config ? session.config.provider : null,
     model: session.config && session.config.model ? session.config.model[session.config.provider] : null,
   };
-  const f = path.join(SESSIONS_DIR, id + '.json');
+  const f = path.join(sessionsDir(), id + '.json');
   fs.writeFileSync(f, JSON.stringify(data, null, 2));
   return { id, file: f };
 }
 
 function listSessions() {
   ensureDir();
-  const files = fs.readdirSync(SESSIONS_DIR).filter((f) => f.endsWith('.json')).sort().reverse();
+  const files = fs.readdirSync(sessionsDir()).filter((f) => f.endsWith('.json')).sort().reverse();
   return files.map((f) => {
-    const p = path.join(SESSIONS_DIR, f);
+    const p = path.join(sessionsDir(), f);
     try {
       const data = JSON.parse(fs.readFileSync(p, 'utf8'));
       return {
@@ -49,14 +96,24 @@ function listSessions() {
 }
 
 function loadSession(id) {
-  const f = path.join(SESSIONS_DIR, id + '.json');
+  if (!isValidSessionId(id)) return null;
+  const f = path.join(sessionsDir(), id + '.json');
   if (!fs.existsSync(f)) return null;
-  const data = JSON.parse(fs.readFileSync(f, 'utf8'));
-  return data;
+  try {
+    const raw = JSON.parse(fs.readFileSync(f, 'utf8'));
+    const norm = normalizeSession(raw);
+    if (!norm) return null;
+    norm.id = norm.id || id;
+    norm.file = f;
+    return norm;
+  } catch {
+    return null;
+  }
 }
 
 function deleteSession(id) {
-  const f = path.join(SESSIONS_DIR, id + '.json');
+  if (!isValidSessionId(id)) return false;
+  const f = path.join(sessionsDir(), id + '.json');
   if (fs.existsSync(f)) {
     fs.unlinkSync(f);
     return true;
@@ -86,4 +143,14 @@ function exportChat(session, format) {
   return file;
 }
 
-module.exports = { saveSession, listSessions, loadSession, deleteSession, exportChat, SESSIONS_DIR };
+module.exports = {
+  saveSession,
+  listSessions,
+  loadSession,
+  deleteSession,
+  exportChat,
+  normalizeSession,
+  isValidSessionId,
+  SESSIONS_DIR,
+  SESSION_SCHEMA_VERSION,
+};

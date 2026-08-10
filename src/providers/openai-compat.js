@@ -1,4 +1,5 @@
-const OpenAI = require('openai');
+/** @type {typeof import('openai').default} */
+const OpenAI = /** @type {any} */ (require('openai'));
 const { getBaseUrl } = require('../config/settings');
 
 function formatMessages(messages, options) {
@@ -97,7 +98,7 @@ async function retryWithBackoff(fn, maxTries, envKeyHint) {
       lastErr = err;
       if (isAbortError(err)) throw err;
       const status = err.status || err.code;
-      if (status === 429 || (status !== 429 && status !== 503 && status !== 502)) throw lastErr;
+      if (status !== 429 && status !== 503 && status !== 502) throw lastErr;
       if (attempt > 0) {
         const delay = Math.min(1000 * Math.pow(3, attempt - 1), 30000);
         await new Promise((resolve) => setTimeout(resolve, delay));
@@ -116,8 +117,31 @@ function isAbortError(err) {
   return /aborted|cancel(led|ed)/i.test(String(err.message || ''));
 }
 
-function createOpenAICompatProvider({ getKey, providerId, envKeyHint }) {
+/**
+ * @typedef {Object} ProviderModel
+ * @property {string} id
+ * @property {string} name
+ * @property {string} provider
+ * @property {Array<string>=} tags
+ * @property {number} context
+ * @property {number} priceIn
+ * @property {number} priceOut
+ */
+
+/**
+ * @typedef {Object} Provider
+ * @property {(messages: Array<Object>, options: Object) => Promise<Object>} chat
+ * @property {(messages: Array<Object>, options: Object, onDelta?: (text: string) => void) => Promise<Object>} stream
+ * @property {Array<ProviderModel>} models
+ */
+
+/**
+ * @param {{ getKey: () => string|undefined, providerId: string, envKeyHint: string, clientFactory?: () => any }} config
+ * @returns {Provider}
+ */
+function createOpenAICompatProvider({ getKey, providerId, envKeyHint, clientFactory }) {
   function getClient() {
+    if (clientFactory) return clientFactory();
     const key = getKey();
     if (!key) throw new Error(`${envKeyHint || 'API'} key not set. Use /connect or set the ${envKeyHint || 'API'}_API_KEY env var.`);
     const baseURL = getBaseUrl(providerId) || getDefaultBaseUrl(providerId);
@@ -180,7 +204,7 @@ function createOpenAICompatProvider({ getKey, providerId, envKeyHint }) {
     }
   }
 
-  return { chat, stream, models: [] };
+  return { chat, stream, models: /** @type {Array<ProviderModel>} */ ([]) };
 }
 
 function getDefaultBaseUrl(providerId) {
@@ -196,4 +220,4 @@ function getDefaultBaseUrl(providerId) {
   return defaults[providerId] || undefined;
 }
 
-module.exports = { createOpenAICompatProvider, wrapErr };
+module.exports = { createOpenAICompatProvider, wrapErr, buildRequest, formatMessages, formatTools, parseToolCalls, normalize, retryWithBackoff };

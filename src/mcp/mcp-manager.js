@@ -4,12 +4,18 @@ const os = require('os');
 const { spawn } = require('child_process');
 
 const LOOM_DIR = path.join(os.homedir(), '.loom');
+
+// Re-evaluated on every call (like the other stores) so tests/CI can isolate
+// with LOOM_CONFIG_DIR; the exported MCP_FILE keeps the default for display.
+function mcpFile() {
+  return path.join(process.env.LOOM_CONFIG_DIR || LOOM_DIR, 'mcp.json');
+}
 const MCP_FILE = path.join(LOOM_DIR, 'mcp.json');
 
 function loadServers() {
-  if (!fs.existsSync(MCP_FILE)) return { servers: {}, seeded: false };
+  if (!fs.existsSync(mcpFile())) return { servers: {}, seeded: false };
   try {
-    const raw = fs.readFileSync(MCP_FILE, 'utf8');
+    const raw = fs.readFileSync(mcpFile(), 'utf8');
     const data = JSON.parse(raw);
     return { servers: data.servers || {}, seeded: data.seeded === true };
   } catch {
@@ -18,8 +24,9 @@ function loadServers() {
 }
 
 function saveServers(data) {
-  if (!fs.existsSync(LOOM_DIR)) fs.mkdirSync(LOOM_DIR, { recursive: true });
-  fs.writeFileSync(MCP_FILE, JSON.stringify(data, null, 2));
+  const dir = path.dirname(mcpFile());
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(mcpFile(), JSON.stringify(data, null, 2));
 }
 
 function listServers() {
@@ -38,6 +45,12 @@ function clearMcpCache() {
 
 function addServer(name, command, args, opts) {
   if (!name || !command) return { error: 'Usage: /mcp add <name> <command> [args...]' };
+  if (!/^[A-Za-z0-9_-]+$/.test(name)) {
+    return { error: 'Invalid server name "' + name + '": use only letters, digits, - and _' };
+  }
+  // buildToolName joins with '__' and callTool splits on the last one — a name
+  // containing '__' would make tool names unparseable.
+  if (name.indexOf('__') >= 0) return { error: 'Server name cannot contain "__"' };
   const data = loadServers();
   data.servers[name] = {
     name,
@@ -119,6 +132,9 @@ function stdioClient(cfg) {
   const child = spawn(cfg.command, cfg.args || [], {
     stdio: ['pipe', 'pipe', 'pipe'],
     env: Object.assign({}, process.env, cfg.env || {}),
+    // No console window for stdio MCP servers on Windows (avoids the popup
+    // nagging the user while the chat is running).
+    windowsHide: true,
   });
   return child;
 }

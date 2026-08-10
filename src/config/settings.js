@@ -6,6 +6,17 @@ const LOOM_DIR = path.join(os.homedir(), '.loom');
 const CONFIG_FILE = path.join(LOOM_DIR, 'config.json');
 const GLOBAL_LOOM_MD = path.join(LOOM_DIR, 'LOOM.md');
 
+// Re-evaluated on every call so tests/CI can point config elsewhere with
+// LOOM_CONFIG_DIR; the exported LOOM_DIR/CONFIG_FILE constants keep the
+// default for display purposes.
+function loomDir() {
+  return process.env.LOOM_CONFIG_DIR || LOOM_DIR;
+}
+
+function configFile() {
+  return path.join(loomDir(), 'config.json');
+}
+
 const DEFAULTS = {
   provider: 'anthropic',
   model: {
@@ -37,17 +48,19 @@ const DEFAULTS = {
 };
 
 function ensureLoomDir() {
-  if (!fs.existsSync(LOOM_DIR)) {
-    fs.mkdirSync(LOOM_DIR, { recursive: true });
+  const dir = loomDir();
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
   }
 }
 
 function loadConfig() {
   ensureLoomDir();
-  if (fs.existsSync(CONFIG_FILE)) {
-    try { fs.chmodSync(CONFIG_FILE, 0o600); } catch {}
+  const file = configFile();
+  if (fs.existsSync(file)) {
+    try { fs.chmodSync(file, 0o600); } catch {}
     try {
-      const raw = fs.readFileSync(CONFIG_FILE, 'utf8');
+      const raw = fs.readFileSync(file, 'utf8');
       return { ...DEFAULTS, ...JSON.parse(raw) };
     } catch {
       return { ...DEFAULTS };
@@ -58,8 +71,9 @@ function loadConfig() {
 
 function saveConfig(config) {
   ensureLoomDir();
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
-  try { fs.chmodSync(CONFIG_FILE, 0o600); } catch {}
+  const file = configFile();
+  fs.writeFileSync(file, JSON.stringify(config, null, 2));
+  try { fs.chmodSync(file, 0o600); } catch {}
 }
 
 function getApiKey(provider) {

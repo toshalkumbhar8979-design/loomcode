@@ -23,6 +23,18 @@ const COMPACT_KEEP_MESSAGES = 8;
 // Never compact conversations shorter than this.
 const COMPACT_MIN_MESSAGES = 6;
 
+/**
+ * @typedef {Object} SpeedStats
+ * @property {number} _turnStart
+ * @property {number} _firstTokenAt
+ * @property {number} _liveTokens
+ * @property {number|null} lastLatencyMs
+ * @property {number|null} lastTokensPerSec
+ * @property {number|null} lastDurationMs
+ * @property {number|null} lastTokens
+ * @property {string} lastModel
+ */
+
 // Aborts surface as DOMException AbortError (anthropic fetch), APIUserAbortError
 // (openai SDK), or wrapped messages containing "aborted". Never let an interrupt
 // leak into a retry or an error bubble.
@@ -197,6 +209,8 @@ ${this.loadSkills()}
 - You may only issue multiple tool calls if none of them depends on another's result.
 - Never guess a tool result — read it before your next call.
 - Never commit/push without explicit instruction. Never print API keys.
+- When a tool FAILS, do not retry the same call with the same arguments. After the first failure, change the approach: e.g. use read/grep to understand the state before trying an edit again, run a simpler variant of the command, or ask the user for the missing input (API key, path, permission). Three same-goal failures == stop and escalate: say what failed and suggest the fix instead of looping.
+- For long outputs (links, large files), stream whatever the tool gave you in one message — do not emit partial/truncated responses piecemeal.
 
 ## Mode
 You are in ${this.mode === 'build' ? 'BUILD MODE (full agent)' : this.mode === 'plan' ? 'PLAN MODE (read-only analysis)' : 'CHAT MODE (conversation only)'}.
@@ -389,7 +403,7 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
     const provider = this.provider.active && this.provider.providers[this.provider.active.name];
     if (provider) {
       try {
-        const model = this.config.model?.[this.provider.active.name];
+        const model = this.config.model?.[this.provider.active?.name];
         const resp = await provider.chat(
           head.concat([{
             role: 'user',
@@ -435,6 +449,7 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
     // instead of returning "(interrupted)" and losing what was already said.
     let streamed = '';
     // Per-turn speed telemetry: first-token latency and live tokens/sec.
+    /** @type {SpeedStats} */
     const speed = this.speedStats || (this.speedStats = {
       _turnStart: 0, _firstTokenAt: 0, _liveTokens: 0,
       lastLatencyMs: null, lastTokensPerSec: null, lastDurationMs: null, lastTokens: null, lastModel: '',
@@ -538,14 +553,18 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
       const outcomes = await Promise.all(toolCalls.map(async (tc) => {
         if (callbacks.onTool) callbacks.onTool(tc.name, tc.input);
 
-        if (tc.name === 'bash' || tc.name === 'edit' || tc.name === 'write') {
+        // mcp add spawns arbitrary stdio servers with optional env secrets —
+        // gate it like bash (only the "add" action; list/remove/enable/disable
+        // only touch the local config).
+        const isMcpAdd = tc.name === 'mcp' && tc.input && tc.input.action === 'add';
+        if (tc.name === 'bash' || tc.name === 'edit' || tc.name === 'write' || isMcpAdd) {
           const target = (tc.input && tc.input.command) || (tc.input && tc.input.filePath) || '';
           let permission = await this.permissions.check(target);
           // Shell commands always ask unless the user saved a rule for them:
           // "Allow"/"Always allow" in the popup records a rule and skips the
           // prompt on identical commands afterwards.
           const savedRule = this.permissions.checkRule(target) || this.permissions.checkRule('*');
-          if (tc.name === 'bash' && !savedRule && permission === 'allow') permission = 'ask';
+          if ((tc.name === 'bash' || isMcpAdd) && !savedRule && permission === 'allow') permission = 'ask';
           if (permission === 'deny' || permission === 'never') {
             return { tc, outcome: { error: 'Permission denied by user.' } };
           }
@@ -565,7 +584,11 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
           }
         }
 
-        const outcome = await executeTool(tc.name, tc.input, this.mode);
+        // The permission gate above is the interactive check; mark the command
+        // as approved so the tool-layer safety filter doesn't double-block
+        // commands the user explicitly allowed.
+        const input = tc.name === 'bash' || isMcpAdd ? { ...tc.input, _approved: true } : tc.input;
+        const outcome = await executeTool(tc.name, input, this.mode);
         return { tc, outcome };
       }));
 
@@ -616,21 +639,26 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
       return { type: 'error', content: 'No active provider. Run /connect.' };
     }
 
-    const model = this.config.model?.[this.provider.active.name];
+    const model = this.config.model?.[this.provider.active?.name];
 
     // Spending governor: once the month's cost reaches the cap, paid turns are
-    // hard-blocked. Free models stay allowed — /budget free is the escape hatch.
-    const { budgetStatus, formatUsd } = require('./usage');
+    // hard-blocked. Free models stay allowed — /budget free is the escape
+    // hatch. An explicit one-shot confirmation (/budget override) lets exactly
+    // one paid turn through before blocking again.
+    const { budgetStatus, consumeOverride, formatUsd } = require('./usage');
     const spend = budgetStatus();
     if (spend.over) {
       const { getModelMeta } = require('../providers/index.js');
       const meta = getModelMeta(this.provider.active?.name, model);
       const isFree = !meta || ((meta.priceIn || 0) === 0 && (meta.priceOut || 0) === 0);
-      if (!isFree) {
+      if (!isFree && !spend.overrideUsed) {
         return {
           type: 'error',
-          content: `Monthly budget reached — ${formatUsd(spend.monthCostUsd)} of ${formatUsd(spend.budgetUsd)} spent. Run /usage, switch /budget free (all-free routing), or raise the cap with /budget <dollars>.`,
+          content: `Monthly budget reached — ${formatUsd(spend.monthCostUsd)} of ${formatUsd(spend.budgetUsd)} spent. Run /usage, switch /budget free (all-free routing), raise the cap with /budget <dollars>, or confirm exactly one paid turn with /budget override.`,
         };
+      }
+      if (!isFree && spend.overrideUsed) {
+        consumeOverride();
       }
     }
 
@@ -693,6 +721,7 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
   // Live + last-turn speed snapshot for the sidebar (tokens/sec, first-token
   // latency). nulls until the first streamed delta.
   getSpeed() {
+    /** @type {SpeedStats} */
     const s = this.speedStats || (this.speedStats = {
       _turnStart: 0, _firstTokenAt: 0, _liveTokens: 0,
       lastLatencyMs: null, lastTokensPerSec: null, lastDurationMs: null, lastTokens: null, lastModel: '',

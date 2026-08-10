@@ -15,6 +15,21 @@ function formatContentText(text) {
     : [{ type: 'text', text: typeof text === 'string' ? text : JSON.stringify(text) }];
 }
 
+/**
+ * @typedef {Object} AnthropicBody
+ * @property {string} model
+ * @property {number} max_tokens
+ * @property {Array<Object>} messages
+ * @property {string=} system
+ * @property {number=} temperature
+ * @property {Array<Object>=} tools
+ */
+
+/**
+ * @param {Array<Object>} messages
+ * @param {Object} options
+ * @returns {AnthropicBody}
+ */
 function buildBody(messages, options) {
   const systemMsgs = [];
   const out = [];
@@ -46,6 +61,7 @@ function buildBody(messages, options) {
     }
   }
 
+  /** @type {AnthropicBody} */
   const body = {
     model: options.model,
     max_tokens: options.maxTokens || 8192,
@@ -92,6 +108,7 @@ async function post(body, options) {
     signal: options.signal,
   });
   if (!resp.ok) {
+    /** @type {any} */
     const err = await resp.json().catch(() => ({}));
     const detail = err.error?.message || resp.statusText;
     if (resp.status === 401) throw new Error("Anthropic 401 Unauthorized: the API key is invalid or expired. Run /connect anthropic and paste a new key.");
@@ -104,14 +121,16 @@ async function post(body, options) {
 async function chat(messages, options = {}) {
   const body = buildBody(messages, options);
   const resp = await post(body, options);
+  /** @type {any} */
   const data = await resp.json();
-  return { ...normalize(data.content || []), usage: data.usage };
+  return { ...normalizeBlocks(data.content || []), usage: data.usage };
 }
 
 async function stream(messages, options = {}, onDelta) {
   const body = { ...buildBody(messages, options), stream: true };
   const resp = await post(body, options);
-  const decoder = new TextDecoder('utf8');
+  if (!resp.body) throw new Error('Anthropic stream: empty response body');
+  const decoder = new TextDecoder('utf-8');
   let buf = '';
   let content = '';
   let usage = null;
@@ -159,4 +178,4 @@ const models = [
   { id: 'claude-3-5-haiku-20241022', name: 'Claude 3.5 Haiku', provider: 'anthropic', context: 200000, priceIn: 0.8, priceOut: 4 },
 ];
 
-module.exports = { chat, stream, models };
+module.exports = { chat, stream, models, buildBody, normalizeBlocks };

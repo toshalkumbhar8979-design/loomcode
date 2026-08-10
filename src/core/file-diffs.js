@@ -8,6 +8,21 @@ const { diffLines } = require('diff');
 
 const cwd = process.cwd();
 
+// Binary content (png/pdf/zip/exe…) read as utf8 is meaningless garbage, and
+// diffing it fills the panel with noise. Detect it up front and show a short
+// "(binary file)" line instead of the hunks.
+function looksBinary(text) {
+  if (!text) return false;
+  const sample = text.slice(0, 8192);
+  if (sample.indexOf('\0') >= 0) return true;
+  let bad = 0;
+  for (let i = 0; i < sample.length; i++) {
+    const c = sample.charCodeAt(i);
+    if (c < 8) bad++;
+  }
+  return bad / Math.max(1, sample.length) > 0.02;
+}
+
 // Mirrors the TUI file walker's ignore list (node_modules, .git, dist, …).
 const IGNORE_RX = /(^|[\/])(node_modules|\.git|dist|build|\.next|\.venv|venv|coverage|__pycache__|\.loom|\.idea|\.vscode)([\/]|$)/i;
 
@@ -153,16 +168,17 @@ function parseGitDiff(text) {
     if (fm) {
       if (cur && (cur.added || cur.removed)) out.push(cur);
       const p = fm[2].replace(/^"|"$/g, '');
-      cur = { path: p, abs: path.resolve(cwd, p), added: 0, removed: 0, lines: [] };
+      cur = { path: p, abs: path.resolve(cwd, p), added: 0, removed: 0, lines: /** @type {Array<{kind: string, text: string}>} */ ([]) };
       continue;
     }
     if (!cur) continue;
     if (line.startsWith('@@')) continue;
     if (line.startsWith('+++') || line.startsWith('---')) continue;
     if (line.startsWith('\\')) continue;
-    if (line.startsWith('+')) { cur.added++; cur.lines.push({ kind: 'add', text: line.slice(1) }); }
-    else if (line.startsWith('-')) { cur.removed++; cur.lines.push({ kind: 'del', text: line.slice(1) }); }
-    else cur.lines.push({ kind: 'ctx', text: line.slice(1) });
+    if (/^Binary files/.test(line)) { cur.added++; cur.removed++; cur.lines.push({ kind: 'ctx', text: '(binary file changed)' }); continue; }
+    if (line.startsWith('+')) { if (looksBinary(line.slice(1))) continue; cur.added++; cur.lines.push({ kind: 'add', text: line.slice(1) }); }
+    else if (line.startsWith('-')) { if (looksBinary(line.slice(1))) continue; cur.removed++; cur.lines.push({ kind: 'del', text: line.slice(1) }); }
+    else { if (looksBinary(line.slice(1))) continue; cur.lines.push({ kind: 'ctx', text: line.slice(1) }); }
   }
   if (cur && (cur.added || cur.removed)) out.push(cur);
   for (const d of out) {
@@ -174,6 +190,24 @@ function parseGitDiff(text) {
 
 // Build a compact visual diff: counts + colored hunk lines.
 export function buildFileDiff(abs, before, after) {
+  if (looksBinary(after) || looksBinary(before)) {
+    // Unchanged binary file (snapshot taken before a tool that didn't touch
+    // it) → empty diff; don't show a bogus "0 bytes changed" entry.
+    if (before !== null && after !== null && before === after) {
+      return { path: relPath(abs), abs, added: 0, removed: 0, lines: [], isNew: false };
+    }
+    const beforeBytes = before ? Buffer.byteLength(before, 'utf8') : 0;
+    const afterBytes = after ? Buffer.byteLength(after, 'utf8') : 0;
+    const bytesChanged = Math.max(0, Math.abs(afterBytes - beforeBytes));
+    return {
+      path: relPath(abs),
+      abs,
+      added: 1,
+      removed: 0,
+      lines: [{ kind: 'ctx', text: '(binary file, ' + bytesChanged + ' bytes changed)' }],
+      isNew: before === null && after !== null,
+    };
+  }
   const parts = diffLines(before || '', after || '');
   let added = 0;
   let removed = 0;

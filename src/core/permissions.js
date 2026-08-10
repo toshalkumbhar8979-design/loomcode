@@ -95,4 +95,15 @@ class PermissionManager {
   }
 }
 
-module.exports = { PermissionManager, ADMIN_PATTERNS, DANGER_PATTERNS };
+// Defense-in-depth label used by the tool layer: same heuristics as the
+// permission manager, so tools can refuse destructive commands even when the
+// session gate is bypassed (direct calls). Returns the label or null.
+function commandRiskLabel(cmd) {
+  const lower = (cmd || '').toLowerCase();
+  for (const p of ADMIN_PATTERNS.concat(DANGER_PATTERNS)) {
+    if (p.re.test(lower)) return p.label;
+  }
+  return null;
+}
+
+module.exports = { PermissionManager, ADMIN_PATTERNS, DANGER_PATTERNS, commandRiskLabel };
