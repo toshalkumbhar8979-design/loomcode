@@ -1,7 +1,7 @@
 # LOOM.md
 
 ## Project Overview
-Loom Code is an AI-powered coding agent for the terminal — a Claude Code / OpenCode clone with multi-provider support (Anthropic, OpenAI, NVIDIA, Google, OpenRouter, Local/Ollama) and a redesigned OpenTUI (SolidJS) terminal interface.
+Loom Code is an AI-powered coding agent for the terminal — multi-provider support (Anthropic, OpenAI, NVIDIA, Google, OpenRouter, Local/Ollama) and a redesigned OpenTUI (SolidJS) terminal interface.
 
 ## Build / Run Commands
 - `npm install` — install node dependencies (basic REPL)

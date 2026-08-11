@@ -229,7 +229,7 @@ class LoomCLI {
     if (!fs.existsSync(target)) fs.writeFileSync(target, MEMORY_TEMPLATE);
     try {
       const { execSync } = require('child_process');
-      if (process.platform === 'win32') execSync('start "" "' + target + '"', { stdio: 'ignore' });
+      if (process.platform === 'win32') execSync('start "" "' + target + '"', { stdio: 'ignore', windowsHide: true });
       else if (process.platform === 'darwin') execSync('open "' + target + '"', { stdio: 'ignore' });
       else execSync('xdg-open "' + target + '"', { stdio: 'ignore' });
       console.log(`Opened ${target} in your default editor.`);

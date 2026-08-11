@@ -22,6 +22,9 @@ export const [thinkStart, setThinkStart] = createSignal<number | null>(null);
 // expanded. Ctrl+E toggles the most recent collapsed one; clicking a bubble
 // also sets this. Null = everything collapsed.
 export const [userExpandedIdx, setUserExpandedIdx] = createSignal<number | null>(null);
+// Index (into messages()) of the assistant message whose "+Thought" panel is
+// expanded. Clicking a thought label toggles it; null = all collapsed.
+export const [thoughtIdx, setThoughtIdx] = createSignal<number | null>(null);
 
 // ─── Prompt history (Up/Down recall of earlier prompts) ───
 export const [promptHistory, setPromptHistory] = createSignal<string[]>([]);
@@ -298,7 +301,10 @@ export function patchMessageAt(idx: number, patch: any) {
   setMessages(l => l.map((m, i) => (i === idx ? { ...m, ...patch } : m)));
 }
 
-const TODO_RX = /^\s*\[([x+~ \-])\]\s+(.+)/i;
+// Matches bare markers ("[x] task") AND markdown checklist lines
+// ("- [x] task", "* [ ] task", "1. [~] task") so the sidebar mirrors todo
+// lists the model writes in its reply even without the todowrite tool.
+const TODO_RX = /^\s*(?:[-*+]\s+|\d+\.\s+)?\[([x+~ \-])\]\s+(.+)/i;
 export function recomputeTodos() {
   // Real todo state from the session (todowrite tool persists there) wins.
   const sess = getSession();
@@ -368,6 +374,36 @@ export function fuzzyFiles(query: string): string[] {
 
 export function invalidateFilesCache() { filesCache = null; }
 
+// Reactive re-calc engine: any of these signal bumps mean the visible slice
+// of project files could be stale. Bump after writes/create/rm calls.
+const [filesVersion, setFilesVersion] = createSignal(0);
+export function bumpFilesVersion() { setFilesVersion(v => v + 1); invalidateFilesCache(); }
+
+// Recompute the sidebar's file list when a known mutator lands. Called by the
+// tool-execution layer after write/edit/bash so the Files tab is always fresh.
+export function refreshFilesIfNeeded(src?: string) {
+  if (src === "write" || src === "edit" || src === "bash" || src === "mcp") bumpFilesVersion();
+}
+
+// Live agent todos: Session.setTodos → core event "todos:changed" → here.
+// This _replaces_ any markdown-scan fallback so the sidebar mirrors the
+// model's real todowrite output without waiting for a full assistant re-render.
+export function wireTodoEvents() {
+  const ev = require("../core/events.js");
+  ev.on("todos:changed", (todos: any[]) => {
+    const sess = getSession();
+    const real = Array.isArray(todos) && todos.length ? todos : sess.todos;
+    setTodos(
+      (Array.isArray(real) ? real : []).map((t: any) => ({
+        done: t.status === "completed",
+        inProgress: t.status === "in_progress",
+        cancelled: t.status === "cancelled",
+        text: String(t.content || ""),
+      }))
+    );
+  });
+}
+
 // ─── Pet events & animation ─────────────────────────────────────
 export type PetMood = "idle" | "thinking" | "working" | "success" | "error" | "celebrating" | "waving" | "sleep";
 export type PetBark = { mood?: PetMood; phrase?: string; until?: number };
@@ -391,6 +427,7 @@ export interface SlashCmd { cmd: string; desc: string; args?: string; }
 
 export const SLASH_LIST: SlashCmd[] = [
   { cmd: "help", desc: "Show help dialog" },
+  { cmd: "agents", desc: "List agents — primaries + subagents (@mention or task tool)" },
   { cmd: "build", desc: "Build mode — full agent tools (Tab cycles)" },
   { cmd: "plan", desc: "Plan mode — read-only analysis, no file changes" },
   { cmd: "chat", desc: "Chat mode — conversation only, no tools" },
@@ -424,6 +461,7 @@ export const SLASH_LIST: SlashCmd[] = [
   { cmd: "doctor", desc: "Run diagnostics" },
   { cmd: "skills", desc: "Manage skills", args: "install <dir|git> | remove <name>" },
   { cmd: "mcp", desc: "Manage MCP servers", args: "add <name> <cmd> | remove | toggle" },
+  { cmd: "connectors", desc: "Manage connectors (hosting & cloud services)", args: "add <name> <cmd> | remove | toggle" },
   { cmd: "permissions", desc: "Show saved permission rules", args: "| reset" },
   { cmd: "debug", desc: "Show debug info" },
   { cmd: "fork", desc: "Fork conversation" },

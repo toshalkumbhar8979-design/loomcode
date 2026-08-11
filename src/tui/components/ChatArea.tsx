@@ -1,7 +1,10 @@
 // ChatArea — message list with proper role styling + tool log + think time.
 import { createSignal, onMount, onCleanup, Show } from "solid-js";
 import { palette } from "../theme.ts";
-import { showThinking, userExpandedIdx, setUserExpandedIdx } from "../store.ts";
+import {
+  showThinking, userExpandedIdx, setUserExpandedIdx, sidebarVisible,
+  thoughtIdx, setThoughtIdx,
+} from "../store.ts";
 import { formatDiffCount } from "../../core/file-diffs.js";
 import { MdText } from "./MdText.tsx";
 import { formatToolCall } from "../toolname.ts";
@@ -12,16 +15,18 @@ function uname() { return os.userInfo().username || "you"; }
 function fmtMs(ms) { if (!ms) return ""; return ms < 1000 ? ms + "ms" : (ms / 1000).toFixed(1) + "s"; }
 
 // Rotating square-of-dots thinking animation — small, quiet, distracting-free.
+// Lives INSIDE the running message's header label, opencode-style: the label
+// reads "Loom is Thinking…" + spinner, and clicking it toggles the thought.
 const THINK_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-function ThinkingSpark() {
+function ThinkingLabel() {
   const [tick, setTick] = createSignal(0);
   let t: any;
   onMount(() => { t = setInterval(() => setTick(i => i + 1), 120); });
   onCleanup(() => t && clearInterval(t));
   return (
-    <text fg={ui.thinking} dim>
-      {"◆ " + THINK_FRAMES[tick() % THINK_FRAMES.length] + " Loom is thinking…  (esc to interrupt)"}
-    </text>
+    <span>
+      {"◆ " + THINK_FRAMES[tick() % THINK_FRAMES.length] + " Loom is Thinking…  (esc to interrupt)"}
+    </span>
   );
 }
 
@@ -82,34 +87,59 @@ function UserBubble(props) {
   );
 }
 
-// Right-side file-change panel for the split view: while the model edits
-// files, chat stays on the left and this panel shows which files were edited,
-// + counts, and the colored +/- hunks.
-function DiffPanel(props) {
-  const diffs = props.diffs || [];
+// Inline file-change patch for the chat area: when the model edits an existing
+// file, the unified +/- hunks render inside the assistant bubble (plain blocks,
+// no split view). New files show no diff — there is nothing to change yet.
+function PatchBlock(props) {
+  const diffs = (props.diffs || []).filter((d: any) => !d.isNew);
   if (!diffs.length) return null;
+
+  function colWidth() {
+    const term = Math.max(40, (process.stdout?.columns || 100) | 0);
+    const sidebarW = sidebarVisible() ? 38 : 0;
+    return Math.max(20, term - sidebarW - 8);
+  }
+  const W = () => colWidth();
+  // Long lines truncate with an ellipsis instead of spilling past the width.
+  const clip = (t: string) => (t.length > W() ? t.slice(0, W() - 1) + "…" : t);
+  const prefix = (k: string) => (k === "del" ? "-" : k === "add" ? "+" : " ");
+
   return (
     <box flexDirection="column" marginTop={1}>
-      <box flexDirection="column" borderStyle="single" borderColor={ui.border}
-        backgroundColor={ui.bgPanel} paddingX={1} paddingY={1}>
-        {diffs.map((d, i) => (
-          <box key={"d-" + i} flexDirection="column" marginBottom={i < diffs.length - 1 ? 1 : 0}>
-            <box flexDirection="row" justifyContent="space-between">
-              <text fg={ui.accent} bold wrap>{"✎ " + d.path}</text>
-              <text fg={d.added ? ui.success : ui.fgMuted} dim>{"  " + formatDiffCount(d)}</text>
-            </box>
-            {d.lines.map((ln, j) => {
-              if (ln.text === "…") return <text key={j} fg={ui.fgMuted} dim>{"  …"}</text>;
-              const lines = String(ln.text).replace(/\n$/, "").split("\n");
-              return lines.map((t, k) => (
-                <text key={j + "-" + k} fg={ln.kind === "add" ? ui.success : ln.kind === "del" ? ui.error : ui.fgMuted} dim={ln.kind === "ctx"}>
-                  {ln.kind === "add" ? "+ " : ln.kind === "del" ? "- " : "  "}{t.slice(0, 72)}
-                </text>
-              ));
-            })}
+      {diffs.map((d, i) => (
+        <box key={"d-" + i} flexDirection="column" backgroundColor={ui.bgPanel} paddingX={1} paddingY={0} marginBottom={i < diffs.length - 1 ? 1 : 0}>
+          <box flexDirection="row" justifyContent="space-between">
+            <text fg={ui.accent} bold wrap>{"✎ " + d.path}</text>
+            <text fg={d.added ? ui.success : ui.fgMuted} dim>{"  " + formatDiffCount(d)}</text>
           </box>
-        ))}
-      </box>
+          {(d.lines || []).map((ln, ri) => {
+            const text = clip(String(ln.text || "").replace(/\n$/, ""));
+            const fg = ln.kind === "del" ? ui.error : ln.kind === "add" ? ui.success : ui.fgMuted;
+            return (
+              <text key={"l-" + ri} fg={fg} dim={ln.kind === "ctx"} wrap>
+                {prefix(ln.kind) + text}
+              </text>
+            );
+          })}
+        </box>
+      ))}
+    </box>
+  );
+}
+
+// Inline task patch: only file edits/writes and todos belong in the patch
+// blocks. The thought (reasoning) is NOT a patch — it renders as markdown
+// right under the "Loom is Thinking…" header label.
+function TodoBlock(props) {
+  const todos = props.todos || [];
+  if (!todos.length) return null;
+  return (
+    <box flexDirection="column" marginTop={1} backgroundColor={ui.bgPanel} paddingX={1} paddingY={0}>
+      {todos.map((t, i) => (
+        <text key={"t-" + i} fg={t.done ? ui.success : t.cancelled ? ui.error : t.inProgress ? ui.warning : ui.fgMuted} wrap>
+          {(t.done ? "[x]" : t.cancelled ? "[-]" : t.inProgress ? "[~]" : "[ ]") + " " + t.text}
+        </text>
+      ))}
     </box>
   );
 }
@@ -138,52 +168,106 @@ function MsgBubble(props) {
     );
   }
 
-  // Assistant
+  // Assistant. Layout, opencode-style:
+  //   1. Header row (no box) — the ONLY clickable thought toggle:
+  //      running+collapsed → "◆ ⠋ Loom is Thinking…  (esc to interrupt)"
+  //      clicked           → "+Thought", reasoning shows below in markdown
+  //      clicked again     → back to "Loom is Thinking…", reasoning hidden
+  //      task done         → "+Thought · 4.2s" (click toggles the thought)
+  //   2. Thought (no box) — the reasoning, rendered as markdown, OUTSIDE the
+  //      response bubble.
+  //   3. Response bubble (bgMsg) — the markdown answer, colorful, distinct
+  //      from the plain user prompt.
+  //   4. Patch region (bgPanel blocks) — ONLY task work: todos + file edits.
+  //      Thought never goes in here.
   const isErr = m.isError;
   const isThink = m.thinking;
   const isStop = m.interrupted;
   const acc = isErr ? ui.error : (isThink ? ui.thinking : isStop ? ui.warning : ui.secondary);
-  const label = isErr ? "✕ Error" : isThink ? "◇ Thinking…" : isStop ? "‖ Interrupted" : "◇ Loom";
+  const agentTag = m.agentLabel ? "@" + m.agentLabel : null;
   const diffs = m.fileDiffs || [];
-  // Diff/coding output renders inline below the assistant text — full width.
+  const thoughtOpen = () => thoughtIdx() === props.idx;
+  const toggleThought = () => setThoughtIdx(thoughtOpen() ? null : props.idx);
+  const hasThought = !!(m.thinkingContent || m.thinking || m.thinkTime);
+  const thoughtLabel = () => {
+    if (isErr) return "✕ Error";
+    if (!hasThought) return "◇ Loom" + (agentTag ? " · " + agentTag : "");
+    if (thoughtOpen()) return "+Thought" + (m.thinkTime ? " · " + fmtMs(m.thinkTime) : "");
+    if (isThink) return <ThinkingLabel />;
+    return "+Thought · " + fmtMs(m.thinkTime || 0);
+  };
+  const plainLabel = () => (isErr ? "✕ Error" : isThink ? "◇ Thinking…" : isStop ? "‖ Interrupted" : "◇ Loom" + (agentTag ? " · " + agentTag : ""));
+  const thoughtFallback = () => {
+    const t = String(m.thinkingContent || "").trim();
+    if (t) return null;
+    // No reasoning stream (plain models) — show what the model was doing.
+    const log = String(m.toolLog || "").split("\n").filter(Boolean).slice(-8);
+    return log.length ? log.join("\n") : "(no thought content streamed for this model)";
+  };
   return (
-    <box flexDirection="row" marginBottom={1}>
-      <box flexDirection="column" marginRight={1}>
-        <text fg={acc}>{"│"}</text>
-        <text fg={acc}>{"│"}</text>
-        <text fg={acc}>{"│"}</text>
+    <box flexDirection="column" marginBottom={1} paddingRight={1}>
+      <box flexDirection="row" justifyContent="space-between" paddingX={1}>
+        <Show when={showThinking()}>
+          <text
+            fg={acc}
+            bold
+            onMouseUp={hasThought ? () => toggleThought() : undefined}
+            onKeyDown={hasThought ? (e: any) => { if (e.name === "return" || e.name === "space") toggleThought(); } : undefined}
+          >
+            {thoughtLabel()}
+          </text>
+        </Show>
+        <Show when={!showThinking()}>
+          <text fg={acc} bold>{plainLabel()}</text>
+        </Show>
       </box>
-      <box flexDirection={"column"} flexGrow={1} paddingRight={1}>
-        <box flexDirection="column" backgroundColor={ui.bgMsg} paddingY={1}>
-          <box flexDirection="row" justifyContent="space-between" paddingX={1}>
-            <text fg={acc} bold>{label}</text>
-            {showThinking() && m.thinkTime ? (
-              <text fg={ui.thinking} dim>{"⚡ " + fmtMs(m.thinkTime)}</text>
-            ) : null}
-          </box>
-          {m.toolCalls?.length ? (
-            <text fg={ui.accent}>{m.toolCalls.map((tc) => formatToolCall(tc.name, tc.input)).join(", ")}</text>
-          ) : null}
-            <box paddingX={1}>
-              <Show
-                when={!isErr && m.content}
-                fallback={
-                  <text fg={isErr ? ui.error : ui.fg} wrap>
-                    {(m.content || (isThink ? "…" : "")).slice(0, 30000)}
-                  </text>
-                }
-              >
-                <MdText md={String(m.content || "").slice(0, 30000)} />
-              </Show>
-            </box>
-          {m.toolLog ? (
-            <box paddingX={1} marginTop={0}>
-              <text fg={ui.accent} dim wrap>{String(m.toolLog).split("\n").slice(-5).join("\n")}</text>
-            </box>
-          ) : null}
-          {diffs.length >= 1 ? <DiffPanel diffs={diffs} /> : null}
+      <Show when={thoughtOpen()}>
+        <box paddingX={2} paddingY={0}>
+          <Show when={thoughtFallback()}>
+            <text fg={ui.thinking} dim wrap>{thoughtFallback()}</text>
+          </Show>
+          <Show when={!thoughtFallback()}>
+            <MdText md={String(m.thinkingContent || "").slice(0, 20000)} />
+          </Show>
         </box>
+      </Show>
+      <box flexDirection="column" backgroundColor={ui.bgMsg} paddingY={1} paddingX={1}>
+        {m.toolCalls?.length ? (
+          <text fg={ui.accent}>{m.toolCalls.map((tc) => formatToolCall(tc.name, tc.input)).join(", ")}</text>
+        ) : null}
+        <Show
+          when={!isErr && m.content}
+          fallback={
+            <text fg={isErr ? ui.error : ui.fg} wrap>
+              {(m.content || (isThink ? "…" : "")).slice(0, 30000)}
+            </text>
+          }
+        >
+          <MdText md={String(m.content || "").slice(0, 30000)} />
+        </Show>
+        {m.toolLog ? (
+          <box marginTop={0}>
+            <text fg={ui.accent} dim wrap>{String(m.toolLog).split("\n").slice(-5).join("\n")}</text>
+          </box>
+        ) : null}
       </box>
+      <TodoBlock todos={m.todos} />
+      {m.subagent ? (
+        <box flexDirection="column" marginTop={1} borderStyle="rounded" borderColor={ui.border}
+          paddingX={1} paddingY={0} backgroundColor={ui.bgPanelAlt}>
+          <box flexDirection="row">
+            <text fg={ui.accent} bold>{"@" + m.subagent.agent}</text>
+            <text fg={ui.fgMuted} dim>
+              {"  " + (m.subagent.done
+                ? "finished \u00B7 " + (m.subagent.status || "")
+                : m.subagent.status === "interrupted" ? "interrupted" : "working\u2026")}
+            </text>
+          </box>
+          {m.subagent.log ? <text fg={ui.fgMuted} dim>{"\u26A1 " + m.subagent.log}</text> : null}
+          <text fg={ui.fg} wrap>{m.subagent.text}</text>
+        </box>
+      ) : null}
+      {diffs.length >= 1 ? <PatchBlock diffs={diffs} /> : null}
     </box>
   );
 }
@@ -205,11 +289,6 @@ export function ChatArea(props: { messages?: () => any[]; thinking?: boolean }) 
         {visible().map((m, i) => (
           <MsgBubble key={"m-" + i} m={m} idx={baseIdx() + i} />
         ))}
-        {props.thinking && (
-          <box paddingX={3} paddingY={1}>
-            <ThinkingSpark />
-          </box>
-        )}
       </scrollbox>
     </box>
   );

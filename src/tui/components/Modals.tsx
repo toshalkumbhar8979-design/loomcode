@@ -10,7 +10,7 @@ import {
   showThinking, setShowThinking, persistUi, openPetsSync, setOpenPetsSync,
 } from "../store.ts";
 import { loadConfig, saveConfig, getBaseUrl, setBaseUrl } from "../../config/settings.js";
-import { MCP_PRESETS, presetSpawn } from "../mcp-presets.ts";
+import { MCP_PRESETS, CONNECTOR_PRESETS } from "../mcp-presets.ts";
 
 const ui = palette("loom");
 
@@ -203,6 +203,10 @@ export function SelectModal(props: {
   options: { label: string; value: any; sub?: string; provider?: string; header?: string; isHeader?: boolean; tags?: string[]; recent?: boolean }[];
   onPick: (value: any, option: any) => void;
   searchable?: boolean;
+  onCancel?: () => void;
+  // Live-preview: fire on selection change so theme pickers can repaint the
+  // app while the user scrolls without closing the modal.
+  onPreview?: (value: any) => void;
 }) {
   // Long labels/subs must never wrap: the modal is maxWidth 72 (62 usable cells
   // after padding), so truncate each piece to its budget before rendering.
@@ -220,6 +224,15 @@ export function SelectModal(props: {
       return query.split(/\s+/).every(part => hay.includes(part));
     });
   };
+
+  // Live-hook: fire onPreview AFTER the index has settled (Solid may batch
+  // the signal write — schedule.fire settles next microtask).
+  function firePreview() {
+    if (!props.onPreview) return;
+    setTimeout(() => {
+      try { props.onPreview!(filtered()[index()]?.value); } catch {}
+    }, 0);
+  }
 
   // The selection must never land on a section header: it would render with
   // no highlight and Enter would do nothing. Always skip to the next row.
@@ -239,9 +252,9 @@ export function SelectModal(props: {
   setIndex(firstSelectable());
 
   useKeyboard(key => {
-    if (key.name === "escape") { closeModal(); return; }
-    if (key.name === "up") { setIndex(i => stepSelectable(i, -1)); return; }
-    if (key.name === "down") { setIndex(i => stepSelectable(i, 1)); return; }
+    if (key.name === "escape") { closeModal(); if (props.onCancel) props.onCancel(); return; }
+    if (key.name === "up") { setIndex(i => stepSelectable(i, -1)); firePreview(); return; }
+    if (key.name === "down") { setIndex(i => stepSelectable(i, 1)); firePreview(); return; }
     if (key.name === "return") {
       const opt = filtered()[index()];
       if (!opt || opt.isHeader) return;
@@ -249,11 +262,12 @@ export function SelectModal(props: {
       return;
     }
     if (props.searchable) {
-      if (key.name === "backspace") { setQ(v => v.slice(0, -1)); setIndex(firstSelectable()); return; }
+      if (key.name === "backspace") { setQ(v => v.slice(0, -1)); setIndex(firstSelectable()); firePreview(); return; }
       const s = key.sequence;
       if (!key.ctrl && !key.meta && s && s.length <= 10 && s !== "\r" && s !== "\n") {
         setQ(v => v + s);
         setIndex(firstSelectable());
+        firePreview();
         return;
       }
     }
@@ -271,7 +285,10 @@ export function SelectModal(props: {
     setIndex(i);
   };
   const clickRow = (i: number) => {
-    if (i !== index()) return;
+    if (i !== index()) {
+      setIndex(i);
+      firePreview();
+    }
     const o = filtered()[i];
     if (o?.isHeader) return;
     props.onPick(o?.value, o);
@@ -388,16 +405,261 @@ export function showProvidersText() {
   appendMessage({ role: "system", content: lines.join("\n") });
 }
 
-// ── MCP server browser popup ──
+// ── Agents (OpenCode-style primaries + subagents) ──
+export function showAgentsText() {
+  const { loadAgents } = require("../../core/agents.js");
+  const agents = loadAgents();
+  const lines = ["AGENTS", ""];
+  for (const a of Object.values(agents)) {
+    const mode = a.mode === "primary" ? "primary" : "subagent";
+    const tools = a.tools && a.tools.length ? "[" + a.tools.join(" ") + "]" : "[*]";
+    const model = a.model ? " model=" + a.model : "";
+    lines.push("  " + a.id.padEnd(10) + " " + mode.padEnd(9) + " " + tools.padEnd(22) + model);
+    lines.push("      " + a.description);
+  }
+  lines.push(
+    "",
+    "  Automatic: the main agent calls the task tool whenever a subtask needs it.",
+    "  Manual: type @<agent> in the input (e.g. @explore find the bug).",
+    "  Config: ~/.loom/config.json \u2192 agents: { name: { mode, description, tools, model, prompt } }"
+  );
+  appendMessage({ role: "system", content: lines.join("\n") });
+}
+
+// ── MCP server / connector browser popup ──
 // Lists every configured server (seeded defaults + user-added) with on/off
-// state; Enter toggles, A opens the add-server flow, Esc closes.
+// state; Enter toggles, A opens the add flow, Esc closes.
+// `kind` decides which preset list the "A" flow offers: "mcp" (dev tools) or
+// "connector" (hosting/cloud services). Both share the same underlying
+// mcp-manager — a connector IS an MCP server, just surfaced separately.
 const MCP_FIT = 52;
 function mcpFit(s: string, n = MCP_FIT) {
   const flat = String(s || "").replace(/\s+/g, " ").trim();
   return flat.length <= n ? flat : flat.slice(0, Math.max(1, n - 1)) + "\u2026";
 }
 
-export function McpModal() {
+// The preset add flow: pick a preset (or Custom), fill the single form below
+// (name / command / args / env — preset fields are pre-filled), then save.
+function openPresetPicker(presets: any[], kind: "mcp" | "connector") {
+  const addLabel = kind === "connector" ? "Add connector" : "Add MCP server";
+  const backType = kind === "connector" ? "connectors" : "mcp";
+
+  closeModal();
+  const picker = presets.map(p => ({
+    label: p.label,
+    sub: p.prompts.length ? "needs a token" : "no key needed",
+    value: p.id,
+  })).concat([{ label: "Custom…", sub: "name + command + args + env", value: "__custom__" }]);
+  openModal({
+    type: "select", title: addLabel,
+    searchable: false,
+    options: picker,
+    onPick: function(val: any) {
+      closeModal();
+      const backTo = function() { closeModal(); setTimeout(function() { openModal({ type: backType as any }); }, 10); };
+      openModal({
+        type: "addserver",
+        kind, backType,
+        presetId: val === "__custom__" ? undefined : String(val),
+        onCancel: backTo,
+        onSaved: backTo,
+      });
+    },
+  });
+}
+
+// Mask env values but keep key names visible: "FIGMA_API_KEY=••••••" so the
+// user can verify which keys they've filled without secrets on screen.
+function maskPairs(v: string): string {
+  return v.split(/(\s+)/).map(part => {
+    if (!part.trim()) return part;
+    const eq = part.indexOf("=");
+    if (eq < 0) return part;
+    const k = part.slice(0, eq), val = part.slice(eq + 1);
+    return k + "=" + (val ? "•".repeat(Math.min(val.length, 16)) : "");
+  }).join("");
+}
+
+// Field-shaped input row — one line of the form in AddServerModal.
+function FormField(props: {
+  label: string; desc: string; active: boolean; value: string; placeholder: string;
+  onInput: (v: string) => void; showCursor?: boolean; isKey?: boolean;
+}) {
+  const caret = props.showCursor ? "▌" : "";
+  const display = props.isKey && props.value ? maskPairs(props.value) : props.value;
+  const shown = display + caret || (props.value ? caret : props.placeholder);
+  return (
+    <box flexDirection="row" paddingX={1} paddingY={0} alignItems="center"
+      border borderStyle="rounded"
+      borderColor={props.active ? ui.primary : ui.border}
+      backgroundColor={props.active ? ui.bgPanel : "transparent"}>
+      <text fg={props.active ? ui.primary : ui.fgMuted} bold={props.active}>{props.label.padEnd(9) + "  "}</text>
+      <text fg={props.active || props.value ? ui.fg : ui.fgMuted} dim={!props.active && !props.value}>
+        {shown}
+      </text>
+      <text fg={ui.fgMuted} dim marginLeft={2} flexGrow={1}>{props.desc}</text>
+    </box>
+  );
+}
+
+// Form for adding an MCP server or connector. One modal — fields stacked
+// vertically. Up/Down + Tab move between fields, Enter on last field saves
+// (or validates and toasts), Esc cancels back to the browser.
+export function AddServerModal(props: {
+  kind: "mcp" | "connector";
+  backType: string;
+  presetId?: string;
+  onSaved?: (name: string) => void;
+}) {
+  const kindIsConn = props.kind === "connector";
+  const title = kindIsConn ? "Add Connector" : "Add MCP server";
+  const toastOk = kindIsConn ? "Connector added" : "MCP added";
+  const preset = props.presetId
+    ? (props.kind === "connector" ? CONNECTOR_PRESETS : MCP_PRESETS).find(p => p.id === props.presetId)
+    : undefined;
+
+  const isWin = process.platform === "win32";
+
+  const [focusIdx, setFocusIdx] = createSignal(preset && preset.prompts.length ? 3 : 0);
+  const [fields, setFields] = createSignal<Record<string, string>>({
+    name: preset ? preset.id : "",
+    // Preset command: docker show as-is; npx shows the package in args so the
+    // user sees what runs. Tokens stay as $KEY — resolved from env on save.
+    command: preset ? (preset.command || "npx") : "",
+    // npx preload: "-y <package> <args>" via npxRun's shape, minus the wrapper.
+    args: preset
+      ? (preset.command
+          ? (preset.args || []).join(" ")
+          : (["-y", preset.package].concat(preset.args || [])).join(" "))
+      : "",
+    // Presets prefill "KEY=" as a header prompt.
+    env: preset ? preset.prompts.map(pr => pr.key + "=").join(" ") : "",
+  });
+
+  const fieldDef = [
+    { key: "name",    label: "Name",    desc: "short id — letters/digits/-/_ only", required: true,  isKey: false },
+    { key: "command", label: "Command", desc: "npx | docker | cmd | full path", required: true,  isKey: false },
+    { key: "args",    label: "Args",    desc: "space-separated — e.g. -y @upstash/context7-mcp", required: false, isKey: false },
+    { key: "env",     label: "Env vars", desc: "KEY=VALUE pairs, space/comma separated", required: false, isKey: true },
+  ];
+
+  function parseEnv(raw: string): Record<string, string> | null {
+    const out: Record<string, string> = {};
+    for (const p of raw.split(/[\s,]+/).filter(Boolean)) {
+      const eq = p.indexOf("=");
+      if (eq < 1) return null;
+      const k = p.slice(0, eq).trim().toUpperCase();
+      const v = p.slice(eq + 1).trim();
+      if (!/^[A-Z_][A-Z0-9_]*$/.test(k)) return null;
+      out[k] = v;
+    }
+    return out;
+  }
+
+  function validate(f: Record<string, string>): string | null {
+    if (!f.name.trim()) return "Name is required.";
+    if (!/^[A-Za-z0-9_-]+$/.test(f.name.trim())) return "Letters, digits, - and _ only.";
+    if (f.name.trim().includes("__")) return "No '__' in names (breaks tool naming).";
+    if (!f.command.trim()) return "Command is required.";
+    if (f.env.trim() && parseEnv(f.env) === null) return "Env vars: KEY=VALUE pairs — e.g. FIGMA_API_KEY=fgd_… or LINEAR_API_KEY=lin_…";
+    return null;
+  }
+
+  function save() {
+    const f = fields();
+    const err = validate(f);
+    if (err) { showToast(err, "error"); return; }
+    const { addServer } = require("../../mcp/mcp-manager.js");
+    let cmd = f.command.trim();
+    let args = f.args.trim() ? f.args.trim().split(/\s+/) : [];
+    const env = f.env.trim() ? parseEnv(f.env) : undefined;
+    // Resolve "$KEY" placeholders in args from the collected env — the value
+    // never lands on the command line.
+    if (env) {
+      const envMap: Record<string, string> = env;
+      args = args.map(a => {
+        if (typeof a === "string" && a.startsWith("$")) {
+          const key = a.slice(1);
+          return envMap[key] !== undefined ? envMap[key] : a;
+        }
+        return a;
+      });
+    }
+    if (isWin && cmd === "npx") { cmd = "cmd"; args = ["/c", "npx"].concat(args); }
+    const res = addServer(f.name.trim(), cmd, args, env ? { env } : undefined);
+    if (res && !res.error) {
+      showToast(toastOk + ": " + f.name.trim(), "ok");
+      closeModal();
+      if (props.onSaved) props.onSaved(f.name.trim());
+      setTimeout(function() { openModal({ type: props.backType as any }); }, 10);
+    } else {
+      showToast(String(res && res.error ? res.error : "Failed to add.").slice(0, 80), "error");
+    }
+  }
+
+  useKeyboard(key => {
+    const k = key.name;
+    if (k === "escape") { closeModal(); setTimeout(function() { openModal({ type: props.backType as any }); }, 10); return; }
+    if (k === "up") { setFocusIdx(i => Math.max(0, i - 1)); return; }
+    if (k === "down" || k === "tab") { setFocusIdx(i => Math.min(fieldDef.length - 1, i + 1)); return; }
+    if (k === "shift+tab") { setFocusIdx(i => Math.max(0, i - 1)); return; }
+    if (k === "return") {
+      if (focusIdx() < fieldDef.length - 1) setFocusIdx(i => i + 1);
+      else save();
+      return;
+    }
+    if (k === "backspace" || k === "delete") {
+      const fx = fields(); fx[fieldDef[focusIdx()].key] = fx[fieldDef[focusIdx()].key].slice(0, -1); setFields({ ...fx }); return;
+    }
+    const s = key.sequence;
+    if (!key.ctrl && !key.meta && s && s.length <= 10 && s !== "\r" && s !== "\n" && s !== "\t") {
+      const fx = fields(); fx[fieldDef[focusIdx()].key] += s; setFields({ ...fx });
+    }
+  });
+
+  // Paste: drop multi-word / multi-line into the focused field.
+  usePaste((ev: any) => {
+    const txt = new TextDecoder().decode(ev.bytes || "").trim();
+    if (!txt) return;
+    const fx = fields();
+    fx[fieldDef[focusIdx()].key] = (fx[fieldDef[focusIdx()].key] + " " + txt).trim();
+    setFields({ ...fx });
+  });
+
+  const f = fields();
+  const ready = !validate(f) ? "— all good, press Enter on the last field to save" : "";
+  const presetTitle = preset ? preset.label + (preset.prompts.length ? "  ·  fill env below" : "  ·  no keys needed") : "Custom";
+  return (
+    <ModalFrame
+      title={title + "  ·  " + presetTitle}
+      subtitle={"Fill the fields, then press Enter on Env vars to save."}
+      footer={"Up/Down/Tab move · Enter next/save · Esc cancel"}
+    >
+      <box flexDirection="column" marginTop={1}>
+        {fieldDef.map((fd, i) => (
+          <FormField
+            key={fd.key} label={fd.label} desc={fd.desc}
+            active={focusIdx() === i} value={f[fd.key]}
+            showCursor={focusIdx() === i} isKey={fd.isKey}
+            placeholder={fd.key === "env" && preset ? "KEY=VALUE  KEY=VALUE — Enter = save" : fd.desc}
+            onInput={(v: string) => { const fx = fields(); fx[fd.key] = v; setFields({ ...fx }); }}
+          />
+        ))}
+      </box>
+      <box paddingX={1} marginTop={1}>
+        <text fg={ready ? ui.success : ui.fgMuted} dim={!ready}>
+          {ready || "Name and Command required; Args and Env optional."}
+        </text>
+        <text fg={ui.fgMuted} dim>{"Stored in ~/.loom/mcp.json — secrets masked on screen."}</text>
+      </box>
+    </ModalFrame>
+  );
+}
+
+function ServerBrowser(props: { kind: "mcp" | "connector" }) {
+  const kind = props.kind;
+  const title = kind === "connector" ? "Connectors" : "MCP Servers";
+  const presets = kind === "connector" ? CONNECTOR_PRESETS : MCP_PRESETS;
   const { listServers, toggleServer } = require("../../mcp/mcp-manager.js");
   const [servers, setServers] = createSignal(listServers());
   const [sel, setSel] = createSignal(0);
@@ -408,96 +670,7 @@ export function McpModal() {
     if (key.name === "escape") { closeModal(); return; }
     if (key.name === "up") { setSel(i => Math.max(0, i - 1)); return; }
     if (key.name === "down") { setSel(i => Math.min(servers().length - 1, i + 1)); return; }
-    if (key.name === "a" || key.name === "A") {
-      closeModal();
-      const picker = MCP_PRESETS.map(p => ({
-        label: p.label,
-        sub: p.prompts.length ? "needs a token" : "no key needed",
-        value: p.id,
-      })).concat([{ label: "Custom…", sub: "type name command args", value: "__custom__" }]);
-      openModal({
-        type: "select", title: "Add MCP server",
-        searchable: false,
-        options: picker,
-        onPick: function(val: any) {
-          closeModal();
-          if (val === "__custom__") {
-            openModal({
-              type: "input", title: "Add MCP server",
-              placeholder: "name command args...  (e.g. github docker run -i --rm ghcr.io/github/github-mcp-server)",
-              onCancel: function() { setTimeout(function() { openModal({ type: "mcp" }); }, 10); },
-              onPick: function(line: string) {
-                const parts = line.trim().split(/\s+/);
-                const name = parts[0];
-                const cmd = parts[1];
-                const { addServer } = require("../../mcp/mcp-manager.js");
-                const res = (name && cmd) ? addServer(name, cmd, parts.slice(2)) : { error: "usage: name command args..." };
-                if (res && !res.error) showToast("MCP server added: " + name, "ok");
-                else showToast(String(res && res.error ? res.error : "usage: name command args...").slice(0, 80), "error");
-                closeModal();
-                setTimeout(function() { openModal({ type: "mcp" }); }, 10);
-              },
-            });
-            return;
-          }
-          const preset = MCP_PRESETS.find(p => p.id === val);
-          if (!preset) { showToast("Unknown preset", "error"); closeModal(); setTimeout(function() { openModal({ type: "mcp" }); }, 10); return; }
-          const pendingEnv: Record<string, string> = {};
-          const collected: string[] = [];
-          const askNext = function(i: number) {
-            if (i >= preset.prompts.length) {
-              const { addServer } = require("../../mcp/mcp-manager.js");
-              const spawn = presetSpawn(preset, pendingEnv);
-              // Substitute "$KEY" placeholders in args with the collected values.
-              const finalSpawnArgs = spawn.args.map(function(a) {
-                if (typeof a === "string" && a.startsWith("$")) {
-                  const key = a.slice(1);
-                  return pendingEnv[key] !== undefined ? pendingEnv[key] : a;
-                }
-                return a;
-              });
-              const res = addServer(preset.id, spawn.command, finalSpawnArgs, { env: spawn.env });
-              if (res && !res.error) showToast("MCP added: " + preset.id, "ok");
-              else showToast(String(res && res.error ? res.error : "failed").slice(0, 80), "error");
-              closeModal();
-              setTimeout(function() { openModal({ type: "mcp" }); }, 10);
-              return;
-            }
-            const pr = preset.prompts[i];
-            const collectedText = collected.length ? collected.join("  ·  ") : "";
-            openModal({
-              type: "input",
-              title: preset.label + " — step " + (i + 1) + "/" + preset.prompts.length,
-              placeholder: pr.label + (collectedText ? "\n\n" + collectedText : ""),
-              isKey: true,
-              onCancel: function() {
-                // We keep collected values hidden and onCancel aborts the whole
-                // clone flow so the user can back out cleanly.
-                closeModal();
-                setTimeout(function() { openModal({ type: "mcp" }); }, 10);
-              },
-              onPick: function(val: string) {
-                const v = val.trim();
-                if (v) {
-                  pendingEnv[pr.key] = v;
-                  collected.push(pr.key + "=" + v.slice(0, 4) + "…");
-                  closeModal();
-                  setTimeout(function() { askNext(i + 1); }, 10);
-                  return;
-                }
-                // A required setup value left empty — re-ask instead of adding
-                // a broken server.
-                showToast(pr.label + " is required (Esc to cancel).", "error");
-                closeModal();
-                setTimeout(function() { askNext(i); }, 10);
-              },
-            });
-          };
-          askNext(0);
-        },
-      });
-      return;
-    }
+    if (key.name === "a" || key.name === "A") { openPresetPicker(presets, kind); return; }
     if (key.name === "return") {
       const s = servers()[sel()];
       if (!s) return;
@@ -522,7 +695,7 @@ export function McpModal() {
   };
 
   return (
-    <ModalFrame title="MCP Servers" subtitle={"Enter toggles a server on/off" + rangeSub()} footer={"Enter toggle  |  A add server  |  wheel scroll  |  Esc close"}>
+    <ModalFrame title={title} subtitle={"Enter toggles a server on/off" + rangeSub()} footer={"Enter toggle  |  A add " + (kind === "connector" ? "connector" : "server") + "  |  wheel scroll  |  Esc close"}>
       <box onMouseScroll={scrollBy}>
         {win().items.map((s, i) => {
           const abs = win().start + i;
@@ -542,6 +715,14 @@ export function McpModal() {
       </box>
     </ModalFrame>
   );
+}
+
+export function McpModal() {
+  return <ServerBrowser kind="mcp" />;
+}
+
+export function ConnectorsModal() {
+  return <ServerBrowser kind="connector" />;
 }
 
 // Palette modal (ctrl+p) - proper popup window

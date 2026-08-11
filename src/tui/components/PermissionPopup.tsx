@@ -1,8 +1,7 @@
 // PermissionPopup -- raised above the input bar when the model wants to run a
-// command or change a file. The popup offers Allow / Always allow / Deny.
-// Typing an answer (or Enter on "Type your answer…") switches to a SEPARATE
-// centered Question popup (rendered at the App root) where the free-form
-// answer is typed — the permission options stay clean and never mix with it.
+// command or change a file, OR when the model is asking a question. Typing an
+// answer shows the editor inline at the bottom of this same popup — no
+// separate overlay ever opens for typing.
 import { createSignal, Show } from "solid-js";
 import { useKeyboard } from "@opentui/solid";
 import { palette } from "../theme.ts";
@@ -76,7 +75,7 @@ function PermissionPrompt() {
       return;
     }
 
-    // Typing anything opens the Question popup with the answer directly.
+    // Typing anything opens the inline editor.
     if (!key.ctrl && !key.meta && key.sequence && key.sequence.length <= 10 && key.sequence !== "\r" && key.sequence !== "\n" && key.sequence !== "\t") {
       openQuestion(key.sequence);
       return;
@@ -97,14 +96,14 @@ function PermissionPrompt() {
   const pr = permission()!;
 
   return (
-    <Show when={!custom()}>
-      <box
-        border borderStyle="rounded" borderColor={ui.warning}
-        paddingX={2} paddingY={1}
-        flexDirection="column" marginBottom={0}
-        backgroundColor={ui.bgPanel}
-      >
-        <text fg={ui.warning} bold>{"\u26A0 Permission needed"}</text>
+    <box
+      border borderStyle="rounded" borderColor={custom() ? ui.accent : ui.warning}
+      paddingX={2} paddingY={1}
+      flexDirection="column" marginBottom={0}
+      backgroundColor={ui.bgPanel}
+    >
+      <text fg={custom() ? ui.accent : ui.warning} bold>{custom() ? "\u2753 Answer" : "\u26A0 Permission needed"}</text>
+      <Show when={!custom()}>
         <text fg={ui.fgMuted} dim marginTop={1}>
           {"Model wants to " + (pr.tool === "bash" ? "run a command" : "change a file") + ":"}
         </text>
@@ -137,43 +136,19 @@ function PermissionPrompt() {
             {(sel() === 3 ? "\u25B6 " : "  ") + "Type your answer\u2026"}
           </text>
         </box>
+      </Show>
 
-        <text fg={ui.fgMuted} dim marginTop={1}>
-          {"\u2191\u2193 choose  \u00B7  Enter confirm  \u00B7  type = question popup  \u00B7  ESC deny"}
-        </text>
-      </box>
-    </Show>
-  );
-}
-
-// The Question popup — a centered overlay (same look as the modals) for the
-// free-form answer. Rendered at the App root next to the modal overlay;
-// the PermissionPrompt above owns the keyboard while it is open.
-export function QuestionPopupOverlay() {
-  return (
-    <Show when={permission() && questionOpen()}>
-      <box position="absolute" top={0} left={0} right={0} bottom={0}
-        alignItems="center" justifyContent="center" flexDirection="column" backgroundColor={ui.bg}>
-        <box border borderStyle="rounded" borderColor={ui.accent} backgroundColor={ui.bgPanel}
-          paddingX={3} paddingY={2} flexDirection="column" minWidth={52} maxWidth={72}>
-          <text fg={ui.accent} bold>{"\u2753 Question \u2014 type your answer"}</text>
-          <text fg={ui.fgMuted} dim marginTop={0}>
-            {"Model wants to " + (permission()!.tool === "bash" ? "run a command" : "change a file") + ":"}
-          </text>
-          <text fg={ui.primary} bold wrap="truncate">
-            {permission()!.tool + ": " + fit(permission()!.command, 60)}
-          </text>
-          <Show when={permission()!.label && permission()!.label !== "dangerous command"}>
-            <text fg={ui.warning} dim>{"  \u26A0 " + permission()!.label}</text>
-          </Show>
-          <box border borderStyle="rounded" borderColor={ui.border} paddingX={1} marginTop={1}>
-            <text fg={ui.fg}>{questionText() || " "}</text>
-          </box>
-          <text fg={ui.fgMuted} dim marginTop={1}>
-            {"Enter send  \u00B7  Esc back to options  \u00B7  (\"allow\"/\"yes\" approves, anything else denies with that note)"}
-          </text>
+      <Show when={custom()}>
+        <box border borderStyle="rounded" borderColor={ui.border} paddingX={1} marginTop={1}>
+          <text fg={ui.fg}>{customText() || " "}</text>
         </box>
-      </box>
-    </Show>
+      </Show>
+
+      <text fg={ui.fgMuted} dim marginTop={1}>
+        {custom()
+          ? "Enter send \u00B7 Esc back \u00B7 (\"allow\"/\"yes\" approves, anything else denies with that note)"
+          : "\u2191\u2193 choose \u00B7 Enter confirm \u00B7 type = answer here \u00B7 ESC deny"}
+      </text>
+    </box>
   );
 }

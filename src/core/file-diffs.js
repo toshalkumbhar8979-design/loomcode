@@ -79,7 +79,7 @@ function walkFiles(root, depth, out) {
 
 function git(args) {
   try {
-    return execSync('git ' + args, { cwd: process.cwd(), encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] });
+    return execSync('git ' + args, { cwd: process.cwd(), encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   } catch {
     return null;
   }

@@ -17,6 +17,9 @@ export type Palette = {
   success: string; warning: string; error: string;
   thinking: string;
   pet: string;       // companion tint
+  // Syntax colors for markdown code blocks — each theme ships real VS Code
+  // TextMate colors (keyword/string/comment/number/call/base) via fetch-themes.
+  syntax: { kw: string; str: string; com: string; num: string; call: string; plain: string };
 };
 
 export type Theme = { id: string; label: string; desc: string; palette: Palette };
@@ -43,6 +46,14 @@ const LOOM_DARK: Palette = {
   error: "#e06c5a",
   thinking: "#d9a35f",
   pet: "#f4a27f",
+  syntax: {
+    kw: "#e07856",
+    str: "#a3c084",
+    com: "#6e655c",
+    num: "#e0b356",
+    call: "#e8b06f",
+    plain: "#f0ebe4",
+  },
 };
 
 const LIGHT: Palette = {
@@ -67,6 +78,14 @@ const LIGHT: Palette = {
   error: "#b33c2e",
   thinking: "#a5682a",
   pet: "#c2593a",
+  syntax: {
+    kw: "#c2593a",
+    str: "#5f8a3d",
+    com: "#9a9082",
+    num: "#a97a1a",
+    call: "#b0742f",
+    plain: "#2b2620",
+  },
 };
 
 const OCEAN: Palette = {
@@ -91,6 +110,14 @@ const OCEAN: Palette = {
   error: "#e57373",
   thinking: "#ffb74d",
   pet: "#4fc3f7",
+  syntax: {
+    kw: "#4fc3f7",
+    str: "#81c784",
+    com: "#6d8599",
+    num: "#ffd54f",
+    call: "#ffb74d",
+    plain: "#e3eef6",
+  },
 };
 
 const FOREST: Palette = {
@@ -115,6 +142,14 @@ const FOREST: Palette = {
   error: "#e08070",
   thinking: "#c9a95c",
   pet: "#a3e5b2",
+  syntax: {
+    kw: "#7bd88f",
+    str: "#9ccc65",
+    com: "#6b8270",
+    num: "#d4c34f",
+    call: "#e0c568",
+    plain: "#e8f2e9",
+  },
 };
 
 const MIDNIGHT: Palette = {
@@ -139,6 +174,14 @@ const MIDNIGHT: Palette = {
   error: "#f87171",
   thinking: "#f0abfc",
   pet: "#c4b5fd",
+  syntax: {
+    kw: "#a78bfa",
+    str: "#9ae6b4",
+    com: "#6f6690",
+    num: "#fde68a",
+    call: "#f6ad55",
+    plain: "#ede9f5",
+  },
 };
 
 const MONO: Palette = {
@@ -163,7 +206,17 @@ const MONO: Palette = {
   error: "#e0e0e0",
   thinking: "#b0b0b0",
   pet: "#e8e8e8",
+  syntax: {
+    kw: "#e8e8e8",
+    str: "#b8b8b8",
+    com: "#666666",
+    num: "#bdbdbd",
+    call: "#cccccc",
+    plain: "#e8e8e8",
+  },
 };
+
+import { GENERATED_THEMES } from "./themes.generated.ts";
 
 export const THEMES: Record<string, Theme> = {
   loom: { id: "loom", label: "Loom Dark", desc: "Warm charcoal + terracotta (default)", palette: LOOM_DARK },
@@ -173,6 +226,39 @@ export const THEMES: Record<string, Theme> = {
   midnight: { id: "midnight", label: "Midnight", desc: "Violet-black + lavender", palette: MIDNIGHT },
   mono: { id: "mono", label: "Mono", desc: "Pure greyscale", palette: MONO },
 };
+
+// Safety net: shiki-sourced themes sometimes carry transparent or
+// background-identical border colors, which makes every UI grid line vanish.
+// Accept a border only when it clears a real contrast bar against `bg`;
+// otherwise derive one (lighten dark themes, darken light themes).
+function visibleBorder(bg: string, border: string): string {
+  const hex = (h: string) => /^#?([0-9a-f]{6})/i.exec(String(h).trim())?.[1];
+  const lum = (h: string) => {
+    const m = hex(h);
+    if (!m) return 0;
+    const n = parseInt(m, 16);
+    return 0.299 * (n >> 16 & 255) + 0.587 * (n >> 8 & 255) + 0.114 * (n & 255);
+  };
+  const base = hex(bg) || "1e1e1e";
+  const raw = hex(border);
+  if (raw && Math.abs(lum("#" + raw) - lum("#" + base)) >= 28) return border;
+  const L = lum("#" + base);
+  const mix = (f: number) => {
+    const v = [0, 8, 16].map(s => Math.round((parseInt(base, 16) >> s & 255) + (f > 0 ? 255 - (parseInt(base, 16) >> s & 255) : parseInt(base, 16) >> s & 255) * Math.abs(f)));
+    return "#" + v.map(x => x.toString(16).padStart(2, "0")).join("");
+  };
+  return L < 128 ? mix(0.38) : mix(-0.35);
+}
+
+// Stitch in the generated (shiki-sourced) themes after the local defaults.
+// Ids from the registry win on collision — the six above always take priority.
+for (const t of GENERATED_THEMES) {
+  if (!THEMES[t.id]) {
+    const p = (t as Theme).palette;
+    p.border = visibleBorder(p.bg, p.border);
+    THEMES[t.id] = t as Theme;
+  }
+}
 
 const TUI_STATE = path.join(os.homedir(), ".loom", "tui.json");
 

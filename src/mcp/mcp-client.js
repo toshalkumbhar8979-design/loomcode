@@ -80,10 +80,11 @@ function callRpc(child, method, params, timeoutMs) {
       reject(e);
     };
     const onData = (chunk) => {
+      if (settled) return; // safely ignore anything after resolve/reject
       let text = chunk.toString();
       // Some Windows stdio servers emit a UTF-8 BOM on the first line, which
       // would break JSON.parse and stall the RPC until timeout.
-      if (!buf) text = text.replace(/^\uFEFF/, '');
+      if (!buf) text = text.replace(/^﻿/, '');
       buf += text;
       let idx;
       while ((idx = buf.indexOf('\n')) >= 0) {
@@ -92,7 +93,9 @@ function callRpc(child, method, params, timeoutMs) {
         if (!line) continue;
         let msg;
         try { msg = JSON.parse(line); } catch { continue; }
-        if (msg.id === id) {
+        // Some servers (or broken MCP packages) send non-object lines like
+        // `null`, `[]`, or strings — never crash on them.
+        if (msg && typeof msg === 'object' && msg.id === id) {
           settled = true;
           cleanup();
           if (msg.error) reject(new Error((msg.error && msg.error.message) || 'MCP error'));

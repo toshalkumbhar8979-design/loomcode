@@ -18,7 +18,9 @@ function globIgnore(full) {
 const MODES = ['build', 'plan', 'chat'];
 
 // Tools that never mutate the filesystem/state — safe to expose in plan mode.
-const READ_ONLY_TOOLS = ['read', 'glob', 'grep', 'webfetch', 'todowrite'];
+// task delegates to a read-only-or-not subagent, so from the CALLER's side it
+// is safe in plan mode (the subagent's own tool list gates what it may do).
+const READ_ONLY_TOOLS = ['read', 'glob', 'grep', 'webfetch', 'todowrite', 'task'];
 
 // Optional path sandbox: when config.sandbox.paths is set, filesystem tools
 // only operate inside those roots (defense in depth on top of permissions).
@@ -244,9 +246,33 @@ const TOOLS = {
       return lines.join('\n');
     }
   },
+  task: {
+    name: 'task',
+    description: 'Delegate a self-contained subtask to a subagent that runs fully autonomously and returns its final answer. Use when a piece of work can run independently (parallelizable), needs a focused toolset, or benefits from a different model. Pick the smallest suitable agent: explore (fast read-only code search), scout (web/docs research), general (full toolset except delegation). Pass the agent a COMPLETE, self-contained instruction: the goal, relevant file paths, and exactly what to return. The subagent may run tools autonomously; fold its findings into your own answer afterwards.',
+    parameters: {
+      prompt: { type: 'string', required: true, description: 'Complete instructions for the subagent — goal, relevant file paths, and the exact output to return' },
+      agent: { type: 'string', required: false, description: 'Subagent id: general (default), explore, scout, or a custom one from config.agents' },
+      model: { type: 'string', required: false, description: 'Optional model override "provider/model-id" for this delegation' },
+    },
+    async execute(params, ctx) {
+      const { runSubagent } = require('../core/agents');
+      const res = await runSubagent({
+        agentId: params.agent || 'general',
+        prompt: params.prompt,
+        model: params.model,
+        parentSession: ctx && ctx.parentSession,
+        onProgress: ctx && ctx.progress,
+        signal: ctx && ctx.signal,
+      });
+      if ('error' in res) return { error: res.error };
+      const ms = res.durationMs;
+      const usage = `[${res.agent} finished in ${(ms / 1000).toFixed(1)}s \u00B7 ${res.tokensIn + res.tokensOut} tokens \u00B7 ${res.costUsd > 0.001 ? '$' + res.costUsd.toFixed(4) : 'free'}]`;
+      return usage + '\n\n' + res.content;
+    }
+  },
   mcp: {
     name: 'mcp',
-    description: 'Manage MCP (tool) servers for this workspace. Use when the user asks to add/remove/enable/disable an MCP server (e.g. supabase, vercel, nextjs, railway, github, filesystem, gmail) or when a task requires tools the session does not have yet. Common packages: Supabase=@supabase/mcp-server-supabase (needs --access-token TOKEN), Next.js=nextjs-mcp-server, Railway=@railway/mcp-server (needs env RAILWAY_API_TOKEN), Vercel=@vercel/mcp-server (needs env VERCEL_TOKEN), Fetch=@modelcontextprotocol/server-fetch, GitHub=ghcr.io/github/github-mcp-server (docker). If unsure about an MCP package, verify it exists first with webfetch (e.g. https://registry.npmjs.org/<pkg>) or web search (fetch or bash curl).',
+    description: 'Manage MCP (tool) servers for this workspace. Use when the user asks to add/remove/enable/disable an MCP server or connector (e.g. github, filesystem, gmail) or when a task requires tools the session does not have yet. In the TUI, hosting/cloud services (supabase, vercel, nextjs, railway, netlify, cloudflare) live under /connectors; dev-tool MCP servers (playwright, github, sentry, figma, postgres, mongodb, linear, slack, brave-search, exa, context7, filesystem, sqlite, puppeteer) live under /mcp. Common packages: Playwright=@playwright/mcp, Sentry=@sentry/mcp-server (needs --access-token TOKEN), Figma=figma-developer-mcp (env FIGMA_API_KEY), Postgres=@modelcontextprotocol/server-postgres (env DATABASE_URL), MongoDB=mongodb-mcp-server (env MONGODB_CONNECTION_STRING), Linear=linear-mcp-server (env LINEAR_API_KEY), Slack=@modelcontextprotocol/server-slack (env SLACK_BOT_TOKEN + SLACK_TEAM_ID), Brave=@modelcontextprotocol/server-brave-search (env BRAVE_API_KEY), Exa=exa-mcp-server (env EXA_API_KEY), Context7=@upstash/context7-mcp, Vercel=vercel-mcp-server (env VERCEL_TOKEN), Railway=@railway/mcp-server (env RAILWAY_API_TOKEN), Netlify=netlify-mcp-server (env NETLIFY_AUTH_TOKEN), Cloudflare=@cloudflare/mcp-server-cloudflare (env CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID), Supabase=@supabase/mcp-server-supabase (needs --access-token TOKEN), GitHub=ghcr.io/github/github-mcp-server (docker). If unsure about an MCP package, verify it exists first with webfetch (e.g. https://registry.npmjs.org/<pkg>) or web search (fetch or bash curl) — never trust an unverified npm package.',
     parameters: {
       action: { type: 'string', required: true, description: '"list" | "add" | "remove" | "enable" | "disable"' },
       name: { type: 'string', required: false, description: 'MCP server name, letters/digits/-/_ (e.g. supabase)' },
@@ -326,7 +352,13 @@ function getToolDefinitions(mode = 'build') {
   });
 }
 
-async function executeTool(toolName, params, mode = 'build') {
+/** Execute one tool. `ctx` is passed through to tool executors that need
+ *  session context (parent session, abort signal, subagent progress relay).
+ *  @param {string} [toolName]
+ *  @param {object} [params]
+ *  @param {string} [mode]
+ *  @param {object} [ctx] */
+async function executeTool(toolName, params, mode = 'build', ctx = null) {
   if (mode && mode !== 'build') {
     if (mode === 'chat') {
       return { error: 'Blocked in chat mode: no tools are available. Switch to Build mode to use tools.' };
@@ -334,7 +366,7 @@ async function executeTool(toolName, params, mode = 'build') {
     if (toolName && toolName.indexOf('mcp__') === 0) {
       return { error: `Blocked in ${mode} mode: MCP tools are not available outside Build mode.` };
     }
-    if (!READ_ONLY_TOOLS.includes(toolName)) {
+    if (toolName && !READ_ONLY_TOOLS.includes(toolName)) {
       return { error: `Blocked in ${mode} mode: ${toolName} is not read-only. Switch to Build mode to use it.` };
     }
   }
@@ -353,7 +385,7 @@ async function executeTool(toolName, params, mode = 'build') {
   const tool = TOOLS[toolName];
   if (!tool) return { error: `Unknown tool: ${toolName}` };
   try {
-    const result = await tool.execute(params);
+    const result = await tool.execute(params, ctx);
     if (result && typeof result === 'object' && result.error) return { error: result.error };
     return { result };
   } catch (e) {

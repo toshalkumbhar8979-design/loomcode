@@ -6,9 +6,10 @@ process.env.LOOM_MCP_NO_WARM = "1";
 process.env.LOOM_MEM_AUTO = "0";
 import { testRender } from "@opentui/solid";
 import { App } from "./App.tsx";
-import { input, setInput, suggestions, autoKind, autoIndex, messages, modal, getSession, setMessages, inputMode, refreshUsage, modelName, appendMessage, thinking, toasts, refreshProviderState, setPromptHistory } from "./store.ts";
+import { input, setInput, suggestions, autoKind, autoIndex, messages, modal, getSession, setMessages, inputMode, refreshUsage, modelName, appendMessage, thinking, toasts, refreshProviderState, setPromptHistory, getProjectFiles } from "./store.ts";
 import { getToolDefinitions, executeTool } from "../tools/index.js";
 import { formatTokens, formatUsd } from "../core/usage.js";
+import { MCP_PRESETS, CONNECTOR_PRESETS } from "./mcp-presets.ts";
 import { execSync } from "child_process";
 import path from "path";
 import os from "os";
@@ -31,6 +32,22 @@ async function waitFor(cond: () => boolean, what: string, timeoutMs = 5000) {
   }
 }
 
+// One-shot captureCharFrame() reads can lag the reactive state by a few
+// hundred ms (the CliRenderer flushes renders on its own schedule). Poll the
+// captured frame until the condition holds, returning the settled frame.
+async function waitForFrame(cond: (f: string) => boolean, what: string, timeoutMs = 6000): Promise<string> {
+  const t0 = Date.now();
+  while (true) {
+    const f = strip(setup.captureCharFrame());
+    if (cond(f)) return f;
+    if (Date.now() - t0 > timeoutMs) {
+      console.assert(false, "FAIL: timed out waiting for frame: " + what);
+      return f;
+    }
+    await sleep(80);
+  }
+}
+
 let assertFails = 0;
 const _rawAssert = console.assert.bind(console);
 console.assert = function(cond: any, msg: string) {
@@ -50,11 +67,22 @@ await sleep(400);
 // submit-based test is deterministic.
 const _sessMock = getSession();
 const _realSendAll = _sessMock.sendUserMessage;
-_sessMock.sendUserMessage = function(text: string, callbacks: any) {
+_sessMock.sendUserMessage = function(text: string, callbacks: any, opts?: any) {
   this.interrupted = false;
   this.addMessage({ role: "user", content: text });
   this.turnCount++;
+  if (callbacks && callbacks.onReasoning) callbacks.onReasoning("mock reasoning about " + String(text).slice(0, 20));
   if (callbacks && callbacks.onDelta) callbacks.onDelta("mock reply to " + String(text).slice(0, 20));
+  if (opts && opts.agentId && callbacks) {
+    // Agent delegation: the session would scope the turn as the subagent and
+    // stream child progress — mimic it so the TUI panel path is exercised.
+    if (callbacks.onSubagent) {
+      callbacks.onSubagent({ id: opts.agentId, agent: opts.agentId, type: "status", text: "started" });
+      callbacks.onSubagent({ id: opts.agentId, agent: opts.agentId, type: "delta", text: "child findings" });
+      callbacks.onSubagent({ id: opts.agentId, agent: opts.agentId, type: "tool", text: "grep" });
+      callbacks.onSubagent({ id: opts.agentId, agent: opts.agentId, type: "status", text: "done" });
+    }
+  }
   return new Promise((res) => setTimeout(() => res({ type: "success", content: "mock: " + String(text).slice(0, 40) }), 250));
 };
 let frame = strip(setup.captureCharFrame());
@@ -534,7 +562,7 @@ console.assert(modelInFooter, "FAIL: footer should show the active model");
 console.assert(lifeInFooter, "FAIL: footer should show lifetime usage and monthly budget");
 ok("usage footer");
 
-header("23: file-diff panel â€” build + right-aligned chat render");
+header("23: file-diff patch â€” inline unified hunks for edits only");
 const { buildFileDiff, snapshotBefore, snapshotAfter, clearFileDiffs, formatDiffCount } = await import("../core/file-diffs.js");
 const beforeTxt = "line one\nline two\nline three\nline four\nline five\n";
 const afterTxt = "line one\nline two CHANGED\nline three\nline four\nline five\nline six\n";
@@ -559,13 +587,13 @@ setInput("");
 await sleep(200);
 setup.mockInput.pressEscape();
 await sleep(150);
-// Single-file change → split view: chat left, diff panel right with hunks.
+// Single-file change → inline unified patch inside the assistant bubble.
 appendMessage({ role: "assistant", content: "Edited the file for you.", fileDiffs: [d] });
 await sleep(250);
 frame = strip(setup.captureCharFrame());
-console.assert(frame.includes("app.ts"), "FAIL: single-file diff should show the path in the split panel");
-console.assert(frame.includes("CHANGED"), "FAIL: single-file diff should render hunk lines in the split panel");
-// Two files changed â†’ vertical split: text left, diff panel right with hunks.
+console.assert(frame.includes("app.ts"), "FAIL: single-file diff should show the path in the inline patch");
+console.assert(frame.includes("CHANGED"), "FAIL: single-file diff should render hunk lines in the inline patch");
+// Two files changed → both paths and +/- counts visible.
 const d2 = buildFileDiff("C:\\proj\\src\\util.ts", "const a = 1;\nconst b = 2;\n", "const a = 1;\nconst b = 22;\nconst c = 3;\n");
 setMessages([]);
 setInput("");
@@ -576,10 +604,73 @@ frame = strip(setup.captureCharFrame());
 const diffPathShown = frame.includes("app.ts") && frame.includes("util.ts");
 const diffPlusShown = frame.includes("+2") && frame.includes("-1");
 const hunkShown = frame.includes("CHANGED");
-console.assert(diffPathShown, "FAIL: both edited file paths should be visible in the split view");
+console.assert(diffPathShown, "FAIL: both edited file paths should be visible in the inline patch");
 console.assert(diffPlusShown, "FAIL: +2/-1 counts should be visible");
 console.assert(hunkShown, "FAIL: colored hunk lines should be visible");
-ok("diff panel");
+ok("diff patch");
+
+header("23b: new-file writes show no patch; +Thought toggles in the header");
+setMessages([]);
+setInput("");
+await sleep(200);
+// A brand-new file (isNew) must NOT render a patch — nothing changed yet.
+const dNew = buildFileDiff("C:\\proj\\src\\brandnew.ts", null, "const x = 1;\nconst y = 2;\n");
+console.assert(dNew.isNew === true, "FAIL: isNew should be true for a new file");
+appendMessage({ role: "assistant", content: "Created the fresh module.", fileDiffs: [dNew], thinkingContent: "step one: plan\nstep two: create file\n", thinkTime: 3200 });
+await sleep(250);
+frame = strip(setup.captureCharFrame());
+console.assert(!frame.includes("brandnew.ts"), "FAIL: new-file diff must NOT render (nothing changed yet)");
+console.assert(frame.includes("+Thought") && frame.includes("3.2s"), "FAIL: header should show '+Thought · 3.2s' after output");
+// Click "+Thought" in the header → reasoning shows as plain text; clicking
+// again hides it again.
+const tLines = frame.split("\n");
+const ty = tLines.findIndex(l => l.includes("+Thought"));
+console.assert(ty > 0, "FAIL: +Thought row not found in frame");
+const tx = tLines[ty].indexOf("+Thought") + 2;
+await setup.mockMouse.click(tx, ty);
+frame = await waitForFrame(f => f.includes("step two: create file"), "clicked thought to reveal reasoning");
+const tLines2 = frame.split("\n");
+const ty2 = tLines2.findIndex(l => l.includes("+Thought"));
+const tx2 = tLines2[ty2].indexOf("+Thought") + 2;
+await setup.mockMouse.click(tx2, ty2);
+frame = await waitForFrame(f => !f.includes("step two: create file"), "second click to hide the thought panel");
+ok("new-file no-patch + thought toggle");
+
+header("23c: todos render in the patch region; live Thinking click-to-expand");
+setMessages([]);
+setInput("");
+await sleep(200);
+appendMessage({ role: "assistant", content: "Working through tasks.", todos: [{ done: true, inProgress: false, cancelled: false, text: "setup" }, { done: false, inProgress: true, cancelled: false, text: "build" }] });
+await sleep(250);
+frame = strip(setup.captureCharFrame());
+console.assert(frame.includes("[x] setup") && frame.includes("[~] build"), "FAIL: todo block should render in the patch region");
+// Live thinking: while the turn runs the header reads "Loom is Thinking…"
+// with the spinner, and clicking it reveals the streamed reasoning and flips
+// it to "+Thought"; after the turn it stays "+Thought".
+setMessages([]);
+setInput("");
+await sleep(200);
+setup.mockInput.typeText("show your work");
+await sleep(60);
+setup.mockInput.pressEnter();
+await sleep(80); // still inside the 250ms mock turn
+frame = strip(setup.captureCharFrame());
+const thinkY = frame.split("\n").findIndex(l => l.includes("Loom is Thinking"));
+console.assert(thinkY > 0, "FAIL: header should read 'Loom is Thinking\u2026' with the spinner while the turn runs");
+const thinkX = frame.split("\n")[thinkY].indexOf("Loom is Thinking") + 2;
+await setup.mockMouse.click(thinkX, thinkY);
+frame = await waitForFrame(f => f.includes("mock reasoning"), "clicked Thinking to reveal reasoning");
+console.assert(frame.includes("+Thought"), "FAIL: clicking Thinking should flip the label to +Thought");
+// Click again → collapses and shows "Loom is Thinking…" again (turn still running).
+const tLines3 = frame.split("\n");
+const ty3 = tLines3.findIndex(l => l.includes("+Thought"));
+const tx3 = tLines3[ty3].indexOf("+Thought") + 2;
+await setup.mockMouse.click(tx3, ty3);
+frame = await waitForFrame(f => !f.includes("mock reasoning"), "second click to hide the thought panel");
+await waitFor(() => thinking() === false, "live turn to settle");
+frame = strip(setup.captureCharFrame());
+console.assert(frame.includes("+Thought"), "FAIL: after the turn the header should read +Thought");
+ok("live thinking toggle + todos");
 
 header("24: interrupt resets state so the task can resume");
 const sess24 = getSession();
@@ -639,6 +730,119 @@ sess26.todos = [{ content: "Real session todo", status: "in_progress" }];
 recomputeTodos();
 console.assert(todos().length === 1 && todos()[0].text === "Real session todo" && todos()[0].inProgress, "FAIL: session todos should win over message scan");
 ok("todo state");
+
+header("26b: markdown checklist lines feed the sidebar todo scan");
+sess26.todos = [];
+appendMessage({ role: "assistant", content: "Plan:\n- [x] wired step\n* [ ] star step\n1. [~] numbered step\n   - [ ] nested step" });
+recomputeTodos();
+console.assert(todos().some(t => t.done && t.text === "wired step"), "FAIL: '- [x]' should map to done");
+console.assert(todos().some(t => !t.done && t.text === "star step"), "FAIL: '* [ ]' should map to open");
+console.assert(todos().some(t => t.inProgress && t.text === "numbered step"), "FAIL: '1. [~]' should map to in progress");
+console.assert(todos().some(t => !t.done && t.text === "nested step"), "FAIL: indented '- [ ]' should map to open");
+ok("markdown checklist scan");
+
+header("26c: sidebar Todos tab renders session todos and click toggles done");
+const sess26c = getSession();
+sess26c.todos = [{ content: "click me", status: "pending" }, { content: "keep me", status: "completed" }];
+recomputeTodos();
+await sleep(200);
+frame = strip(setup.captureCharFrame());
+let sLines = frame.split("\n");
+const tabY = sLines.findIndex(l => l.includes("Todos"));
+console.assert(tabY > 0, "FAIL: Todos tab not found in frame");
+await setup.mockMouse.click(sLines[tabY].indexOf("Todos") + 2, tabY);
+await sleep(200);
+frame = strip(setup.captureCharFrame());
+sLines = frame.split("\n");
+console.assert(frame.includes("[ ] click me"), "FAIL: sidebar should render pending todo row");
+console.assert(frame.includes("[x] keep me"), "FAIL: sidebar should render completed todo row");
+let rowY = sLines.findIndex(l => l.includes("[ ] click me"));
+console.assert(rowY > tabY, "FAIL: todo row not found below tabs");
+await setup.mockMouse.click(sLines[rowY].indexOf("[ ] click me") + 1, rowY);
+await sleep(200);
+console.assert(todos()[0].done === true, "FAIL: click should flip todo to done");
+frame = strip(setup.captureCharFrame());
+sLines = frame.split("\n");
+rowY = sLines.findIndex(l => l.includes("[x] click me"));
+console.assert(rowY > 0, "FAIL: frame should show [x] click me after click");
+await setup.mockMouse.click(sLines[rowY].indexOf("[x] click me") + 1, rowY);
+await sleep(200);
+console.assert(todos()[0].done === false, "FAIL: second click should flip back to pending");
+ok("sidebar todo click toggles");
+
+header("26d: sidebar Files tab row click opens the file (spawn stubbed)");
+const sb26d = await import("./components/Sidebar.tsx");
+const spawned26d: string[][] = [];
+sb26d.__stubOpenFileSpawn((opener: string, args: string[]) => { spawned26d.push([opener].concat(args)); return { unref() {} }; });
+frame = strip(setup.captureCharFrame());
+sLines = frame.split("\n");
+const fTabY = sLines.findIndex(l => l.includes("Files"));
+console.assert(fTabY > 0, "FAIL: Files tab not found in frame");
+await setup.mockMouse.click(sLines[fTabY].indexOf("Files") + 2, fTabY);
+await sleep(200);
+frame = strip(setup.captureCharFrame());
+sLines = frame.split("\n");
+let fRowY = -1;
+for (let y = fTabY + 1; y < sLines.length - 1; y++) {
+  const seg = (sLines[y] || "").substring(64, 98).trim();
+  if (seg.length) { fRowY = y; break; }
+}
+console.assert(fRowY > fTabY, "FAIL: no file row visible in sidebar");
+const firstFile = getProjectFiles()[0];
+await setup.mockMouse.click(66, fRowY);
+await sleep(250);
+console.assert(spawned26d.length === 1, "FAIL: file click should call spawn once, got " + spawned26d.length);
+const gotAbs = String(spawned26d[0][spawned26d[0].length - 1]).replace(/\\/g, "/");
+const wantAbs = path.resolve(process.cwd(), firstFile).replace(/\\/g, "/");
+console.assert(gotAbs.toLowerCase() === wantAbs.toLowerCase(), "FAIL: spawn arg should be the clicked file, got " + gotAbs + " want " + wantAbs);
+console.assert(toasts().some(x => String(x.text).startsWith("Opened")), "FAIL: file click should show an Opened toast");
+sb26d.__stubOpenFileSpawn(null);
+await setup.mockMouse.click(sLines[fTabY].indexOf("Info") + 2, fTabY);
+await sleep(200);
+ok("sidebar file click opens");
+
+header("26e: /agents lists primaries and subagents");
+setup.mockInput.typeText("/agents");
+await sleep(200);
+setup.mockInput.pressEnter();
+await sleep(400);
+// The AGENTS system message is ~18 lines — taller than the chat viewport, so
+// frame assertions would only ever see its tail. Assert on the message itself.
+const agentsMsg = messages().map((m: any) => String(m.content)).find(c => c.startsWith("AGENTS"));
+console.assert(!!agentsMsg, "FAIL: /agents should append the agents listing message");
+console.assert(agentsMsg && agentsMsg.includes("build") && agentsMsg.includes("plan") && agentsMsg.includes("chat"), "FAIL: /agents should list primary agents");
+console.assert(agentsMsg && agentsMsg.includes("explore") && agentsMsg.includes("scout") && agentsMsg.includes("general"), "FAIL: /agents should list subagents");
+console.assert(agentsMsg && agentsMsg.includes("subagent"), "FAIL: /agents should mention subagent mode");
+console.assert(agentsMsg && agentsMsg.includes("@explore"), "FAIL: /agents should document @explore mentions");
+console.assert(agentsMsg && agentsMsg.includes("task tool"), "FAIL: /agents should document the task tool");
+ok("agents listing");
+
+header("26f: @agent mention delegates the turn and streams a subagent panel");
+setup.mockInput.typeText("@explore");
+await sleep(200);
+frame = strip(setup.captureCharFrame());
+console.assert(autoKind() === "at", "FAIL: @ should open the at-popup, got " + autoKind());
+const atLines = frame.split("\n");
+const atY = atLines.findIndex(l => l.includes("@explore"));
+console.assert(atY > 0, "FAIL: @explore should be a suggestion row");
+setup.mockInput.pressEscape();
+await sleep(150);
+setup.mockInput.typeText("@explore find the bug");
+await sleep(200);
+console.assert(autoKind() !== "at", "FAIL: a completed @agent query must not keep the popup open");
+setup.mockInput.pressEnter();
+// The child's final patch (done:true) lands after the turn settles; wait for
+// the panel's "finished" status to render instead of a fixed sleep.
+frame = await waitForFrame(f => f.includes("finished"), "subagent panel final status");
+const lastUser = messages().slice().reverse().find((m: any) => m.role === "user");
+console.assert(lastUser && String(lastUser.content).indexOf("@explore") === -1, "FAIL: user bubble should be stripped of the @mention");
+console.assert(String(lastUser.content) === "find the bug", "FAIL: user bubble should carry only the query text");
+console.assert(messages().some((m: any) => m.agentLabel === "explore"), "FAIL: assistant message should carry agentLabel explore");
+console.assert(frame.includes("@explore"), "FAIL: chat should show the agent label @explore");
+console.assert(frame.includes("child findings"), "FAIL: subagent panel should stream the child delta");
+console.assert(frame.includes("grep"), "FAIL: subagent panel should show tool log");
+console.assert(frame.includes("finished"), "FAIL: subagent panel should show final status");
+ok("agent mention delegation");
 
 header("27: bash-based diff detection (git + non-git)");
 const fd = await import("../core/file-diffs.js");
@@ -984,8 +1188,9 @@ await pumpRenders();
 console.assert(q36.input() === inputBefore36, "FAIL: typing while popup open must not reach the input bar");
 console.assert(q36.permission() !== null, "FAIL: popup should stay open while typing the answer");
 frame = strip(setup.captureCharFrame());
-console.assert(frame.includes("Question"), "FAIL: typing an answer should switch to the Question popup, got:\n" + frame);
-console.assert(frame.includes("no thanks"), "FAIL: Question popup should show the typed answer");
+console.assert(frame.includes("Answer"), "FAIL: typing an answer should switch the popup to answer mode, got:\n" + frame);
+console.assert(frame.includes("no thanks"), "FAIL: answer input should show the typed text");
+console.assert(!frame.includes("Question —"), "FAIL: full-screen Question overlay must not open");
 // Esc returns to the permission options (no resolve yet).
 setup.mockInput.pressEscape();
 await sleep(100);
@@ -1074,9 +1279,7 @@ try {
   await sleep(300);
   console.assert(q36.toasts().some(t => String(t.text).startsWith("Budget: free")), "FAIL: /budget free should show a confirmation toast");
   console.assert(q36.budgetLevel() === "free", "FAIL: budgetLevel signal should be free, got " + q36.budgetLevel());
-  await pumpRenders();
-  frame = strip(setup.captureCharFrame());
-  console.assert(frame.includes("[free]"), "FAIL: sidebar should render [free]");
+  frame = await waitForFrame(f => f.includes("[free]"), "sidebar to render [free]");
   setup.mockInput.typeText("/budget bogus");
   await sleep(150);
   setup.mockInput.pressEnter();
@@ -1359,30 +1562,81 @@ setup.mockInput.typeText("a");
 await sleep(400);
 frame = strip(setup.captureCharFrame());
 console.assert(modal()?.type === "select", "FAIL: /mcp + a should open the preset picker");
-console.assert(frame.includes("Supabase MCP"), "FAIL: preset picker should list Supabase MCP, got:\n" + frame);
+console.assert(frame.includes("Playwright MCP"), "FAIL: preset picker should list dev-tool MCP presets, got:\n" + frame);
+console.assert(!frame.includes("Supabase"), "FAIL: connectors (Supabase) must not leak into the /mcp picker, got:\n" + frame);
+for (let n = 0; n <= MCP_PRESETS.length; n++) { setup.mockInput.pressArrow("down"); await sleep(40); }
+await sleep(200);
+frame = strip(setup.captureCharFrame());
 console.assert(frame.includes("Custom"), "FAIL: preset picker should include a Custom entry, got:\n" + frame);
-setup.mockInput.pressArrow("down");
-await sleep(60);
-setup.mockInput.pressArrow("down");
-await sleep(60);
-setup.mockInput.pressArrow("down");
-await sleep(60);
-setup.mockInput.pressArrow("down");
-await sleep(60);
 setup.mockInput.pressEnter();
 await sleep(300);
-console.assert(modal()?.type === "input", "FAIL: picking Custom… should open the free-form input");
-setup.mockInput.typeText("probe-mcp echo hello");
-await sleep(150);
-setup.mockInput.pressEnter();
-await sleep(400);
-console.assert(modal()?.type === "mcp", "FAIL: after adding the preset the flow should reopen the /mcp browser");
+console.assert(modal()?.type === "addserver", "FAIL: picking Custom… should open the one-shot add form, got " + String(modal()?.type));
+frame = strip(setup.captureCharFrame());
+console.assert(frame.includes("Name"), "FAIL: form should show a Name field, got:\n" + frame);
+console.assert(frame.includes("Command"), "FAIL: form should show a Command field, got:\n" + frame);
+console.assert(frame.includes("Args"), "FAIL: form should show an Args field, got:\n" + frame);
+console.assert(frame.includes("Env vars"), "FAIL: form should show an Env vars field, got:\n" + frame);
+
+// All four fields on one modal; Up/Down/Tab moves focus; typing edits the
+// active field. Fill them and press Enter on the last field to save.
+setup.mockInput.typeText("probe-mcp");
+await sleep(60);
+setup.mockInput.pressArrow("down"); // Command
+setup.mockInput.typeText("echo");
+await sleep(60);
+setup.mockInput.pressArrow("down"); // Args
+setup.mockInput.typeText("hello");
+await sleep(60);
+setup.mockInput.pressArrow("down"); // Env vars
+setup.mockInput.typeText("PROBE_KEY=probe123");
+await sleep(60);
+setup.mockInput.pressEnter();       // save
+await sleep(300);
+console.assert(modal()?.type === "mcp", "FAIL: after adding the custom server the flow should reopen the /mcp browser");
 const mcp44 = require("../mcp/mcp-manager.js");
-console.assert(mcp44.listServers().some(s => s.name === "probe-mcp"), "FAIL: preset add should persist the server");
+console.assert(mcp44.listServers().some(s => s.name === "probe-mcp"), "FAIL: guided add should persist the server");
 mcp44.removeServer("probe-mcp");
 setup.mockInput.pressEscape();
 await sleep(150);
-ok("mcp preset picker");
+ok("mcp preset picker + one-shot add form");
+
+header("45: /connectors — hosting/cloud presets live in their own browser");
+setup.mockInput.typeText("/connectors");
+await sleep(200);
+setup.mockInput.pressEnter();
+await sleep(300);
+console.assert(modal()?.type === "connectors", "FAIL: /connectors should open the connector browser, got " + String(modal()?.type));
+setup.mockInput.typeText("a");
+await sleep(400);
+frame = strip(setup.captureCharFrame());
+console.assert(frame.includes("Supabase"), "FAIL: connector picker should list Supabase, got:\n" + frame);
+console.assert(frame.includes("Next.js"), "FAIL: connector picker should list Next.js, got:\n" + frame);
+console.assert(frame.includes("Railway"), "FAIL: connector picker should list Railway, got:\n" + frame);
+console.assert(frame.includes("Vercel"), "FAIL: connector picker should list Vercel, got:\n" + frame);
+console.assert(!frame.includes("Playwright"), "FAIL: dev-tool MCP presets must not leak into /connectors, got:\n" + frame);
+// Pick Railway (index 2) — token prompt comes from the same one-shot form.
+setup.mockInput.pressArrow("down");
+await sleep(40);
+setup.mockInput.pressArrow("down");
+await sleep(40);
+setup.mockInput.pressEnter();
+await sleep(300);
+// A preset pick opens the same AddServerModal — env field shows KEY= placeholders.
+console.assert(modal()?.type === "addserver", "FAIL: preset pick should open the add form, got " + String(modal()?.type));
+frame = strip(setup.captureCharFrame());
+console.assert(frame.includes("RAILWAY_API_TOKEN"), "FAIL: form should prefill the env key, got:\n" + frame);
+// Fill Env vars (focus starts there for a preset with prompts), press Enter to save.
+setup.mockInput.typeText("railway_fake_token");
+await sleep(60);
+setup.mockInput.pressEnter();
+await sleep(400);
+console.assert(modal()?.type === "connectors", "FAIL: saving the preset form should reopen the connectors browser, got " + String(modal()?.type));
+const mcp45 = require("../mcp/mcp-manager.js");
+console.assert(mcp45.listServers().some(s => s.name === "railway"), "FAIL: railway should be added");
+mcp45.removeServer("railway");
+setup.mockInput.pressEscape();
+await sleep(150);
+ok("connectors browser + one-shot add form");
 
 console.log("");
 _sessMock.sendUserMessage = _realSendAll;

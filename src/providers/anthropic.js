@@ -126,13 +126,14 @@ async function chat(messages, options = {}) {
   return { ...normalizeBlocks(data.content || []), usage: data.usage };
 }
 
-async function stream(messages, options = {}, onDelta) {
+async function stream(messages, options = {}, onDelta, onReasoning) {
   const body = { ...buildBody(messages, options), stream: true };
   const resp = await post(body, options);
   if (!resp.body) throw new Error('Anthropic stream: empty response body');
   const decoder = new TextDecoder('utf-8');
   let buf = '';
   let content = '';
+  let reasoning = '';
   let usage = null;
   const toolAcc = new Map();
 
@@ -154,6 +155,9 @@ async function stream(messages, options = {}, onDelta) {
         if (d.type === 'text_delta') {
           content += d.text;
           if (onDelta) onDelta(d.text);
+        } else if (d.type === 'thinking_delta') {
+          reasoning += d.thinking || '';
+          if (onReasoning) onReasoning(d.thinking || '');
         } else if (d.type === 'input_json_delta') {
           if (!toolAcc.has(evt.index)) toolAcc.set(evt.index, { id: '', name: '', input: '' });
           toolAcc.get(evt.index).input += d.partial_json;
@@ -169,7 +173,7 @@ async function stream(messages, options = {}, onDelta) {
     toolCalls.push({ id: acc.id, name: acc.name, input });
   }
 
-  return { content, toolCalls, usage };
+  return { content, reasoning, toolCalls, usage };
 }
 
 const models = [

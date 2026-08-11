@@ -1,7 +1,7 @@
 # Cross-platform CI: unit tests + strict core typecheck on Linux and Windows.
 # macOS: add a job with `tags: [macos]` once a macOS runner is available.
 #
-# The full `bun run test` gate runs: interactive TUI test (50), unit tests (87),
+# The full `bun run test` gate runs: interactive TUI test (51), unit tests (87),
 # and `lint:core` (strict TypeScript over the core JSDoc layer).
 #
 # Bun is pinned to 1.3.14 on both platforms so CI never silently tracks a new

@@ -6,7 +6,7 @@ import path from "path";
 import fs from "fs";
 import os from "os";
 import { execSync } from "child_process";
-import { palette, setTheme, themeOptions, LOOM_LOGO } from "./theme.ts";
+import { palette, setTheme, themeOptions, themeName, LOOM_LOGO } from "./theme.ts";
 import {
   messages, setMessages, input, setInput, cursor, setCursor, setDraft,
   thinking, setThinking,
@@ -28,6 +28,7 @@ import {
   permission, requestPermission,
   userExpandedIdx, setUserExpandedIdx,
   showToast,
+  wireTodoEvents,
 } from "./store.ts";
 import { BreadcrumbBar } from "./components/BreadcrumbBar.tsx";
 import { SplashScreen } from "./components/SplashScreen.tsx";
@@ -35,17 +36,18 @@ import { ChatArea, estVisualLines, USER_PREVIEW_LINES } from "./components/ChatA
 import { Sidebar } from "./components/Sidebar.tsx";
 import { InputBar } from "./components/InputBar.tsx";
 import { ToastOverlay } from "./components/ToastOverlay.tsx";
-import { QuestionPopupOverlay } from "./components/PermissionPopup.tsx";
+import { PermissionPopup } from "./components/PermissionPopup.tsx";
 import { formatToolLogLine } from "./toolname.ts";
 import {
   ProviderPicker, SelectModal, InputModal, SettingsModal, CompanionModal,
-  PaletteModal, McpModal,
+  PaletteModal, McpModal, ConnectorsModal, AddServerModal,
   openModelPicker, openKeyModal, openBaseUrlEditor,
-  openCompanionPicker, showProvidersText, showHelpText,
+  openCompanionPicker, showProvidersText, showHelpText, showAgentsText,
 } from "./components/Modals.tsx";
 import { saveSession, loadSession } from "../core/session-store.js";
 import { MEMORY_TEMPLATE } from "../core/session.js";
 import { loadConfig, saveConfig, getBaseUrl } from "../config/settings.js";
+import { loadAgents, resolveAgent } from "../core/agents.js";
 import { snapshotBefore, snapshotAfter, snapshotBashBefore, diffBashAfter, clearFileDiffs } from "../core/file-diffs.js";
 import { createRestorePoint, listRestorePoints, restoreTo } from "../core/restore.js";
 import { PROVIDERS, PROVIDER_ORDER, PROVIDER_LABELS } from "../providers/index.js";
@@ -80,7 +82,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
   // Shell helper
   function runShell(cmd: string): string {
     try {
-      return (execSync(cmd, { cwd: process.cwd(), encoding: "utf8", timeout: 15000, stdio: "pipe" }) || "(no output)").slice(0, 4000);
+      return (execSync(cmd, { cwd: process.cwd(), encoding: "utf8", timeout: 15000, stdio: "pipe", windowsHide: true }) || "(no output)").slice(0, 4000);
     } catch (e: any) { return "Error: " + String(e?.message || e).slice(0, 500); }
   }
 
@@ -100,10 +102,20 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
       var q = text.slice(1).toLowerCase();
       var hits = SLASH_LIST.filter(function(c) { return c.cmd.startsWith(q); }).map(function(c) { return { label: "/" + c.cmd, desc: c.desc + (c.args ? " \u2014 " + c.args : "") }; } as Suggestion);
       setSuggestions(hits); setAutoKind("slash"); setAutoIndex(0);
-    } else if (text.startsWith("@")) {
+    } else if (text.startsWith("@") && !/\s/.test(text.slice(text.lastIndexOf("@") + 1))) {
+      // Only when the trailing token after the last @ is unspaced ("@ex…"):
+      // a completed "@agent query" must not re-open the picker.
       var m = text.match(/@([\w\.\-\/\\]*)$/);
-      var files = fuzzyFiles(m ? m[1] : "");
-      setSuggestions(files.slice(0, 10).map(function(f) { return { label: "@" + f } as Suggestion; })); setAutoKind("file"); setAutoIndex(0);
+      var q = (m ? m[1] : "").toLowerCase();
+      // Subagents first (the main agent delegates to them automatically), then
+      // files, so "@ex…" suggests @explore before paths.
+      var agentHits = Object.values(loadAgents()).filter(function(a: any) {
+        return a.mode === "subagent" && (a.id.startsWith(q) || a.name.toLowerCase().startsWith(q));
+      }).map(function(a: any) { return { label: "@" + a.id, desc: a.description } as Suggestion; });
+      var fileHits = fuzzyFiles(m ? m[1] : "").slice(0, Math.max(1, 10 - agentHits.length)).map(function(f) { return { label: "@" + f } as Suggestion; });
+      setSuggestions(agentHits.concat(fileHits)); setAutoKind("at"); setAutoIndex(0);
+    } else if (text.startsWith("@")) {
+      setSuggestions([]); setAutoKind("none"); setAutoIndex(0);
     } else if (text.startsWith("!")) {
       setSuggestions([{ label: "!ls -la" }, { label: "!git status" }, { label: "!git diff" }, { label: "!pwd" } as Suggestion[]]); setAutoKind("shell"); setAutoIndex(0);
     }
@@ -120,7 +132,22 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
 
     if (raw.startsWith("/")) { recordPrompt(raw); setDraft(""); processSlash(raw); return; }
     if (raw.startsWith("!")) { recordPrompt(raw); setDraft(""); appendMessage({ role: "user", content: raw }); appendMessage({ role: "system", content: runShell(raw.slice(1)) }); return; }
-    if (raw.startsWith("@")) raw = expandAt(raw);
+
+    // "@agent …" delegates the whole turn to that subagent (same as the model
+    // calling the task tool — but explicit). "@file …" still inlines the file.
+    var agentId: string | null = null;
+    var userText: string | undefined;
+    if (raw.startsWith("@")) {
+      var atMatch = raw.match(/^@([\w\-]+)\s*([\s\S]*)$/);
+      if (atMatch) {
+        var atAgent = resolveAgent(atMatch[1]);
+        if (atAgent && atAgent.mode === "subagent") {
+          agentId = atAgent.id;
+          userText = atMatch[2].trim() || "Continue with your task.";
+        }
+      }
+      if (!agentId) raw = expandAt(raw);
+    }
 
     if (thinking()) {
       // Keep the text in the input bar — hint shown in the footer while held.
@@ -128,10 +155,10 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
     }
     recordPrompt(raw);
     setDraft("");
-    runPrompt(raw, false);
+    runPrompt(userText != null ? userText : raw, false, agentId, userText);
   }
 
-  function runPrompt(raw: string, shown: boolean) {
+  function runPrompt(raw: string, shown: boolean, agentId?: string | null, userText?: string) {
     notifyPet({ mood: "working" });
     if (!shown) appendMessage({ role: "user", content: raw });
     // Snapshot the project in the background so /restore always works, without
@@ -139,7 +166,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
     setTimeout(function() { try { createRestorePoint(raw); } catch {} }, 0);
     setThinking(true); setThinkStart(Date.now());
     var idx = messages().length;
-    appendMessage({ role: "assistant", content: "", thinking: true });
+    appendMessage({ role: "assistant", content: "", thinking: true, agentLabel: agentId || undefined });
     var t0 = Date.now();
 
     var sess = getSession();
@@ -147,12 +174,32 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
     setSpeedStats({ live: { elapsedMs: 0, firstTokenMs: null, tokensPerSec: 0 }, last: sess.getSpeed().last });
     var turnDiffs: any[] = [];
     var lastSpeedPush = 0;
+    // Streaming is batched: rapid deltas would re-render the whole chat (and
+    // the diff patches inside it) dozens of times a second, which flickers the
+    // whole screen. Text is accumulated and flushed ~10/sec instead.
+    var contentAcc = "";
+    var reasonAcc = "";
+    var flushTimer: any = null;
+    // Live subagent delegation panel (task tool): streamed deltas, tool calls
+    // and status land in the message's `subagent` field while the child runs.
+    var subAcc: any = { agent: "", text: "", log: "", status: "" };
+    function flushStream() {
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+      // Patch the FULL accumulated text (never reset): the old per-delta
+      // replace made the bubble show only the newest chunk and flicker the
+      // whole screen while writing.
+      if (contentAcc) patchLastMessage({ content: contentAcc });
+      if (reasonAcc) patchLastMessage({ thinkingContent: reasonAcc });
+      if (subAcc.agent) patchMessageAt(idx, { subagent: { agent: subAcc.agent, text: subAcc.text, log: subAcc.log, status: subAcc.status } });
+    }
     var speedTimer = setInterval(function() {
       if (thinking()) setSpeedStats({ live: sess.getSpeed().live, last: sess.getSpeed().last });
     }, 1000);
+    var sendOpts: any = agentId ? { agentId: agentId } : undefined;
     sess.sendUserMessage(raw, {
       onDelta: function(txt) {
-        patchLastMessage({ content: txt, thinking: false });
+        contentAcc += txt;
+        if (!flushTimer) flushTimer = setTimeout(flushStream, 100);
         // Throttle sidebar speed updates to ~2/sec so fast streams don't spam renders.
         var now = Date.now();
         if (now - lastSpeedPush > 500) {
@@ -160,12 +207,25 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
           setSpeedStats({ live: sess.getSpeed().live, last: sess.getSpeed().last });
         }
       },
+      onReasoning: function(txt) {
+        reasonAcc += txt;
+        if (!flushTimer) flushTimer = setTimeout(flushStream, 100);
+      },
+      onSubagent: function(ev: any) {
+        if (!ev) return;
+        if (ev.agent) subAcc.agent = ev.agent;
+        if (ev.type === "delta" || ev.type === "reasoning") subAcc.text += String(ev.text || "");
+        else if (ev.type === "tool") subAcc.log += (subAcc.log ? " \u00B7 " : "") + String(ev.text || "");
+        else if (ev.type === "status") subAcc.status = String(ev.text || "");
+        if (!flushTimer) flushTimer = setTimeout(flushStream, 100);
+      },
       onAutoCompact: function(res) {
         if (res?.compacted) {
           appendMessage({ role: "system", content: "Auto-compacted: " + res.method + " \u2014 summarized/truncated " + res.removed + " earlier messages. Context was near the model limit." });
         }
       },
       onTool: function(name, inp) {
+        flushStream();
         patchLastMessage({ toolLog: formatToolLogLine(name, inp) });
         notifyPet({ mood: "working" });
         if (name === "write" || name === "edit") {
@@ -180,29 +240,38 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
         return requestPermission(String(name), String(command || ""), String(label || ""));
       },
       onToolResult: function(name, out, inp) {
+        flushStream();
         patchLastMessage({ toolResult: "-> " + String(out?.result || out?.error || "").slice(0, 200) });
         var diffs2: any[] = [];
         var fp = inp?.filePath;
         if ((name === "write" || name === "edit") && fp && !out?.error) {
           try {
             var d = snapshotAfter(fp);
+            // New files get no diff — there is nothing to change yet; only
+            // edits of existing files show a patch.
             if (d.added || d.removed) diffs2.push(d);
           } catch {}
         }
         if (name === "bash" && !out?.error) {
-          try { diffs2 = diffs2.concat(diffBashAfter()); } catch {}
+          try { diffs2 = diffs2.concat(diffBashAfter().filter(function(d2: any) { return !d2.isNew; })); } catch {}
         }
         if (diffs2.length) {
           var merged = turnDiffs.filter(function(x) { return !diffs2.some(function(y) { return y.abs === x.abs; }); }).concat(diffs2);
           turnDiffs = merged;
-          patchMessageAt(idx, { fileDiffs: merged });
+          // Patch only when the list actually changed, or every tool result
+          // forces a full re-render of the message mid-stream.
+          var cur = messages()[idx]?.fileDiffs || [];
+          if (cur.length !== merged.length || cur.some(function(x: any, i: number) { return x.abs !== merged[i].abs; })) {
+            patchMessageAt(idx, { fileDiffs: merged });
+          }
         }
       },
       onModelSwitch: function(info) {
         appendMessage({ role: "system", content: "Model \u2014 tokens finished on " + info.from + ", auto-switched to " + info.to + " and retrying." });
         refreshProviderState();
       },
-    }).then(function(resp) {
+    }, sendOpts).then(function(resp) {
+      flushStream();
       var isErr = resp.type === "error";
       if (resp.interrupted) {
         // Keep the partial text in the bubble; the session already stored it,
@@ -218,13 +287,25 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
       notifyPet({ mood: isErr ? "error" : "success", until: 2500 });
       setSpeedStats({ live: null, last: sess.getSpeed().last });
     }).catch(function(e) {
+      flushStream();
       var err = e || {};
       patchMessageAt(idx, { content: "Error: " + String(err.message || err).slice(0, 500), thinking: false, isError: true, thinkTime: Date.now() - t0 });
       notifyPet({ mood: "error" });
     }).finally(function() {
       clearInterval(speedTimer);
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+      if (offTodos) { offTodos(); offTodos = null; }
+      // Freeze the subagent panel at its final state ("finished").
+      if (subAcc.agent) patchMessageAt(idx, { subagent: { agent: subAcc.agent, text: subAcc.text, log: subAcc.log, status: subAcc.status, done: true } });
       setThinking(false); setThinkStart(null); recomputeTodos(); refreshUsage();
       setTimeout(function() { notifyPet({ mood: "idle" }); }, 3000);
+    });
+    // Per-turn todo capture: todo updates land in the message's patch region
+    // (alongside file diffs) instead of only the sidebar.
+    var offTodos: (() => void) | null = on("todos:changed", function(list: any[]) {
+      patchMessageAt(idx, { todos: (Array.isArray(list) ? list : []).map(function(t: any) {
+        return { done: t.status === "completed", inProgress: t.status === "in_progress", cancelled: t.status === "cancelled", text: String(t.content || "") };
+      }) });
     });
   }
 
@@ -237,6 +318,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
 
     switch (cmd) {
       case "help": showHelpText(); return;
+      case "agents": showAgentsText(); return;
       case "build": case "plan": case "chat": {
         var modeInfo: Record<string, string> = {
           build: "Build \u2014 all tools enabled",
@@ -564,6 +646,18 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
         openModal({ type: "mcp" });
         return;
       }
+      case "connectors": {
+        var sub3 = args[0];
+        if (sub3 === "add") { appendMessage({ role: "system", content: plugin.mcpAddCmd(args.slice(1)) }); return; }
+        if (sub3 === "remove") { appendMessage({ role: "system", content: plugin.mcpRemoveCmd(args.slice(1)) }); return; }
+        if (sub3 === "toggle") { appendMessage({ role: "system", content: plugin.mcpToggleCmd(args.slice(1)) }); return; }
+        if (sub3 === "help") { appendMessage({ role: "system", content: plugin.mcpHelp() }); return; }
+        // Connector browser: hosting/cloud services (Supabase, Railway, Vercel,
+        // Netlify, Cloudflare, Next.js). Same server store as /mcp, different
+        // preset list behind the "A" add flow.
+        openModal({ type: "connectors" });
+        return;
+      }
       case "diff": appendMessage({ role: "system", content: plugin.diffCmd() }); return;
       case "debug": appendMessage({ role: "system", content: plugin.debugCmd() }); return;
       case "editor": appendMessage({ role: "system", content: plugin.editorCmd() }); return;
@@ -574,18 +668,31 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
       case "thinking": setShowThinking(function(v) { return !v; }); showToast("Thinking display: " + (showThinking() ? "on" : "off")); return;
       case "details": setShowToolDetails(function(v) { return !v; }); showToast("Tool details: " + (showToolDetails() ? "on" : "off")); return;
       case "theme": {
+        // Live preview: moving the selection immediately shows the theme
+        // behind the modal; Enter confirms and closes. Esc restores the
+        // previous theme without saving it.
         var tOpts = themeOptions().map(function(t) { return { label: t.label, value: t.id, sub: t.desc }; });
         if (args.length) {
           if (setTheme(args[0].toLowerCase())) { showToast("Theme: " + args[0].toLowerCase(), "ok"); }
           else showToast("Unknown theme: " + args[0] + ". Try /theme to pick.", "error");
-        } else {
-          openModal({
-            type: "select", title: "Select Theme", options: tOpts,
-            onPick(val, opt) {
-              if (setTheme(val)) { closeModal(); showToast("Theme: " + (opt?.label || val), "ok"); }
-            },
-          });
+          return;
         }
+        var prevTheme = themeName();
+        openModal({
+          type: "select", title: "Select Theme",
+          options: tOpts,
+          searchable: false,
+          preview: true,
+          onPick(val: any, opt: any) {
+            if (setTheme(val)) { closeModal(); showToast("Theme: " + (opt?.label || val), "ok"); }
+          },
+          onPreview(val: any) { if (val) { try { setTheme(val); } catch {} } },
+          onCancel() {
+            // Restore the pre-picker theme if the user bailed with Esc.
+            if (themeName() !== prevTheme) { try { setTheme(prevTheme); } catch {} }
+            closeModal();
+          },
+        });
         return;
       }
       case "companion": openCompanionPicker(); return;
@@ -644,7 +751,14 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
     if (k === "escape") {
       if (leaderPending()) { setLeaderPending(false); return; }
       if (thinking()) { try { getSession().interrupt(); } catch {} setThinking(false); return; }
-      if (ma) { closeModal(); return; }
+      if (ma) {
+        // Honor the modal's own cancel hook (e.g. multi-step add flows return
+        // to the browser that launched them) — App runs before the modal's
+        // handler, so the modal must not rely on receiving the key itself.
+        closeModal();
+        if (ma.onCancel) ma.onCancel();
+        return;
+      }
       setDraft(""); setSuggestions([]); setAutoKind("none"); setAutoIndex(0); historyReset();
       return;
     }
@@ -772,7 +886,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
       if (!text.trim()) return;
       try { process.stdout.write("\x1b]52;c;" + Buffer.from(text, "utf8").toString("base64") + "\x07"); } catch {}
       try {
-        execSync('powershell -NoProfile -NonInteractive -Command "$input | Set-Clipboard"', { input: text, stdio: ["pipe", "ignore", "ignore"], timeout: 8000 });
+        execSync('powershell -NoProfile -NonInteractive -Command "$input | Set-Clipboard"', { input: text, stdio: ["pipe", "ignore", "ignore"], timeout: 8000, windowsHide: true });
       } catch {}
       showToast("Copied " + text.length + " chars to clipboard.", "ok");
     } catch {}
@@ -799,6 +913,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
   onMount(function() {
     refreshProviderState();
     refreshUsage();
+    wireTodoEvents();
     registerSuggestionPicker(function(label: string) {
       if (label.startsWith("/")) processSlash(label);
       else if (label.startsWith("!")) { appendMessage({ role: "user", content: label }); appendMessage({ role: "system", content: runShell(label.slice(1)) }); }
@@ -843,19 +958,26 @@ export function App(props: { initialPrompt?: string; resumeSession?: string }) {
         </box>
       )}
 
-      {modal() && (
-        <box position="absolute" top={0} left={0} right={0} bottom={0} flexDirection="column" alignItems="center" justifyContent="center" zIndex={99}>
-          {modal().type === "provider" ? <ProviderPicker /> : null}
-          {modal().type === "select" ? <SelectModal title={modal().title} options={modal().options ?? []} onPick={modal().onPick} searchable={modal().searchable} /> : null}
-          {modal().type === "input" ? <InputModal title={modal().title} placeholder={modal().placeholder} onPick={modal().onPick} isKey={modal().isKey} /> : null}
-          {modal().type === "settings" ? <SettingsModal /> : null}
-          {modal().type === "companion" ? <CompanionModal /> : null}
-          {modal().type === "palette" ? <PaletteModal onPick={modal().onPick} /> : null}
-          {modal().type === "mcp" ? <McpModal /> : null}
-        </box>
-      )}
-
-      <QuestionPopupOverlay />
+      {(() => {
+        // Snapshot the modal object once: closeModal() inside an onCancel / key
+        // handler nulls the store mid-render, so reading modal() again in
+        // props would throw "null is not an object" on every Escape.
+        const m = modal();
+        if (!m) return null;
+        return (
+          <box position="absolute" top={0} left={0} right={0} bottom={0} flexDirection="column" alignItems="center" justifyContent="center" zIndex={99}>
+            {m.type === "provider" ? <ProviderPicker /> : null}
+            {m.type === "select" ? <SelectModal title={m.title} options={m.options ?? []} onPick={m.onPick} searchable={m.searchable} onCancel={m.onCancel} /> : null}
+            {m.type === "input" ? <InputModal title={m.title} placeholder={m.placeholder} onPick={m.onPick} isKey={m.isKey} onCancel={m.onCancel} /> : null}
+            {m.type === "settings" ? <SettingsModal /> : null}
+            {m.type === "companion" ? <CompanionModal /> : null}
+            {m.type === "palette" ? <PaletteModal onPick={m.onPick} /> : null}
+            {m.type === "mcp" ? <McpModal /> : null}
+            {m.type === "connectors" ? <ConnectorsModal /> : null}
+            {m.type === "addserver" ? <AddServerModal kind={m.kind} backType={m.backType} presetId={m.presetId} onSaved={m.onSaved} /> : null}
+          </box>
+        );
+      })()}
 
       <ToastOverlay />
     </box>

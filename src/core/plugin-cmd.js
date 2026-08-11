@@ -86,6 +86,7 @@ function mcpHelp() {
     '  /mcp add <name> <command> [args...]   Add a stdio server',
     '  /mcp remove <name>                    Remove a server',
     '  /mcp toggle <name>                    Enable/disable a server',
+    '  /connectors     Browse hosting/cloud connectors (Supabase, Railway, Vercel, Netlify, Cloudflare, Next.js)',
     '',
     'Default servers (installed once, first launch):',
     '  enabled:  fetch, memory',
@@ -134,9 +135,9 @@ function mcpToggleCmd(args) {
 function diffCmd() {
   const { execSync } = require('child_process');
   try {
-    const stat = execSync('git diff --stat', { cwd: process.cwd(), encoding: 'utf8', timeout: 5000 }).trim();
+    const stat = execSync('git diff --stat', { cwd: process.cwd(), encoding: 'utf8', timeout: 5000, windowsHide: true }).trim();
     if (!stat) return 'No changes to show (clean working tree).';
-    const full = execSync('git diff', { cwd: process.cwd(), encoding: 'utf8', timeout: 5000, maxBuffer: 500 * 1024 }).trim();
+    const full = execSync('git diff', { cwd: process.cwd(), encoding: 'utf8', timeout: 5000, maxBuffer: 500 * 1024, windowsHide: true }).trim();
     return '## Git Diff\n\n```\n' + full.slice(0, 8000) + '\n```';
   } catch {
     return 'Not a git repository or git is not available. Run in a git project directory.';
@@ -169,7 +170,7 @@ function editorCmd() {
   }
   try {
     if (process.platform === 'win32') {
-      execSync('start "" "' + loomMd + '"', { stdio: 'ignore' });
+      execSync('start "" "' + loomMd + '"', { stdio: 'ignore', windowsHide: true });
     } else if (process.platform === 'darwin') {
       execSync('open "' + loomMd + '"', { stdio: 'ignore' });
     } else {

@@ -54,20 +54,20 @@ export function Companion() {
 
   return (
     <Show when={petEnabled()}>
-      <box flexDirection="column" alignItems="center" marginBottom={1}>
+      <box flexDirection="column" alignItems="center" height={7} flexShrink={0}>
         <Show when={bubbleText().length > 0}>
-          <box border borderStyle="rounded" paddingX={1} marginBottom={0} backgroundColor={ui.bgPanelAlt} borderColor={ui.border}>
-            <text fg={ui.fgDim} dim>{bubbleText()}</text>
+          <box border borderStyle="rounded" paddingX={1} marginBottom={0} backgroundColor={ui.bgPanelAlt} borderColor={ui.border} flexShrink={0}>
+            <text fg={ui.fgDim} dim height={1}>{bubbleText()}</text>
           </box>
         </Show>
 
-        <box onMouseDown={handleClick} paddingX={1} paddingY={0} flexDirection="column">
-          {currentArt().map((line, i) => (
-            <text key={i} fg={i === 1 ? ui.pet : ui.fgDim}>{line}</text>
+        <box onMouseDown={handleClick} paddingX={1} paddingY={0} flexDirection="column" height={3} flexShrink={0}>
+          {currentArt().slice(0, 3).map((line, i) => (
+            <text key={i} fg={i === 1 ? ui.pet : ui.fgDim} height={1} flexShrink={0}>{line}</text>
           ))}
         </box>
 
-        <text fg={ui.fgMuted} dim>
+        <text fg={ui.fgMuted} dim height={1} flexShrink={0}>
           {"~ " + companion() + (hearts() > 0 ? " <3x" + hearts() : "")}
         </text>
       </box>

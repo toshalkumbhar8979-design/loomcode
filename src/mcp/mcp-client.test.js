@@ -74,6 +74,25 @@ test("callRpc: rejects immediately when the server process exits", async () => {
   await expect(p).rejects.toThrow("exited (code 1)");
 });
 
+test("callRpc: ignores non-object stdout lines (null, arrays, strings) instead of crashing", async () => {
+  const child = fakeChild();
+  const p = mcp.callRpc(child, "tools/call", {}, 1000);
+  const id = child.lastWritten().id;
+  // A broken server can emit lines that parse to null, [], or a bare string.
+  child.stdout.emit("data", Buffer.from('null\n[]\n"not json object"\n'));
+  child.stdout.emit("data", Buffer.from(JSON.stringify({ jsonrpc: "2.0", id, result: "ok" }) + "\n"));
+  expect(await p).toBe("ok");
+});
+
+test("callRpc: fragments/{id only} don't settle early", async () => {
+  const child = fakeChild();
+  const p = mcp.callRpc(child, "tools/call", {}, 1000);
+  const id = child.lastWritten().id;
+  child.stdout.emit("data", Buffer.from(JSON.stringify({ jsonrpc: "2.0", result: "half-built" }) + "\n")); // no id
+  child.stdout.emit("data", Buffer.from(JSON.stringify({ jsonrpc: "2.0", id, result: "complete" }) + "\n"));
+  expect(await p).toBe("complete");
+});
+
 test("killTree: terminates the child even if taskkill/process-group kill fails", () => {
   const killed = [];
   const child = { pid: 999999, killed: false, kill: (sig) => { killed.push(sig); child.killed = true; } };

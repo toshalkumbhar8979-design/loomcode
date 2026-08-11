@@ -20,7 +20,7 @@ function findBun() {
   for (const p of candidates) { try { if (fs.existsSync(p)) return p; } catch {} }
   // PATH lookup (fast)
   try {
-    const out = require('child_process').execSync('bun --version', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    const out = require('child_process').execSync('bun --version', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }).trim();
     if (out) return 'bun';
   } catch {}
   return null;

@@ -47,10 +47,10 @@ function saveTrust(trust) {
 // Re-installing the same URL with different content requires re-approval.
 const defaultGit = {
   clone(url, tmp) {
-    execSync('git clone --depth 1 ' + url + ' ' + tmp, { stdio: 'ignore' });
+    execSync('git clone --depth 1 ' + url + ' ' + tmp, { stdio: 'ignore', windowsHide: true });
   },
   revParse(tmp) {
-    return execSync('git -C ' + tmp + ' rev-parse HEAD', { encoding: 'utf8' }).trim();
+    return execSync('git -C ' + tmp + ' rev-parse HEAD', { encoding: 'utf8', windowsHide: true }).trim();
   },
 };
 

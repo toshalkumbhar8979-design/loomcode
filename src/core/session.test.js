@@ -85,6 +85,10 @@ test("shouldCompact: short conversations never compact", () => {
 
 test("shouldCompact: triggers over threshold", () => {
   const s = freshSession();
+  // Pin the context window: getContextWindow falls back to 200k with no active
+  // provider, but a 1M-context model (e.g. some OpenRouter entries) makes the
+  // 0.0001 threshold unreachable for 8 short messages.
+  s.provider.active = null;
   s.config.compactThreshold = 0.0001;
   for (let i = 0; i < 8; i++) {
     s.addMessage({ role: "user", content: "padding padding padding padding padding padding" });

@@ -1,6 +1,7 @@
 const { ProviderRouter } = require('../providers');
 const { getModelMeta } = require('../providers');
 const { getToolDefinitions, getAllToolDefinitions, executeTool } = require('../tools');
+const { agentToolAllowed, filterToolDefs } = require('./agents');
 const { loadConfig, saveConfig } = require('../config/settings');
 const { PermissionManager } = require('./permissions');
 const { emit } = require('./events');
@@ -85,6 +86,12 @@ class Session {
     this.interrupted = false;
     this.abortController = null;
     this.mode = 'build';
+    // Agent system (OpenCode-style): null = the mode's default primary agent;
+    // a subagent def means THIS session (or this turn) is that agent and its
+    // tool filter gates every tool call + the provider tool schema.
+    this.agent = null;
+    this._agentBlock = null;
+    this._isChild = false;
     // Auto-create the project memory file (LOOM.md, like CLAUDE.md) on start.
     this.ensureMemoryFile();
     this.systemPrompt = this.buildSystemPrompt();
@@ -181,7 +188,7 @@ class Session {
     const plat = require('./platform').detect();
     const shell = plat.platform === 'win32' ? 'PowerShell 5.1' : 'bash/zsh';
     const hasWSL = plat.isWSL ? ' (WSL)' : '';
-    return `You are Loom, a terminal coding agent that operates on the level of Claude Code and OpenCode: fast, terse, action-first.
+    return `You are Loom, a terminal coding agent: fast, terse, action-first.
 
 ## Environment
 - Working directory: ${cwd}
@@ -203,6 +210,14 @@ ${this.loadSkills()}
 - Never narrate ("I will now read the file…"). Just call the tool.
 - Prefer edits over full-file writes when the change is small.
 - After writing code, run any test/bench command the user has relied on if one exists.
+
+## Formatting
+- ALWAYS reply in Markdown. The terminal renders it with colors, so make every reply structured and readable:
+- Use **bold** for key terms and important results, \`inline code\` for file paths, symbols and commands, and fenced \`\`\` blocks for any code or config.
+- Use ## headings and - bullet lists to organize longer replies; keep code inside fenced blocks, never inline dumps.
+- Even one-line answers should still use markdown inline styling where it helps (e.g. "Done — **rewrote** \`src/app.ts\`: \`+12 -4\` lines, tests **pass**.").
+- Never reply with a wall of plain unstyled text — the user's UI highlights markdown, and raw text renders as a single flat color.
+- Multi-step work MUST be tracked with the todowrite tool (the UI mirrors it live in a sidebar and in the chat): call it up front with the task list, update item statuses (pending/in_progress/completed/cancelled) as you work, and call it one last time when done. Keep the list items terse ("Fix signup bug", not prose).
 
 ## Hard rules
 - Batch independent tool calls into a single response; never send one tool call at a time.
@@ -288,7 +303,24 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
     this.provider.init();
   }
 
-  async sendUserMessage(text, callbacks = {}) {
+  async sendUserMessage(text, callbacks = {}, opts = {}) {
+    // Optional agent turn ("@agent ..."): the MAIN session runs this one turn
+    // as the named subagent — its tool filter gates tools, its prompt block is
+    // appended, and the reply is the subagent's own answer.
+    const wasAgent = this.agent;
+    if (opts.agentId) {
+      const { resolveAgent, buildAgentTurnBlock } = require('./agents');
+      const agent = resolveAgent(opts.agentId);
+      if (!agent) {
+        return { type: 'error', content: `Unknown agent: ${opts.agentId}` };
+      }
+      if (agent.mode !== 'subagent') {
+        return { type: 'error', content: `"${agent.name}" is a primary agent — use it directly (Tab / /${agent.id}).` };
+      }
+      this.agent = agent;
+      this._agentBlock = buildAgentTurnBlock(agent);
+    }
+
     // Config is loaded at construction; only provider pivots (setModel, /connect)
     // trigger a refresh. Re-reading disk and re-init'ing the provider on every
     // message was noticeable overhead per turn.
@@ -319,8 +351,18 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
 
     this.addMessage({ role: 'user', content: text });
     this.turnCount++;
-    emit('turn:start', { text });
-    const resp = await this.runTurn(callbacks);
+    const turnAgent = this.agent?.id || null;
+    emit('turn:start', { text, agent: turnAgent });
+    let resp;
+    try {
+      resp = await this.runTurn(callbacks);
+    } finally {
+      // Restore the default primary agent after an agent-scoped turn.
+      if (opts.agentId) {
+        this.agent = wasAgent;
+        this._agentBlock = null;
+      }
+    }
     emit('turn:end', {
       text,
       type: resp?.type,
@@ -328,6 +370,7 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
       model: (this.provider.active?.name || '') + '/' + (this.config.model?.[this.provider.active?.name] || ''),
       level: this.config.budgetLevel || 'auto',
       skills: this._activeSkill || [],
+      agent: turnAgent,
     });
     return resp;
   }
@@ -448,19 +491,25 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
     // Accumulate the streamed text so an interrupt preserves partial output
     // instead of returning "(interrupted)" and losing what was already said.
     let streamed = '';
+    // Reasoning deltas (o1/deepseek-r1-style extended thinking) streamed ahead
+    // of the answer; surfaced to the UI so "+Thought" can show real content.
+    let reasoning = '';
     // Per-turn speed telemetry: first-token latency and live tokens/sec.
     /** @type {SpeedStats} */
     const speed = this.speedStats || (this.speedStats = {
       _turnStart: 0, _firstTokenAt: 0, _liveTokens: 0,
       lastLatencyMs: null, lastTokensPerSec: null, lastDurationMs: null, lastTokens: null, lastModel: '',
     });
-    const cb = callbacks.onDelta
+    const cb = callbacks.onDelta || callbacks.onReasoning
       ? { ...callbacks, onDelta: (txt) => {
           const now = Date.now();
           streamed += txt;
           speed._liveTokens += txt.length / 4;
           if (!speed._firstTokenAt) speed._firstTokenAt = now;
           if (callbacks.onDelta) callbacks.onDelta(txt);
+        }, onReasoning: (txt) => {
+          reasoning += txt;
+          if (callbacks.onReasoning) callbacks.onReasoning(txt);
         } }
       : callbacks;
 
@@ -553,6 +602,12 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
       const outcomes = await Promise.all(toolCalls.map(async (tc) => {
         if (callbacks.onTool) callbacks.onTool(tc.name, tc.input);
 
+        // Agent gate (defense in depth — the schema is filtered in getResponse
+        // too): a subagent can never call a tool outside its agent's list.
+        if (this.agent && !agentToolAllowed(this.agent, tc.name)) {
+          return { tc, outcome: { error: `Tool "${tc.name}" is not available to the ${this.agent.name} agent.` } };
+        }
+
         // mcp add spawns arbitrary stdio servers with optional env secrets —
         // gate it like bash (only the "add" action; list/remove/enable/disable
         // only touch the local config).
@@ -588,7 +643,15 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
         // as approved so the tool-layer safety filter doesn't double-block
         // commands the user explicitly allowed.
         const input = tc.name === 'bash' || isMcpAdd ? { ...tc.input, _approved: true } : tc.input;
-        const outcome = await executeTool(tc.name, input, this.mode);
+        const outcome = await executeTool(tc.name, input, this.mode, {
+          parentSession: this,
+          signal: this.abortController ? this.abortController.signal : null,
+          progress: (ev) => {
+            // Subagent progress (task tool) — surfaced to the TUI so the live
+            // delegation panel can stream deltas, tool calls and status.
+            try { if (callbacks.onSubagent) callbacks.onSubagent(ev); } catch {}
+          },
+        });
         return { tc, outcome };
       }));
 
@@ -598,6 +661,9 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
         // Persist real todo state when the model uses the todowrite tool.
         if (tc.name === 'todowrite' && !outcome.error) {
           this.setTodos(tc.input && tc.input.todos);
+          // Notify observers (sidebar, etc.) over the tiny event bus — the TUI
+          // subscribes once and the panel updates without a re-render cycle.
+          try { emit('todos:changed', this.todos); } catch {}
         }
         if (callbacks.onToolResult) callbacks.onToolResult(tc.name, outcome, tc.input);
       }
@@ -610,6 +676,8 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
 
   async getResponse(callbacks) {
     const tools = await getAllToolDefinitions(this.mode);
+    // Agent-scoped turns (delegation) see only their agent's tool list.
+    const toolDefs = this.agent ? filterToolDefs(this.agent, tools) : tools;
 
     // Budget router: when a level is active (free/cheap/best), pick the model
     // for THIS call without rewriting the user's saved provider/model. "Free"
@@ -666,8 +734,8 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
       model,
       maxTokens: this.config.maxTokens || 8192,
       temperature: this.config.temperature ?? 0.7,
-      tools,
-      system: this.systemPrompt + (this._skillBlock || ''),
+      tools: toolDefs,
+      system: this.systemPrompt + (this._skillBlock || '') + (this._agentBlock || ''),
       signal: this.abortController?.signal,
     };
 
@@ -675,8 +743,8 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
     opts.signal = this.abortController.signal;
 
     let resp;
-    if (callbacks.onDelta) {
-      resp = await provider.stream(this.messages, opts, callbacks.onDelta);
+    if (callbacks.onDelta || callbacks.onReasoning) {
+      resp = await provider.stream(this.messages, opts, callbacks.onDelta, callbacks.onReasoning);
     } else {
       resp = await provider.chat(this.messages, opts);
     }
@@ -689,7 +757,7 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
       this.tokensUsed += (resp.usage.totalTokens || resp.usage.total_tokens || 0);
     }
 
-    this.addMessage({ role: 'assistant', content: resp.content || '', toolCalls: resp.toolCalls });
+    this.addMessage({ role: 'assistant', content: resp.content || '', toolCalls: resp.toolCalls, reasoning: resp.reasoning || '' });
     this.recordUsage(resp.usage, model, this.provider.active?.name);
     return resp;
   }

@@ -25,9 +25,9 @@ function tmpFile(name, content) {
   return p;
 }
 
-test("getToolDefinitions: build exposes all 9 base tools", () => {
+test("getToolDefinitions: build exposes all 10 base tools", () => {
   const defs = tools.getToolDefinitions("build");
-  expect(defs.map((d) => d.name).sort()).toEqual(["bash", "edit", "glob", "grep", "mcp", "read", "todowrite", "webfetch", "write"]);
+  expect(defs.map((d) => d.name).sort()).toEqual(["bash", "edit", "glob", "grep", "mcp", "read", "task", "todowrite", "webfetch", "write"]);
   for (const d of defs) {
     expect(d.description).toBeTruthy();
     expect(d.input_schema).toBeTruthy();
@@ -35,9 +35,9 @@ test("getToolDefinitions: build exposes all 9 base tools", () => {
   }
 });
 
-test("getToolDefinitions: plan exposes only read-only tools, chat none", () => {
+test("getToolDefinitions: plan exposes read-only tools + task, chat none", () => {
   const plan = tools.getToolDefinitions("plan");
-  expect(plan.map((d) => d.name).sort()).toEqual(["glob", "grep", "read", "todowrite", "webfetch"]);
+  expect(plan.map((d) => d.name).sort()).toEqual(["glob", "grep", "read", "task", "todowrite", "webfetch"]);
   expect(tools.getToolDefinitions("chat")).toEqual([]);
 });
 
@@ -182,6 +182,15 @@ test("todowrite: renders list with status summary", async () => {
     ],
   });
   expect(String(res.result)).toContain("1 done, 1 in-progress, 1 pending, 1 cancelled");
+});
+
+test("task: rejects unknown agents and primary agents", async () => {
+  const bad = await tools.executeTool("task", { prompt: "do it", agent: "nope-not-an-agent" });
+  expect(bad.error).toContain("Unknown agent");
+  const primary = await tools.executeTool("task", { prompt: "do it", agent: "build" });
+  expect(primary.error).toContain("primary agent");
+  const empty = await tools.executeTool("task", { prompt: "   " });
+  expect(empty.error).toContain("non-empty prompt");
 });
 
 test("unknown tool returns an error", async () => {

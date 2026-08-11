@@ -161,19 +161,27 @@ function createOpenAICompatProvider({ getKey, providerId, envKeyHint, clientFact
     }
   }
 
-  async function stream(messages, options = {}, onDelta) {
+  async function stream(messages, options = {}, onDelta, onReasoning) {
     const client = getClient();
     const req = { ...buildRequest(messages, options), stream: true, stream_options: { include_usage: true } };
     const requestOpts = { signal: options.signal };
     try {
       const s = await retryWithBackoff(() => client.chat.completions.create(req, requestOpts), 4, envKeyHint);
       let content = '';
+      let reasoning = '';
       let usage = null;
       const toolAcc = new Map();
 
       for await (const chunk of s) {
         if (chunk.usage) usage = chunk.usage;
         const delta = chunk.choices?.[0]?.delta || {};
+        // DeepSeek-style reasoning_content / OpenRouter reasoning deltas.
+        const rt = delta.reasoning_content || delta.reasoning;
+        if (typeof rt === 'string' && rt) {
+          reasoning += rt;
+          if (onReasoning) onReasoning(rt);
+          continue;
+        }
         if (delta.content) {
           content += delta.content;
           if (onDelta) onDelta(delta.content);
@@ -197,7 +205,7 @@ function createOpenAICompatProvider({ getKey, providerId, envKeyHint, clientFact
         toolCalls.push({ id: acc.id, name: acc.name, input });
       }
 
-      return { content, toolCalls, usage };
+      return { content, reasoning, toolCalls, usage };
     } catch (err) {
       if (isAbortError(err)) throw err;
       throw wrapErr(err, options.model || '?', envKeyHint, getBaseUrl(providerId));

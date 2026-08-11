@@ -15,9 +15,10 @@
 
 Exactly: `bun run test` — must exit 0. It runs three stages:
 
-1. `bun run src/tui/test-interactive.tsx` — 50 keyboard-interaction tests of
+1. `bun run src/tui/test-interactive.tsx` — 51 keyboard-interaction tests of
    the OpenTUI interface (splash, slash popup, paste, busy-submit hold, caret
-   editing, markdown rendering, permission popup, /budget, /skills, /mcp …).
+   editing, markdown rendering, permission popup, /budget, /skills, /mcp,
+   /connectors …).
 2. `bun run test:unit` — `bun test` over the 7 core test files
    (87 pass / 2 skip). When you add a test file under `src/`, register it in
    the `test:unit` script in `package.json` or it will NOT run in CI.

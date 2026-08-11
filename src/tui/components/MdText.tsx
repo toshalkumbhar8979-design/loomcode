@@ -5,15 +5,16 @@ import { parseMarkdown, highlightCode, CodeTok } from "../md-render.ts";
 
 const ui = palette("loom");
 
-// opencode-ish code palette: keywords pop, strings warm, comments muted,
-// numbers bright, calls accented. Keeps chat code blocks readable at a glance.
+// Code colors come straight from the active theme's TextMate syntax scopes
+// (keyword/string/comment/number/call) — same source VS Code uses, so fenced
+// blocks look right for whichever theme is picked.
 const CODE_COLORS: Record<CodeTok["style"], () => string> = {
-  kw: () => ui.secondary,
-  str: () => ui.success,
-  com: () => ui.fgMuted,
-  num: () => ui.warning,
-  call: () => ui.accent,
-  plain: () => ui.fg,
+  kw: () => ui.syntax.kw,
+  str: () => ui.syntax.str,
+  com: () => ui.syntax.com,
+  num: () => ui.syntax.num,
+  call: () => ui.syntax.call,
+  plain: () => ui.syntax.plain,
 };
 
 function CodeLine(props: { toks: CodeTok[]; k: string }) {
