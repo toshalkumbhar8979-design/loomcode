@@ -1506,7 +1506,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
     _skillDoneOff = on("turn:end", function(d: any) {
       if (d?.skills?.length) showToast("skill handled: " + d.skills.join(", "), "ok");
     });
-    (globalThis as any).__loomTrace?.("onMount-done");
+    (globalThis as any).__loomTrace("onMount-done", new Error("mount complete"));
   });
   onCleanup(function() { persistUi(); if (_skillToastOff) _skillToastOff(); if (_skillDoneOff) _skillDoneOff(); });
 

@@ -5,6 +5,7 @@ import { render } from "@opentui/solid";
 import { App } from "./tui/App.tsx";
 import { defaultMcpInstall } from "./core/plugin-cmd.js";
 
+globalThis.__loomTrace?.("entry", new Error("module imports evaluated"));
 const args = process.argv.slice(2);
 
 // Windows: switch both console codepages to UTF-8 so the box-drawing logo
@@ -45,10 +46,11 @@ const sessionId = sIdx !== -1 ? args[sIdx + 1] : null;
 const autoMode = args.includes("--auto") || args.includes("-a");
 const initialPrompt = args.filter((a, i) => !a.startsWith("-") && (sIdx === -1 || i !== sIdx + 1)).join(" ");
 
+globalThis.__loomTrace("mcp-start", new Error("defaultMcpInstall beginning"));
 try {
   defaultMcpInstall();
 } catch (e) {
-  globalThis.__loomTrace?.("mcp-install-failed", e);
+  globalThis.__loomTrace("mcp-install-failed", e);
 }
 
 if (printMode) {
@@ -62,11 +64,11 @@ if (printMode) {
   process.exit(resp.type === "error" ? 1 : 0);
 }
 
-globalThis.__loomTrace?.("render-start");
+globalThis.__loomTrace("render-start", new Error("pre-render"));
 render(() => <App initialPrompt={initialPrompt} resumeSession={sessionId} autoMode={autoMode} />, {
   targetFps: 60,
   useMouse: true,
   autoFocus: true,
   exitOnCtrlC: false,
 });
-globalThis.__loomTrace?.("render-returned");
+globalThis.__loomTrace("render-returned", new Error("post-render"));
