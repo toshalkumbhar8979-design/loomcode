@@ -1,6 +1,6 @@
 {
   "name": "loom-agent",
-  "version": "1.2.9",
+  "version": "1.2.10-rc",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/toshalkumbhar8979-design/loomcode.git"
@@ -46,7 +46,7 @@
     "openai": "^4.73.0",
     "ora": "^8.0.0",
     "shell-quote": "^1.8.1",
-    "solid-js": "^1.9.14",
+    "solid-js": "1.9.12",
     "strip-ansi": "^7.1.0",
     "tiktoken": "^1.0.22",
     "uuid": "^11.0.0",

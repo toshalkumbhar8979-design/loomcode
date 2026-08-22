@@ -21,14 +21,78 @@ if (process.platform === "win32") {
   } catch {}
 }
 
+// Windows VT-mode re-enable. When the TUI is launched through the node
+// middleman (bin/loom-tui.js or src/core/cli.js -> spawnSync(bun, ...,
+// { stdio: 'inherit' })), the child bun process inherits the console handle
+// but its console MODE flags are reset to the cooked defaults: no
+// ENABLE_VIRTUAL_TERMINAL_PROCESSING on output and no
+// ENABLE_VIRTUAL_TERMINAL_INPUT on input. The first frame OpenTUI paints
+// (written before the reset takes effect) shows, but every subsequent
+// repaint relies on ANSI cursor/clear sequences that the console then
+// ignores -> frozen splash while keys still parse. Re-assert the VT flags
+// here, inside the bun process, so repaints and input both work.
+if (process.platform === "win32") {
+  try {
+    const { dlopen } = require("bun:ffi");
+    const k32 = dlopen("kernel32.dll", {
+      GetStdHandle: { args: ["int"], returns: "ptr" },
+      GetConsoleMode: { args: ["ptr", "ptr"], returns: "int" },
+      SetConsoleMode: { args: ["ptr", "uint"], returns: "int" },
+    });
+    const STD_INPUT_HANDLE = -10;
+    const STD_OUTPUT_HANDLE = -11;
+
+    // Output: processed + wrap-at-EOL + VT processing (so ANSI repaints work).
+    const ENABLE_PROCESSED_OUTPUT = 0x0001;
+    const ENABLE_WRAP_AT_EOL_OUTPUT = 0x0002;
+    const ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004;
+    // Input: raw-ish mode for OpenTUI — VT input + processed + mouse + window,
+    // with line/echo/quick-edit cleared so keys stream and don't echo.
+    const ENABLE_PROCESSED_INPUT = 0x0001;
+    const ENABLE_MOUSE_INPUT = 0x0010;
+    const ENABLE_WINDOW_INPUT = 0x0008;
+    const ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200;
+    const ENABLE_QUICK_EDIT_MODE = 0x0040;
+    const ENABLE_LINE_INPUT = 0x0002;
+    const ENABLE_ECHO_INPUT = 0x0004;
+
+    const outH = k32.symbols.GetStdHandle(STD_OUTPUT_HANDLE);
+    const inH = k32.symbols.GetStdHandle(STD_INPUT_HANDLE);
+    const modeBuf = new Uint32Array(1);
+    const modePtr = Bun.ptr(modeBuf);
+
+    if (outH && !outH.isNull && k32.symbols.GetConsoleMode(outH, modePtr)) {
+      const cur = modeBuf[0];
+      const next = cur | ENABLE_PROCESSED_OUTPUT | ENABLE_WRAP_AT_EOL_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+      if (next !== cur) k32.symbols.SetConsoleMode(outH, next);
+    }
+    if (inH && !inH.isNull && k32.symbols.GetConsoleMode(inH, modePtr)) {
+      const cur = modeBuf[0];
+      const next = (cur | ENABLE_PROCESSED_INPUT | ENABLE_MOUSE_INPUT | ENABLE_WINDOW_INPUT | ENABLE_VIRTUAL_TERMINAL_INPUT)
+        & ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_QUICK_EDIT_MODE);
+      if (next !== cur) k32.symbols.SetConsoleMode(inH, next);
+    }
+  } catch {}
+}
+
 if (process.env.LOOM_START_CWD) {
   try { process.chdir(process.env.LOOM_START_CWD); } catch {}
 }
 
 const crashPath = () => path.join(os.homedir(), ".loom", "tui-crash.log");
+const MAX_LOG_BYTES = 1024 * 1024; // 1 MB cap, then rotate to .old
+function rotateIfNeeded() {
+  try {
+    const p = crashPath();
+    if (fs.existsSync(p) && fs.statSync(p).size > MAX_LOG_BYTES) {
+      fs.renameSync(p, p + ".old");
+    }
+  } catch {}
+}
 function record(kind, err) {
   try {
     fs.mkdirSync(path.dirname(crashPath()), { recursive: true });
+    rotateIfNeeded();
     fs.appendFileSync(
       crashPath(),
       `[${new Date().toISOString()}] ${kind}: ${(err && (err.stack || err.message)) || String(err)}\n`
@@ -39,13 +103,27 @@ globalThis.__loomTrace = record;
 process.on("uncaughtException", (e) => record("uncaughtException", e));
 process.on("unhandledRejection", (r) => record("unhandledRejection", r));
 
+// stdout byte-counter: frames flowing = counter climbs. This splits the two
+// remaining frozen-splash suspects with certainty — if the counter climbs but
+// the screen is frozen, the console is dropping VT repaints (mode flags); if
+// the counter is flat, the renderer flush-loop itself is stalled.
+let __stdoutBytes = 0;
+const __origWrite = process.stdout.write.bind(process.stdout);
+process.stdout.write = function (chunk, ...rest) {
+  try {
+    if (typeof chunk === "string") __stdoutBytes += Buffer.byteLength(chunk, "utf8");
+    else if (chunk && chunk.length) __stdoutBytes += chunk.length;
+  } catch {}
+  return __origWrite(chunk, ...rest);
+};
+
 const __hbStart = Date.now();
 let __hbTick = 0;
 let __hbScheduled = __hbStart;
 const __hbTimer = setInterval(() => {
   const now = Date.now();
-  record("heartbeat", new Error(`tick=${++__hbTick} lag=${now - __hbScheduled}ms uptime=${now - __hbStart}ms`));
+  record("heartbeat", new Error(`tick=${++__hbTick} lag=${now - __hbScheduled}ms uptime=${now - __hbStart}ms stdoutBytes=${__stdoutBytes}`));
   __hbScheduled = now + 3000;
 }, 3000);
 try { __hbTimer.unref?.(); } catch {}
-process.on("exit", () => { try { record("exit", new Error(`uptime=${Date.now() - __hbStart}ms ticks=${__hbTick}`)); } catch {} });
+process.on("exit", () => { try { record("exit", new Error(`uptime=${Date.now() - __hbStart}ms ticks=${__hbTick} stdoutBytes=${__stdoutBytes}`)); } catch {} });

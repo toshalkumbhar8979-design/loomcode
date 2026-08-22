@@ -3,6 +3,16 @@ import { palette, LOOM_LOGO } from "../theme.ts";
 import { providerName, modelName, providerKeyOk } from "../store.ts";
 import { InputBar } from "./InputBar.tsx";
 
+// Read the real version from package.json (same source as `loom --version`),
+// never a hardcoded label that drifts out of sync with releases.
+const LOOM_VERSION = (() => {
+  try {
+    return "v" + import.meta.require("../../package.json").version;
+  } catch {
+    return "v1.1.0";
+  }
+})();
+
 export function SplashScreen() {
   const ui = palette("loom");
 
@@ -27,7 +37,7 @@ export function SplashScreen() {
       </box>
 
       <box marginTop={0}>
-        <text fg={ui.fgMuted}>{"v1.1.0"}</text>
+        <text fg={ui.fgMuted}>{LOOM_VERSION}</text>
       </box>
 
       <box marginY={1} width={74}>
