@@ -557,7 +557,7 @@ if (args.includes('--help') || args.includes('-h')) {
     if (canRaw) {
       // Launch new OpenTUI TUI via bun
       const bunPath = findBun();
-      const tuiEntry = path.join(__dirname, '..', 'tui-open.tsx');
+      const tuiEntry = path.join(__dirname, '..', 'tui-bootstrap.js');
       if (bunPath && fs.existsSync(tuiEntry)) {
         const { spawnSync } = require('child_process');
         // Start bun from the package root so it discovers bunfig.toml /

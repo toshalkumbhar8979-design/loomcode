@@ -8,7 +8,7 @@ import { defaultMcpInstall } from "./core/plugin-cmd.js";
 const args = process.argv.slice(2);
 
 if (args.includes("--version") || args.includes("-v")) {
-  console.log("loom-code v1.2.0");
+  console.log(`loom-code v${import.meta.require("../package.json").version}`);
   process.exit(0);
 }
 
