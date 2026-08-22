@@ -26,17 +26,18 @@ function findBun() {
   return null;
 }
 
-const entry = path.join(__dirname, '..', 'src', 'tui-open.tsx');
-// Global installs run from arbitrary cwds where bun cannot discover our
-// bunfig.toml (Solid JSX preloader) — pass it explicitly.
-const bunfig = path.join(__dirname, '..', 'bunfig.toml');
+const entry = path.join(__dirname, '..', 'src', 'tui-bootstrap.js');
+// Start bun from the package root so it discovers our bunfig.toml/tsconfig.json
+// (Solid JSX preloader); the user's real cwd rides along in LOOM_START_CWD and
+// is restored by the bootstrap shim before app code runs.
+const pkgRoot = path.join(__dirname, '..');
+process.env.LOOM_START_CWD = process.cwd();
 const bun = findBun();
 
 if (bun) {
-  const args = fs.existsSync(bunfig) ? ['--config', bunfig] : [];
-  const result = spawnSync(bun, [...args, 'run', entry, ...process.argv.slice(2)], {
+  const result = spawnSync(bun, ['run', entry, ...process.argv.slice(2)], {
     stdio: 'inherit',
-    cwd: process.cwd(),
+    cwd: pkgRoot,
     env: process.env,
   });
   process.exit(result.status ?? 0);

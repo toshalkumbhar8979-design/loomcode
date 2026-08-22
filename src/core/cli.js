@@ -560,16 +560,17 @@ if (args.includes('--help') || args.includes('-h')) {
       const tuiEntry = path.join(__dirname, '..', 'tui-open.tsx');
       if (bunPath && fs.existsSync(tuiEntry)) {
         const { spawnSync } = require('child_process');
-        // Global installs run from arbitrary cwds — point bun at our bunfig
-        // explicitly so the Solid JSX preloader loads (see bin/loom-tui.js).
-        const pkgBunfig = path.join(__dirname, '..', '..', 'bunfig.toml');
-        const tuiArgs = fs.existsSync(pkgBunfig) ? ['--config', pkgBunfig] : [];
-        tuiArgs.push(tuiEntry);
+        // Start bun from the package root so it discovers bunfig.toml /
+        // tsconfig.json (Solid JSX preloader) even for global installs;
+        // LOOM_START_CWD restores the user's project dir in tui-bootstrap.js.
+        const pkgRoot = path.join(__dirname, '..', '..');
+        process.env.LOOM_START_CWD = process.cwd();
+        const tuiArgs = [tuiEntry];
         if (sessionId) tuiArgs.push('-s', sessionId);
         if (autoMode) tuiArgs.push('--auto');
         const prompt = promptArgs.join(' ');
         if (prompt) tuiArgs.push(...prompt.split(/\s+/));
-        process.exit(spawnSync(bunPath, tuiArgs, { stdio: 'inherit', env: process.env }).status ?? 0);
+        process.exit(spawnSync(bunPath, tuiArgs, { stdio: 'inherit', cwd: pkgRoot, env: process.env }).status ?? 0);
       }
       console.error('[loom] bun not found — full TUI requires bun (https://bun.sh/). Falling back to line-mode REPL.');
       console.error('[loom] Use --basic to skip this warning.\n');
