@@ -554,6 +554,17 @@ if (args.includes('--help') || args.includes('-h')) {
 
   if ((args.includes('--tui') || (!args.includes('--basic') && process.stdin.isTTY))) {
     const canRaw = process.stdin.isTTY && typeof process.stdin.setRawMode === 'function';
+    // Fast path: when this process is ALREADY bun (launched via bin/loom-bun.js),
+    // import the TUI in-process — no spawn, no second console-mode negotiation.
+    const underBun = typeof Bun !== 'undefined' && !!process.versions.bun;
+    if (underBun && canRaw) {
+      try {
+        await import('../tui-open.tsx');
+        return;
+      } catch (err) {
+        console.error('[loom] TUI failed: ' + (err && err.message ? err.message : err));
+      }
+    }
     if (canRaw) {
       // Launch new OpenTUI TUI via bun
       const bunPath = findBun();

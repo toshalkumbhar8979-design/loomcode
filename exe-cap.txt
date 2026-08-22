@@ -1,0 +1,1 @@
+error: preload not found "@opentui/solid/preload"

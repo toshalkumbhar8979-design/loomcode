@@ -104,7 +104,7 @@ export function SubagentPanel() {
       // Set the DEFAULT model for the selected agent id ("provider/model-id").
       const cur = all()[sel()];
       if (!cur) return;
-      const { loadConfig, saveConfig } = require("../../../config/settings.js");
+      const { loadConfig, saveConfig } = require("../../config/settings.js");
       const cfg = loadConfig();
       cfg.agents = cfg.agents || {};
       const curModel = (cfg.agents[cur.agentId] && cfg.agents[cur.agentId].model) || "";
