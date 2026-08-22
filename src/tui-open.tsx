@@ -46,11 +46,11 @@ const sessionId = sIdx !== -1 ? args[sIdx + 1] : null;
 const autoMode = args.includes("--auto") || args.includes("-a");
 const initialPrompt = args.filter((a, i) => !a.startsWith("-") && (sIdx === -1 || i !== sIdx + 1)).join(" ");
 
-globalThis.__loomTrace("mcp-start", new Error("defaultMcpInstall beginning"));
+globalThis.__loomTrace?.("mcp-start", new Error("defaultMcpInstall beginning"));
 try {
   defaultMcpInstall();
 } catch (e) {
-  globalThis.__loomTrace("mcp-install-failed", e);
+  globalThis.__loomTrace?.("mcp-install-failed", e);
 }
 
 if (printMode) {
@@ -64,11 +64,11 @@ if (printMode) {
   process.exit(resp.type === "error" ? 1 : 0);
 }
 
-globalThis.__loomTrace("render-start", new Error("pre-render"));
+globalThis.__loomTrace?.("render-start", new Error("pre-render"));
 render(() => <App initialPrompt={initialPrompt} resumeSession={sessionId} autoMode={autoMode} />, {
   targetFps: 60,
   useMouse: true,
   autoFocus: true,
   exitOnCtrlC: false,
 });
-globalThis.__loomTrace("render-returned", new Error("post-render"));
+globalThis.__loomTrace?.("render-returned", new Error("post-render"));

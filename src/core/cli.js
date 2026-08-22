@@ -557,7 +557,7 @@ if (args.includes('--help') || args.includes('-h')) {
     if (canRaw) {
       // Launch new OpenTUI TUI via bun
       const bunPath = findBun();
-      const tuiEntry = path.join(__dirname, '..', 'tui-bootstrap.js');
+      const tuiEntry = path.join(__dirname, '..', 'tui-open.tsx');
       if (bunPath && fs.existsSync(tuiEntry)) {
         const { spawnSync } = require('child_process');
         // Start bun from the package root so it discovers bunfig.toml /
@@ -569,7 +569,7 @@ if (args.includes('--help') || args.includes('-h')) {
         // --conditions=browser pins Solid to its client build (see
         // bin/loom-tui.js) — without it the SSR build loads and the TUI
         // renders one static frame then never updates.
-        const tuiArgs = ['--conditions=browser', tuiEntry];
+        const tuiArgs = [tuiEntry];
         if (sessionId) tuiArgs.push('-s', sessionId);
         if (autoMode) tuiArgs.push('--auto');
         const prompt = promptArgs.join(' ');

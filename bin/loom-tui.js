@@ -26,7 +26,7 @@ function findBun() {
   return null;
 }
 
-const entry = path.join(__dirname, '..', 'src', 'tui-bootstrap.js');
+const entry = path.join(__dirname, '..', 'src', 'tui-open.tsx');
 // Start bun from the package root so it discovers our bunfig.toml/tsconfig.json
 // (Solid JSX preloader); the user's real cwd rides along in LOOM_START_CWD and
 // is restored by the bootstrap shim before app code runs.
@@ -39,7 +39,7 @@ if (bun) {
   // Pin Solid to its CLIENT build: from this spawn context bun can resolve
   // solid-js under the "node" export condition (= SSR build, renders one
   // static frame then ignores all signal updates -> frozen splash).
-  const result = spawnSync(bun, ['--conditions=browser', 'run', entry, ...process.argv.slice(2)], {
+  const result = spawnSync(bun, ['run', entry, ...process.argv.slice(2)], {
     stdio: 'inherit',
     cwd: pkgRoot,
     env: process.env,
