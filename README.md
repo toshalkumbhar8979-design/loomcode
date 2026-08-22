@@ -10,15 +10,17 @@ An AI-powered coding agent for the terminal with multi-provider support and a fu
 
 - Full OpenTUI interface with slash commands, autocomplete, and ESC-to-interrupt
 - Build / Plan / Chat modes 
+- OpenCode-style agents — primary agents (`build`/`plan`/`chat`) plus delegating subagents (`explore`, `scout`, `general`) invoked automatically via the `task` tool or manually via `@agent` mentions
 - LOOM.md project memory file 
 - Multi-provider: Anthropic, OpenAI, NVIDIA, Google Gemini, OpenRouter, Local (Ollama)
 - Built-in tools: read, write, edit, bash, grep, glob, webfetch, todowrite
-- Agentic tool loop (multiple tool calls per turn, up to 50 iterations)
+- Agentic tool loop (multiple tool calls per turn)
 - MCP (Model Context Protocol) server integration
 - Drag-to-copy selections, paste support
-- Companion pet (OpenPets)
 - Session memory, /undo, /redo, /compact, /reset, /fork
 - One-shot print mode: `loom -p "query"`
+- Editor integration via the Agent Client Protocol (ACP): `loom acp` (JSON-RPC over stdio) so Zed, JetBrains, and Neovim plugins can drive Loom as their coding agent
+- Browser interface via `loom web` — a zero-dependency Node HTTP server (chat in the browser, password auth, CORS) plus `loom attach` to share the same server from the terminal; optional mDNS advertising as `loom.local` via [bonjour-service](https://www.npmjs.com/package/bonjour-service)
 - Usage & billing tracking per session + lifetime
 
 ## Prerequisites
@@ -90,9 +92,59 @@ cat logs.txt | loom -p "explain"  # analyze piped content
 loom --version
 loom --help
 loom --basic                      # skip TUI, use line-mode REPL
+loom acp                          # ACP subprocess mode for editor integrations
+loom web                          # browser interface (HTTP server, opens browser)
+loom attach http://localhost:4096 # attach the terminal to a running loom web
 ```
 
-## Slash Commands (34 total)
+## Web
+
+Loom runs in your browser with `loom web` — a zero-dependency HTTP server that
+serves a single-page UI and drives the same core session loop as the TUI. Same
+providers/models, tools, MCP servers, and saved sessions; chat streams live in
+the browser, and a shared terminal client can attach to the same server.
+
+```bash
+loom web                           # 127.0.0.1, random port, opens the browser
+loom web --port 4096               # fixed port
+loom web --hostname 0.0.0.0        # reachable on the LAN
+loom web --mdns                    # advertise as loom.local (implies 0.0.0.0)
+loom web --mdns-domain proj.local  # custom mDNS domain
+loom web --cors https://example.com
+LOOM_SERVER_PASSWORD=secret loom web   # password-protect (user: LOOM_SERVER_USERNAME, default "loom")
+
+# Attach the terminal (shares the server's sessions/state):
+loom attach http://localhost:4096
+```
+
+Config-file equivalent (`~/.loom/config.json`): `{ "server": { "port": 4096,
+"hostname": "0.0.0.0", "mdns": true, "cors": ["https://example.com"] } }` — CLI
+flags take precedence. Full flags, the JSON API, and `loom attach` options are
+documented in **[docs/web.md](docs/web.md)**.
+
+## Editor integration (ACP)
+
+Loom implements the [Agent Client Protocol (ACP)](https://agentclientprotocol.com)
+as `loom acp` — a JSON-RPC-over-stdio subprocess server that any ACP-compatible
+editor can launch, the same mechanism opencode uses with Zed. Zed, JetBrains,
+and Neovim (Avante.nvim / CodeCompanion.nvim) all support ACP agents; you only
+configure the agent command `loom acp`, then chat from the editor while Loom
+runs real tools in your repo.
+
+Zed (add to `~/.config/zed/settings.json`, then Command Palette → `agent: new thread`):
+
+```json
+{
+  "agent_servers": {
+    "Loom Code": { "type": "custom", "command": "loom", "args": ["acp"], "env": {} }
+  }
+}
+```
+
+Full transport spec, JetBrains/Neovim configs, the protocol walkthrough, and a
+self-test client (`node scripts/acp-smoke.js`) live in **[docs/acp.md](docs/acp.md)**.
+
+## Slash Commands (35 total)
 
 | Command | Args | Description |
 |---------|------|-------------|
@@ -100,6 +152,7 @@ loom --basic                      # skip TUI, use line-mode REPL
 | `/build` | — | Build mode — all tools |
 | `/plan` | — | Plan mode — read-only analysis |
 | `/chat` | — | Chat mode — no tools |
+| `/agents` | — | List primary agents and subagents |
 | `/connect` | `[provider]` | Add/connect a provider |
 | `/key` | — | Edit API key for current provider |
 | `/baseurl` | `[provider] [url]` | Set provider base URL |
@@ -127,20 +180,105 @@ loom --basic                      # skip TUI, use line-mode REPL
 | `/mcp` | `add\|remove\|toggle` | Manage MCP servers |
 | `/debug` | — | Show debug info |
 | `/fork` | — | Fork conversation |
-| `/companion` | — | Change companion pet |
 | `/exit` | — | Quit Loom Code |
 
 ## Keybindings
 
+Every key is configurable from `~/.loom/tui.json` (`keybinds`, `leader`,
+`leader_timeout`) — see [docs/keybinds.md](docs/keybinds.md) for the full
+action list, syntax, and opencode-compatible aliases. The defaults:
+
 | Key | Action |
 |-----|--------|
-| **ESC** | Interrupt current operation (aborts API requests) |
-| **Ctrl+C** | Exit |
+| **ESC** | Interrupt current operation (aborts API requests) / close dialogs / clear the draft |
+| **Ctrl+C** | Exit (copies a text selection first) |
 | **Ctrl+B** | Toggle sidebar (file browser) |
 | **Ctrl+P** | Open command palette |
-| **Tab** | Cycle mode (Build → Plan → Chat) |
-| **b** | Leader — build mode |
-| **p** | Leader — plan mode |
+| **Ctrl+X** | Leader key — the next key runs a leader binding |
+| **Ctrl+X** then **b / p** | Build mode / Plan mode |
+| **Ctrl+X** then **n / l / x / c** | New session / sessions list / export / compact |
+| **Ctrl+X** then **m / a / h / e** | Model picker / agents / help / editor |
+| **Ctrl+X** then **q** | Quit |
+| **Tab** | Next suggestion, or cycle mode (Build → Plan → Chat) |
+| **Ctrl+A** | Select the whole draft (readline-style) |
+| **Shift+Enter** | Insert a newline in the draft |
+
+## Agents
+
+Loom Code agent architecture: the user talks to a
+**primary agent** (picked by the active mode), and that primary can delegate
+focused work to **subagents** — either **automatically**, by calling the `task`
+tool when a subtask warrants it, or **manually**, when you prefix a message with
+`@agent`.
+
+### Primaries (matched to your mode)
+
+| Agent | Mode | Tools | Role |
+|-------|------|-------|------|
+| `build` | Build | all tools (`*`) | Full development work — editing, shell, anything. |
+| `plan`  | Plan  | read-only + `task` | Analyze and produce an ordered plan. Never edits files or runs shell commands; delegates heavy investigation to subagents. |
+| `chat`  | Chat  | none              | Conversation only. |
+
+### Subagents (delegated to via the `task` tool or `@agent` mentions)
+
+| Agent | Tools | Role |
+|-------|-------|------|
+| `explore` | read-only, minus `task` | Fast read-only codebase exploration: search symbols, read files, list files. Never modifies anything and never delegates (no recursion). |
+| `scout`   | `read`, `glob`, `grep`, `webfetch` | External research: fetch docs, check APIs and dependencies. Read-only. |
+| `general` | all tools, minus `task` | General-purpose autonomous subagent for self-contained implementation tasks, bug fixes, and multi-step work. |
+
+Every subagent is **read-only or sandboxed** and **cannot delegate further**
+(subagents never get the `task` tool), so delegation always terminates.
+
+### Two ways to invoke a subagent
+
+1. **Automatic — the main agent calls `task` itself.** When a turn would
+   benefit from a focused subagent (e.g. a fast read-only sweep before editing),
+   the primary calls the `task` tool with an agent id and a prompt. Progress
+   streams into a dedicated panel in the chat:
+
+   ```
+   ┌ @explore  finished · done ─────────────┐
+   │ │ grep · read                          │
+   │ child findings…                        │
+   └────────────────────────────────────────┘
+   ```
+
+2. **Manual — `@agent` mentions.** Prefix your message with `@agent` to force
+   the whole turn onto that subagent:
+
+   ```
+   @explore find the bug
+   @scout what's the latest Stripe API for refunds?
+   ```
+
+   The `@agent` prefix is stripped from the user bubble shown in chat, so only
+   your query renders. Type `@` to open an autocomplete of available subagents.
+
+### Listing, configuring, and extending agents
+
+- **`/agents`** — prints the active registry (id, mode, tool set, model).
+- **Custom subagents** — add to `~/.loom/config.json`:
+
+  ```json
+  {
+    "agents": {
+      "reviewer": {
+        "mode": "subagent",
+        "description": "Reads diffs and flags risky changes before commit.",
+        "tools": ["read", "glob", "grep", "diff"],
+        "prompt": "You are a cautious code reviewer. Read the diff and list risk points.",
+        "model": "anthropic/claude-sonnet-4-20250514"
+      },
+      "explore": { "disable": true }
+    }
+  }
+  ```
+
+  Custom `mode: "subagent"` entries need a `description`; built-ins can be
+  disabled with `"disable": true`. Tool patterns use last-match-wins semantics:
+  `["*"]` (all), `["read","glob"]` (only those), `["*","!task"]` (all except
+  delegation), `["mcp__*"]` (wildcards).
 
 ## Troubleshooting
 
@@ -172,9 +310,11 @@ LoomCode/
 │   ├── core/
 │   │   ├── cli.js           # Interactive REPL + slash commands
 │   │   ├── session.js       # Conversation + agent tool loop
+│   │   ├── agents.js        # agent registry + subagent runner
 │   │   ├── permissions.js   # Command permission checks
 │   │   ├── platform.js      # OS/platform detection
 │   │   ├── session-store.js # Persisted sessions
+│   │   ├── restore.js       # Snapshot/restore project file tree
 │   │   ├── usage.js         # Token/cost tracking
 │   │   └── plugin-cmd.js    # Subcommand backend
 │   ├── providers/
@@ -188,7 +328,7 @@ LoomCode/
 │   │   ├── local.js         # Local (Ollama) connector
 │   │   └── custom.js        # Custom provider host
 │   ├── tools/
-│   │   └── index.js         # read/write/edit/bash/grep/glob/webfetch
+│   │   └── index.js         # read/write/edit/bash/grep/glob/webfetch/todowrite/task
 │   ├── config/
 │   │   ├── settings.js      # ~/.loom/config.json persistence
 │   │   └── provider-cmd.js  # /connect command logic
@@ -201,10 +341,7 @@ LoomCode/
 │       │   ├── ChatArea.tsx  # Message list
 │       │   ├── BreadcrumbBar.tsx  # Mode + provider bar
 │       │   ├── Modals.tsx    # Settings pickers
-│       │   ├── Sidebar.tsx   # File sidebar
-│       │   └── Companion.tsx # Pet display
-│       └── companion/
-│           └── openpets.ts   # OpenPets tts integration
+│       │   └── Sidebar.tsx   # File sidebar
 ├── package.json
 ├── LOOM.md                    # Developer reference
 └── .gitignore
@@ -218,8 +355,59 @@ Config is stored at `~/.loom/config.json` (permissions: 0600). Includes:
 - `apiKeys` — API keys from `/connect` or manual edit
 - `baseUrls` — custom provider endpoints
 - `maxTokens`, `temperature` — model settings
+- `permission` — OpenCode-style permission tree (see below)
+- `permissionRules` — rules saved from the permission popup ("Always allow"/"Never")
 
 API keys can also be set via environment variables: `.env` or `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `NVIDIA_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY` etc.
+
+## Permissions
+
+Every tool call resolves through an OpenCode-style permission tree, so you can
+allow or block specific tools, commands, and file patterns without retyping a
+prompt each time. The last matching rule wins; `*` matches any run of
+characters and `?` a single one, and `~`/`$HOME` are expanded in paths.
+
+```jsonc
+{
+  "permission": {
+    "bash": {
+      "*": "allow",                    // allow shell commands...
+      "git push --force": "deny"       // ...except destructive ones
+    },
+    "edit": { "*": "ask", "src/**": "allow" },
+    "read": {
+      "*": "allow",
+      "*.env": "deny",                 // secrets stay off-limits by default
+      "*.env.example": "allow"
+    },
+    "external_directory": "ask"        // reads/writes outside the project dir
+  }
+}
+```
+
+Available permission keys: `read`, `edit` (covers edit/write), `glob`, `grep`,
+`bash`, `task`, `skill`, `lsp`, `question`, `webfetch`, `websearch`,
+`external_directory` (paths outside the working directory), and `doom_loop`
+(three identical tool calls in a row). Most tools default to `allow`;
+`edit`/`bash`/`task`/`skill`/`external_directory`/`doom_loop` default to `ask`,
+and `read` denies `*.env`/`*.env.*` files (except `*.env.example`).
+
+When the model asks for permission, the TUI popup offers Allow, Always allow,
+Deny, or a typed answer. "Always allow"/"Never" persist a rule to
+`permissionRules`. Run `loom --auto` (or `/permissions auto` in the TUI, or
+Ctrl+P → the palette) to auto-approve `ask` results — explicit `deny` rules
+still block. A muted `auto` indicator appears in the status row while enabled.
+
+Per-agent overrides live in the agent's own config
+(`agent.<id>.permission`, same shape, applied on top of the global tree):
+
+```jsonc
+{
+  "agent": {
+    "explore": { "mode": "subagent", "permission": { "edit": "deny" } }
+  }
+}
+```
 
 ## Adding a New Provider
 

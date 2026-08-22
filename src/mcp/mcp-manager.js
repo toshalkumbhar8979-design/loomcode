@@ -64,6 +64,46 @@ function addServer(name, command, args, opts) {
   return { added: name, command, args: data.servers[name].args };
 }
 
+// Parse the claude-compatible add syntax:
+//   /mcp add [-e KEY=V]... <name> [--] <command> [args...]
+// The `--` separator is optional (kept for muscle memory from `claude mcp add`).
+// Env flags may appear before the name or right before the command.
+/**
+ * @param {string[]} argv
+ * @returns {{name: string, command: string, args: string[], env?: Record<string,string>} | {error: string}}
+ */
+function parseMcpAddArgs(argv) {
+  const usage = 'Usage: /mcp add [-e KEY=V]... <name> [--] <command> [args...]';
+  /** @type {Record<string, string>} */
+  const env = {};
+  const takeEnv = (i) => {
+    const pair = argv[i + 1];
+    if (!pair || pair.indexOf('=') < 1) return null;
+    const eq = pair.indexOf('=');
+    env[pair.slice(0, eq)] = pair.slice(eq + 1);
+    return i + 2;
+  };
+  let i = 0;
+  while (argv[i] === '-e' || argv[i] === '--env') {
+    const ni = takeEnv(i);
+    if (ni === null) return { error: 'Usage: -e KEY=VALUE (got "' + (argv[i + 1] || '') + '")' };
+    i = ni;
+  }
+  if (i >= argv.length) return { error: usage };
+  const name = argv[i];
+  i += 1;
+  while (argv[i] === '-e' || argv[i] === '--env') {
+    const ni = takeEnv(i);
+    if (ni === null) return { error: 'Usage: -e KEY=VALUE (got "' + (argv[i + 1] || '') + '")' };
+    i = ni;
+  }
+  if (argv[i] === '--') i += 1;
+  if (i >= argv.length) return { error: usage };
+  const command = argv[i];
+  const args = argv.slice(i + 1);
+  return Object.keys(env).length ? { name, command, args, env } : { name, command, args };
+}
+
 function seedDefaults() {
   const data = loadServers();
   if (data.seeded) return { skipped: true };
@@ -144,6 +184,7 @@ module.exports = {
   saveServers,
   listServers,
   addServer,
+  parseMcpAddArgs,
   removeServer,
   toggleServer,
   stdioClient,

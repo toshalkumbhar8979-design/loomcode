@@ -3,6 +3,7 @@ import { createSignal } from "solid-js";
 import path from "path";
 import fs from "fs";
 import os from "os";
+import { loadTuiJson, saveTuiJson } from "./tui-config.ts";
 
 let _sess: any = null;
 export function getSession(): any {
@@ -13,6 +14,14 @@ export function getSession(): any {
   return _sess;
 }
 
+export function setSessionAuto(auto: boolean): void {
+  getSession().permissions.setAuto(auto);
+  setAutoPerm(auto);
+}
+
+// ─── Permission auto-approve state (muted "auto" indicator in the status row) ───
+export const [autoPerm, setAutoPerm] = createSignal(false);
+
 // ─── Chat state ───
 export const [messages, setMessages] = createSignal<any[]>([]);
 export const [input, setInput] = createSignal("");
@@ -22,9 +31,13 @@ export const [thinkStart, setThinkStart] = createSignal<number | null>(null);
 // expanded. Ctrl+E toggles the most recent collapsed one; clicking a bubble
 // also sets this. Null = everything collapsed.
 export const [userExpandedIdx, setUserExpandedIdx] = createSignal<number | null>(null);
-// Index (into messages()) of the assistant message whose "+Thought" panel is
-// expanded. Clicking a thought label toggles it; null = all collapsed.
-export const [thoughtIdx, setThoughtIdx] = createSignal<number | null>(null);
+// Settled reasoning parts (message index → part indices) the user expanded.
+// Clicking a settled "+ Thought" row toggles its part; absent = all collapsed.
+export const [thoughtExpanded, setThoughtExpanded] = createSignal<Map<number, Set<number>>>(new Map());
+// While a turn is RUNNING its thinking streams open by default; clicking the
+// "⠋ Thinking" header collapses it live (opencode toggles reasoning at any
+// time). Indices of running thoughts the user collapsed manually.
+export const [thoughtClosed, setThoughtClosed] = createSignal<Set<number>>(new Set());
 
 // ─── Prompt history (Up/Down recall of earlier prompts) ───
 export const [promptHistory, setPromptHistory] = createSignal<string[]>([]);
@@ -66,7 +79,7 @@ export function historyNext(): string | null {
 export function historyReset() { setHistoryIndex(-1); historyDraft = ""; }
 
 // ─── Autocomplete (slash / @file / !shell) ───
-export type AutoKind = "none" | "slash" | "file" | "shell";
+export type AutoKind = "none" | "slash" | "file" | "shell" | "at";
 export type Suggestion = { label: string; desc?: string };
 export const [suggestions, setSuggestions] = createSignal<Suggestion[]>([]);
 export const [autoKind, setAutoKind] = createSignal<AutoKind>("none");
@@ -121,10 +134,16 @@ export function openModal(m: any) { setModal(m); }
 export function closeModal() { setModal(null); }
 
 // ─── Permission popup (model wants to run a command / change a file) ───
+// The same popup hosts QUESTIONS (the ask tool): isQuestion flips it into
+// question mode, where the user picks one of the provided options or types
+// their own answer instead of the Allow/Always/Deny choices.
 export type PermissionRequest = {
   tool: string;
   command: string;
   label: string;
+  isQuestion?: boolean;
+  options?: string[];
+  sessionStart?: boolean;
   resolve: (approved: boolean, note?: string) => void;
 };
 export const [permission, setPermission] = createSignal<PermissionRequest | null>(null);
@@ -140,9 +159,21 @@ export function setDraft(text: string, pos?: number) {
   setCursor(typeof pos === "number" ? Math.max(0, Math.min(text.length, pos)) : text.length);
 }
 
-// Typing an answer to a permission request switches to a separate centered
-// "Question" popup; the state lives here so the popup can render at the App
-// root (overlay) while the permission prompt keeps owning the keyboard.
+// Draft text selection (readline-style): selStart/selEnd are indices into
+// input; both -1 = no selection. Ctrl+A marks everything, Ctrl+C copies the
+// highlighted span, typing/backspace replace it.
+export const [selStart, setSelStart] = createSignal(-1);
+export const [selEnd, setSelEnd] = createSignal(-1);
+export function clearSelection() { setSelStart(-1); setSelEnd(-1); }
+
+// Paste-vs-typing marker: set when a paste lands in the input and cleared the
+// moment the user edits. Pasted drafts past 10 lines render compressed
+// ("pasted ~N lines") instead of blowing the chatbox up to its scroll limit.
+export const [pastedAt, setPastedAt] = createSignal(0);
+
+// Typing an answer to a QUESTION popup (the ask tool) switches the popup into
+// its inline answer editor; the text lives here so the reconciler can remount
+// the popup on signal changes without wiping the typed answer.
 export const [questionOpen, setQuestionOpen] = createSignal(false);
 export const [questionText, setQuestionText] = createSignal("");
 
@@ -157,12 +188,32 @@ export function closeQuestion() {
 }
 
 // Raised by the session's onPermissionRequest callback; resolves once the user
-// answers the popup (Allow / Always allow / Deny / typed answer).
-export function requestPermission(tool: string, command: string, label: string): Promise<boolean> {
+// answers the popup (Allow / Always allow / Deny, or a question option/answer).
+// The promise resolves { approved, note } — the session turns questions into
+// the answer (note) and permissions into an approve/deny verdict.
+export function requestPermission(tool: string, command: string, label: string, isQuestion?: boolean, options?: string[]): Promise<{ approved: boolean; note: string }> {
   return new Promise((resolve) => {
     setPermission({
-      tool, command, label,
-      resolve: (approved, note) => { setPermission(null); resolve(approved); },
+      tool, command, label, isQuestion, options,
+      resolve: (approved, note) => { setPermission(null); resolve({ approved: !!approved, note: note || "" }); },
+    });
+  });
+}
+
+// One-time prompt shown at the start of a new session: "Allow all commands in
+// this session?" — picking "Allow all commands" flips on session-wide
+// auto-approval (Shift+Tab also toggles it), "Ask each time" keeps per-command
+// asks. Fire-and-forget: the popup resolves itself once the user answers.
+export function askSessionPermissions(): Promise<void> {
+  return new Promise((resolve) => {
+    setPermission({
+      tool: "session",
+      command: "Allow all commands in this session?",
+      label: "",
+      isQuestion: true,
+      options: ["Allow all commands", "Ask each time"],
+      sessionStart: true,
+      resolve: () => { setPermission(null); resolve(); },
     });
   });
 }
@@ -192,7 +243,7 @@ export type SpeedSnapshot = {
 export const [speedStats, setSpeedStats] = createSignal<SpeedSnapshot>({ live: null, last: null });
 
 // ─── Settings toggles ───
-export const [showToolDetails, setShowToolDetails] = createSignal(false);
+export const [showToolDetails, setShowToolDetails] = createSignal(true);
 export const [showThinking, setShowThinking] = createSignal(true);
 export const [inputMode, setInputMode] = createSignal<"build" | "plan" | "chat">("build");
 
@@ -225,7 +276,8 @@ export function refreshProviderState() {
   setModelName(model);
   setSessionId(s.conversationId || "");
   setBudgetLevel(cfg.budgetLevel || "auto");
-  const hasKey = !!(cfg.apiKeys?.[prov]) || !!process.env[prov.toUpperCase() + "_API_KEY"];
+  const { envNamesFor } = require("../providers/index.js");
+  const hasKey = !!(cfg.apiKeys?.[prov]) || (envNamesFor(prov) || []).some(n => !!process.env[n]);
   setProviderKeyOk(!!hasKey);
 }
 
@@ -259,7 +311,8 @@ export function modelOptionsForProvider(provider: string) {
 
 export function allModelOptions() {
   const out: any[] = [];
-  const { getRecentModels } = require("../config/settings.js");
+  const { getRecentModels, hasApiKey } = require("../config/settings.js");
+  const { BUILTIN_PROVIDERS } = require("../providers/index.js");
   const recents = getRecentModels();
   const seen = new Set<string>();
   if (recents.length) {
@@ -277,6 +330,9 @@ export function allModelOptions() {
   for (const p of PROVIDER_ORDER) {
     const mods = modelOptionsForProvider(p);
     if (!mods.length) continue;
+    // models.dev-scale: only providers with a key list their full model set —
+    // the rest stay in /connect until a key is added. Built-ins always show.
+    if (!BUILTIN_PROVIDERS.includes(p) && !hasApiKey(p)) continue;
     out.push({ header: PROVIDER_LABELS[p] || p, value: `__header__${p}`, isHeader: true });
     for (const m of mods) {
       const key = p + "/" + m.id;
@@ -290,6 +346,32 @@ export function allModelOptions() {
 
 // ─── Message helpers ───
 export function appendMessage(m: any) { setMessages(l => [...l, m]); }
+
+// ─── Vim mode ───
+// Optional modal editing (config `vimMode`, toggled via /vim). Normal-mode
+// keys are intercepted in the App's central key handler; insert mode behaves
+// exactly like the default input.
+export const [vimMode, setVimMode] = createSignal(!!loadTuiJson().vimMode);
+export const [vimNormal, setVimNormal] = createSignal(false);
+export function toggleVim(): boolean {
+  const next = !vimMode();
+  setVimMode(next);
+  setVimNormal(false);
+  saveTuiJson({ vimMode: next });
+  return next;
+}
+
+// ─── Queued drafts ───
+// Messages typed while a turn runs are queued (claude-style) and flushed
+// FIFO when the turn ends. Plain strings; submitted verbatim.
+export const [queuedDrafts, setQueuedDrafts] = createSignal<string[]>([]);
+export function queueDraft(text: string): void { setQueuedDrafts(q => q.concat(text)); }
+export function dequeueDraft(): string | null {
+  const q = queuedDrafts();
+  if (!q.length) return null;
+  setQueuedDrafts(q.slice(1));
+  return q[0];
+}
 export function patchLastMessage(patch: any) {
   setMessages(l => {
     const i = l.length - 1;
@@ -336,8 +418,13 @@ export function recomputeTodos() {
 // ─── File helpers ───
 const IGNORE = /(^|[\/])(node_modules|\.git|dist|build|\.next|\.venv|venv|coverage|__pycache__|\.loom|\.idea|\.vscode)([\/]|$)/i;
 let filesCache: string[] | null = null;
+// Reactive re-calc engine: bumping filesVersion invalidates the cache AND
+// re-runs every reactive caller (the Sidebar's file list) because
+// getProjectFiles() reads the signal. Bump after writes/create/rm calls.
+const [filesVersion, setFilesVersion] = createSignal(0);
 
 export function getProjectFiles(): string[] {
+  filesVersion();
   if (filesCache) return filesCache;
   const cwd = process.cwd();
   const out: string[] = [];
@@ -374,9 +461,6 @@ export function fuzzyFiles(query: string): string[] {
 
 export function invalidateFilesCache() { filesCache = null; }
 
-// Reactive re-calc engine: any of these signal bumps mean the visible slice
-// of project files could be stale. Bump after writes/create/rm calls.
-const [filesVersion, setFilesVersion] = createSignal(0);
 export function bumpFilesVersion() { setFilesVersion(v => v + 1); invalidateFilesCache(); }
 
 // Recompute the sidebar's file list when a known mutator lands. Called by the
@@ -388,9 +472,12 @@ export function refreshFilesIfNeeded(src?: string) {
 // Live agent todos: Session.setTodos → core event "todos:changed" → here.
 // This _replaces_ any markdown-scan fallback so the sidebar mirrors the
 // model's real todowrite output without waiting for a full assistant re-render.
+// Registration is idempotent: App remounts must not stack duplicate listeners.
+let _todoEvOff: (() => void) | null = null;
 export function wireTodoEvents() {
+  if (_todoEvOff) return;
   const ev = require("../core/events.js");
-  ev.on("todos:changed", (todos: any[]) => {
+  _todoEvOff = ev.on("todos:changed", (todos: any[]) => {
     const sess = getSession();
     const real = Array.isArray(todos) && todos.length ? todos : sess.todos;
     setTodos(
@@ -403,24 +490,6 @@ export function wireTodoEvents() {
     );
   });
 }
-
-// ─── Pet events & animation ─────────────────────────────────────
-export type PetMood = "idle" | "thinking" | "working" | "success" | "error" | "celebrating" | "waving" | "sleep";
-export type PetBark = { mood?: PetMood; phrase?: string; until?: number };
-export const [petBark, setPetBark] = createSignal<PetBark>({});
-export const [openPetsLinked, setOpenPetsLinked] = createSignal(false);
-export const [openPetsSync, setOpenPetsSync] = createSignal(false);
-export const [leaderPending, setLeaderPending] = createSignal(false);
-export const [petEnabled, setPetEnabled] = createSignal(true);
-let _petTimer: any = null;
-export function notifyPet(bark: PetBark) {
-  if (_petTimer) { clearTimeout(_petTimer); _petTimer = null; }
-  setPetBark(bark);
-  if (bark.until) _petTimer = setTimeout(() => setPetBark({}), bark.until);
-}
-
-// ─── Companion pets (declared early so prefs can reference it) ─── */
-export const [companion, setCompanion] = createSignal<string>("cat");
 
 // ─── Slash commands (for autocomplete) ───
 export interface SlashCmd { cmd: string; desc: string; args?: string; }
@@ -442,191 +511,204 @@ export const SLASH_LIST: SlashCmd[] = [
   { cmd: "budget", desc: "Budget level: free | cheap | best | auto", args: "[level]" },
   { cmd: "new", desc: "Start a new session" },
   { cmd: "clear", desc: "Clear the chat" },
-  { cmd: "compact", desc: "Compact conversation" },
   { cmd: "restore", desc: "Restore project to an earlier state" },
-  { cmd: "undo", desc: "Undo last exchange (then /redo)" },
-  { cmd: "redo", desc: "Redo last undone exchange" },
-  { cmd: "reset", desc: "Reset the session" },
   { cmd: "settings", desc: "Toggle details/thinking display" },
-  { cmd: "sessions", desc: "Browse saved sessions" },
-  { cmd: "share", desc: "Export the current session to JSON" },
-  { cmd: "export", desc: "Export to markdown" },
+  { cmd: "sessions", desc: "Browse saved sessions (jump to one)" },
   { cmd: "thinking", desc: "Toggle thinking visibility" },
   { cmd: "details", desc: "Toggle tool detail visibility" },
   { cmd: "theme", desc: "Switch UI theme" },
-  { cmd: "editor", desc: "Open LOOM.md in your editor" },
-  { cmd: "diff", desc: "Show git diff" },
-  { cmd: "init", desc: "Create LOOM.md" },
-  { cmd: "memory", desc: "Show memory file locations" },
-  { cmd: "doctor", desc: "Run diagnostics" },
+  { cmd: "graph", desc: "View the memory graph (nodes + links)" },
   { cmd: "skills", desc: "Manage skills", args: "install <dir|git> | remove <name>" },
   { cmd: "mcp", desc: "Manage MCP servers", args: "add <name> <cmd> | remove | toggle" },
   { cmd: "connectors", desc: "Manage connectors (hosting & cloud services)", args: "add <name> <cmd> | remove | toggle" },
-  { cmd: "permissions", desc: "Show saved permission rules", args: "| reset" },
-  { cmd: "debug", desc: "Show debug info" },
-  { cmd: "fork", desc: "Fork conversation" },
-  { cmd: "companion", desc: "Change your companion pet" },
+  { cmd: "permissions", desc: "Show saved permission rules", args: "| reset | auto" },
   { cmd: "exit", desc: "Quit Loom Code" },
+  // Newer commands sit at the END so early rows (help/connect/…) keep their
+  // popup positions — the interactive suite and muscle memory rely on it.
+  { cmd: "subagents", desc: "View subagent runs (live + history, cancel, details)" },
+  { cmd: "context", desc: "Show ~token breakdown of the current context window" },
+  { cmd: "think", desc: "Thinking budget", args: "off|low|medium|high" },
+  { cmd: "approve", desc: "Approve the plan & switch to Build (Plan mode)" },
+  { cmd: "tasks", desc: "List background tasks (bash background:true)" },
+  { cmd: "rewind", desc: "Pick a restore point and rewind files" },
+  { cmd: "share", desc: "Export this chat as a self-contained HTML file" },
+  { cmd: "worktree", desc: "New git worktree + branch for parallel work", args: "<name>" },
+  { cmd: "style", desc: "Output style preset or free text; empty clears" },
+  { cmd: "vim", desc: "Toggle vim modal editing (Esc = NORMAL)" },
+  { cmd: "remember", desc: "Save a fact to project LOOM.md (or type # fact)", args: "<fact>" },
 ];
 
-// Ctrl+X leader key map
-export const LEADER_CMDS: Record<string, string> = {
-  c: "/compact", e: "/editor", q: "/exit", x: "/export",
-  h: "/help", m: "/models", n: "/new",
-  r: "/redo", l: "/sessions", u: "/undo",
-  s: "/settings", t: "/thinking", d: "/details",
-  b: "/build", p: "/plan",
-};
-
 // ─── TUI prefs ───
-const TUI_STATE = path.join(os.homedir(), ".loom", "tui.json");
-function loadPrefs(): any { try { return fs.existsSync(TUI_STATE) ? JSON.parse(fs.readFileSync(TUI_STATE, "utf8")) : {}; } catch { return {}; } }
-function savePrefs(s: any) { try { fs.mkdirSync(path.dirname(TUI_STATE), { recursive: true }); fs.writeFileSync(TUI_STATE, JSON.stringify(s, null, 2)); } catch {} }
-
-const _p = loadPrefs();
+const _p = loadTuiJson();
 if (_p.sidebarVisible !== undefined) setSidebarVisible(_p.sidebarVisible);
 if (_p.showToolDetails !== undefined) setShowToolDetails(_p.showToolDetails);
 if (_p.showThinking !== undefined) setShowThinking(_p.showThinking);
-if (_p.companion !== undefined) setCompanion(_p.companion);
-if (_p.openPetsSync !== undefined) setOpenPetsSync(!!_p.openPetsSync);
-if (_p.petEnabled !== undefined) setPetEnabled(!!_p.petEnabled);
+
+// ─── First-run welcome tips (small sidebar card, dismissible with ✕) ───
+// Visible only until the user dismisses them once; the flag persists in
+// tui.json so existing users never see the card again.
+export const [welcomeTipSeen, setWelcomeTipSeen] = createSignal(!!_p.welcomeTipSeen);
+export function dismissWelcomeTips() {
+  setWelcomeTipSeen(true);
+  saveTuiJson({ welcomeTipSeen: true });
+}
 
 export function persistUi() {
-  savePrefs(Object.assign({}, loadPrefs(), {
+  saveTuiJson({
     sidebarVisible: sidebarVisible(),
     showToolDetails: showToolDetails(),
     showThinking: showThinking(),
-    companion: companion(),
-    openPetsSync: openPetsSync(),
-    petEnabled: petEnabled(),
-  }));
-}
-
-// ─── Companion pets ───
-export const COMPANIONS: Record<string, {
-  name: string;
-  icon: string[];
-  description: string;
-  blinkFrames: string[][];
-  phrases: string[];
-  poses: Record<string, string[]>;
-}> = {
-  cat: {
-    name: "Cat",
-    description: "A cozy tabby that purrs when things go well",
-    icon: [" ∧∧ ", "(^.^)", " >ω< ", "  ∪ "],
-    blinkFrames: [["(^.^)"],["(-.-)"],["(^.^)"],["(^.^)"]],
-    phrases: ["purr…","meow?","mrow!","♥","zzz…"],
-    poses: {
-      idle:    [" ∧∧ ","(^.^)"," >ω< ","  ∪ "],
-      thinking:[" ∧∧ ","(o.O)"," >o< ","  ∪ "],
-      happy:   [" ∧∧ ","(^v^)"," >∀<","  ∪ "],
-      working: [" ∧∧ ","(•ᴗ•)"," >ω<","  ∪ "],
-      sleep:   [" ∧∧ ","(-.-)"," ~zZ~","  ∪ "],
-    },
-  },
-  robot: {
-    name: "Robot",
-    description: "A helpful circuit that beeps at every tool call",
-    icon: ["[◉ᴗ◉]"," |=⚙=| ","  ___ "],
-    blinkFrames: [["[◉ᴗ◉]"],["[–ᴗ–]"],["[◉ᴗ◉]"],["[◉ᴗ◉]"]],
-    phrases: ["beep!","processing…","⚡ done","uptime: ∞","rebooting…"],
-    poses: {
-      idle:    ["[◉ᴗ◉]"," |=⚙=| ","  ___ "],
-      thinking:["[•ᴗ•]"," |=⚙=| ","  ___ "],
-      happy:   ["[★ᴗ★]"," |=⚙=| ","  ___ "],
-      working: ["[≧◡≦]"," |=⚙=| ","  ___ "],
-      sleep:   ["[−ᴗ−]"," |=💤=|","  ___ "],
-    },
-  },
-  fenrir: {
-    name: "Fenrir",
-    description: "A wolf that howls when tests pass",
-    icon: ["  ⨺⨺  "," (〃^▽^)"," /  ᵕᵕ\\","  ︵︵."],
-    blinkFrames: [["(〃^▽^)"],["(〃︿▽︿)"],["(〃^▽^)"],["(〃^▽^)"]],
-    phrases: ["awooo!","tests pass","chasing bugs","good boy","*sniff*"],
-    poses: {
-      idle:    ["  ⨺⨺  "," (〃^▽^)"," /  ᵕᵕ\\","  ︵︵ "],
-      thinking:["  ⨺⨺  "," (°⊙°)"," /  ᵕᵕ\\","  ︵︵ "],
-      happy:   ["  ⨺⨺  "," (≧◡≦)"," /  ᵕᵕ\\","  ︵︵ "],
-      working: ["  ⨺⨺  "," (•̀ᴗ•́)"," /  ᵕᵕ\\","  ︵︵ "],
-      sleep:   ["  ⨺⨺  "," (−.−)"," /  zz\\","  ︵︵ "],
-    },
-  },
-  luma: {
-    name: "Luma",
-    description: "A glowing firefly that lights up on success",
-    icon: ["  ✦  "," (◕‿◕)","  ωωω ","  ~~~ "],
-    blinkFrames: [["(◕‿◕)"],["(◕‿◕)"],["(◕‿◕)"],["(–‿–)"]],
-    phrases: ["✧ bright!","glow up","illuminate","run() ▸ pass","twinkle…"],
-    poses: {
-      idle:    ["  ✦  "," (◕‿◕)","  ωωω ","  ~~~ "],
-      thinking:["  ✧  "," (•̀δ•́)","  ωωω ","  ~~~ "],
-      happy:   ["  ★  "," (≧∇≦)","  ωωω ","  ~~~ "],
-      working: ["  ✦  "," (•̀ᴗ•́)","  ωωω ","  ~~~ "],
-      sleep:   ["  ·  "," (−‿−)","  ωωω ","  ~~~ "],
-    },
-  },
-  openpets: {
-    name: "OpenPets",
-    description: "Syncs with the OpenPets desktop pet app",
-    icon: [" (◕‿◕)"," /█╲█\\","  ╱ ╲ "],
-    blinkFrames: [["(◕‿◕)"],["(−‿−)"],["(◕‿◕)"],["(◕‿◕)"]],
-    phrases: ["syncing…","pet me!","brb…","connected!","play dead"],
-    poses: {
-      idle:     [" (◕‿◕)"," /█╲█\\","  ╱ ╲ "],
-      thinking: [" (•` •)"," /█╲█\\","  ╱ ╲ "],
-      happy:    [" (≧◡≦)"," \\✿╱ ","  ╱ ╲ "],
-      working:  [" (≧◡≦)"," /█✿█\\","  ╱ ╲ "],
-      sleep:    [" (−.−)"," /zzz\\"," ─ ─ "],
-    },
-  },
-};
-
-export function setCompanionByName(name: string) {
-  const n = name.toLowerCase();
-  for (const k of Object.keys(COMPANIONS)) {
-    if (k === n || COMPANIONS[k].name.toLowerCase() === n) {
-      setCompanion(k as keyof typeof COMPANIONS);
-      return k;
-    }
-  }
-  return null;
+    welcomeTipSeen: welcomeTipSeen(),
+  });
 }
 
 // ─── Convenience getters ───
-export function companionArt(): string[] {
-  const c = COMPANIONS[companion()];
-  return c ? c.icon : ["","[?]","  _ "];
-}
-
-export function companionBlinkFrame(frame: number): string[] {
-  const c = COMPANIONS[companion()];
-  if (!c?.blinkFrames?.length) return c?.icon ?? ["","[?]",""];
-  const blink = c.blinkFrames[frame % c.blinkFrames.length];
-  const icon = [...(c.icon)];
-  // Replace the face line (index 1 or last-but-1 whichever has eyes)
-  const faceIdx = icon.length >= 3 ? icon.length - 2 : 1;
-  const face = typeof blink === "string" ? blink : (Array.isArray(blink) ? blink[0] : c.icon[faceIdx]);
-  icon[faceIdx] = face;
-  return icon;
-}
-
-export function companionRandomPhrase(): string {
-  const c = COMPANIONS[companion()];
-  if (!c?.phrases?.length) return "";
-  return c.phrases[Math.floor(Math.random() * c.phrases.length)];
-}
-
-export function companionMoodPose(): string[] {
-  const c = COMPANIONS[companion()];
-  if (!c) return ["","[?]",""];
-  const mood = petBark()?.mood || "idle";
-  return c.poses[mood] || c.poses.idle;
-}
-
 export function cwdShort(): string {
   const cwd = process.cwd().replace(/\\/g, "/");
   return cwd.split("/").filter(Boolean).slice(-2).join("/");
 }
 export function username(): string { return os.userInfo().username || "you"; }
+
+// ─── Subagent tracker ───
+// Active subagent runs are kept in a Solid signal so the /subagents panel can
+// render live status (running/done/error/cancelled, elapsed time, last tool).
+// Completed runs are also persisted to disk via saveSubagentRun and merged
+// into subagentHistory so the panel can show runs from past sessions.
+export interface SubagentEntry {
+  runId: string;
+  agent: string;
+  agentId: string;
+  prompt: string;
+  status: "running" | "done" | "error" | "cancelled";
+  startTime: number;
+  endTime: number | null;
+  durationMs: number;
+  tokensIn: number;
+  tokensOut: number;
+  costUsd: number;
+  interrupted: boolean;
+  content: string;
+  toolLog: string[];
+  sessionId?: string;
+}
+
+// Active (in-flight + just-completed this session). Map keyed by runId; the
+// signal value is replaced (not mutated) so Solid sees the change.
+export const [activeSubagents, setActiveSubagents] = createSignal<Map<string, SubagentEntry>>(new Map());
+
+export function startSubagent(opts: { runId: string; agent: string; agentId: string; prompt: string; sessionId?: string }): void {
+  const now = Date.now();
+  const entry: SubagentEntry = {
+    runId: opts.runId,
+    agent: opts.agent,
+    agentId: opts.agentId,
+    prompt: String(opts.prompt || ""),
+    status: "running",
+    startTime: now,
+    endTime: null,
+    durationMs: 0,
+    tokensIn: 0,
+    tokensOut: 0,
+    costUsd: 0,
+    interrupted: false,
+    content: "",
+    toolLog: [],
+    sessionId: opts.sessionId,
+  };
+  setActiveSubagents(prev => {
+    const next = new Map(prev);
+    next.set(opts.runId, entry);
+    return next;
+  });
+}
+
+// Append to content / toolLog and patch scalar fields. Solid needs a new Map
+// to detect the change — we copy on every update.
+export function updateSubagent(runId: string, patch: { contentAppend?: string; toolLogAppend?: string; durationMs?: number }): void {
+  setActiveSubagents(prev => {
+    const cur = prev.get(runId);
+    if (!cur) return prev;
+    const next = new Map(prev);
+    const live: SubagentEntry = {
+      ...cur,
+      durationMs: patch.durationMs != null ? patch.durationMs : (Date.now() - cur.startTime),
+    };
+    if (patch.contentAppend) live.content = cur.content + patch.contentAppend;
+    if (patch.toolLogAppend) live.toolLog = cur.toolLog.concat(patch.toolLogAppend);
+    next.set(runId, live);
+    return next;
+  });
+}
+
+// Mark a run done/error/cancelled and (when done) copy into the in-memory
+// history so the panel can keep showing it after activeSubagents evicts it.
+export function endSubagent(runId: string, final: { status: "done" | "error" | "cancelled"; endTime?: number; tokensIn?: number; tokensOut?: number; costUsd?: number; durationMs?: number; interrupted?: boolean; content?: string }): SubagentEntry | null {
+  let finished: SubagentEntry | null = null;
+  setActiveSubagents(prev => {
+    const cur = prev.get(runId);
+    if (!cur) return prev;
+    const next = new Map(prev);
+    finished = {
+      ...cur,
+      status: final.status,
+      endTime: final.endTime != null ? final.endTime : Date.now(),
+      durationMs: final.durationMs != null ? final.durationMs : (Date.now() - cur.startTime),
+      tokensIn: final.tokensIn != null ? final.tokensIn : cur.tokensIn,
+      tokensOut: final.tokensOut != null ? final.tokensOut : cur.tokensOut,
+      costUsd: final.costUsd != null ? final.costUsd : cur.costUsd,
+      interrupted: final.interrupted != null ? final.interrupted : cur.interrupted,
+      content: final.content != null ? final.content : cur.content,
+    };
+    next.set(runId, finished);
+    return next;
+  });
+  if (finished) {
+    // Snapshot into in-memory history so the panel can show it even if the
+    // disk write fails or the panel is opened in the same session.
+    setSubagentHistory(prev => [finished!, ...prev].slice(0, 500));
+  }
+  return finished;
+}
+
+export function getSubagent(runId: string): SubagentEntry | undefined {
+  return activeSubagents().get(runId);
+}
+
+// Cancel a live subagent by runId. Delegates to core/agents.js so the
+// child's interrupt() actually fires; the run will resolve as interrupted
+// and endSubagent will be called with status 'cancelled' / interrupted=true.
+export function cancelSubagentRun(runId: string): boolean {
+  try {
+    const { cancelSubagent } = require("../core/agents.js");
+    return !!cancelSubagent(runId);
+  } catch {
+    return false;
+  }
+}
+
+// History from disk (loaded on startup; refreshed when the panel opens).
+export const [subagentHistory, setSubagentHistory] = createSignal<SubagentEntry[]>([]);
+
+// Synchronous load (the log file is small — a few hundred entries max — and
+// the panel needs the data immediately on first paint).
+export function loadSubagentHistory(opts?: { since?: number; sessionId?: string; limit?: number }): SubagentEntry[] {
+  try {
+    const { loadSubagentRuns } = require("../core/subagent-log.js");
+    const rows = loadSubagentRuns(opts) as SubagentEntry[];
+    setSubagentHistory(rows);
+    return rows;
+  } catch {
+    return [];
+  }
+}
+
+// Persist a finished run to the on-disk log. Best-effort — a write failure
+// must not break the TUI.
+export function persistSubagent(entry: SubagentEntry): boolean {
+  try {
+    const { saveSubagentRun } = require("../core/subagent-log.js");
+    return !!saveSubagentRun(entry);
+  } catch {
+    return false;
+  }
+}

@@ -2,9 +2,7 @@
 // palette() returns a live Proxy: each property is read from the currently
 // selected theme at render time, so switching themes re-renders instantly.
 import { createSignal } from "solid-js";
-import fs from "fs";
-import os from "os";
-import path from "path";
+import { loadTuiJson, saveTuiJson } from "./tui-config.ts";
 
 export type Palette = {
   bg: string; bgMsg: string; bgPanel: string; bgPanelAlt: string; bgInput: string; bgHover: string;
@@ -16,7 +14,6 @@ export type Palette = {
   accent: string;    // tool activity
   success: string; warning: string; error: string;
   thinking: string;
-  pet: string;       // companion tint
   // Syntax colors for markdown code blocks — each theme ships real VS Code
   // TextMate colors (keyword/string/comment/number/call/base) via fetch-themes.
   syntax: { kw: string; str: string; com: string; num: string; call: string; plain: string };
@@ -45,7 +42,6 @@ const LOOM_DARK: Palette = {
   warning: "#e0b356",
   error: "#e06c5a",
   thinking: "#d9a35f",
-  pet: "#f4a27f",
   syntax: {
     kw: "#e07856",
     str: "#a3c084",
@@ -77,7 +73,6 @@ const LIGHT: Palette = {
   warning: "#a97a1a",
   error: "#b33c2e",
   thinking: "#a5682a",
-  pet: "#c2593a",
   syntax: {
     kw: "#c2593a",
     str: "#5f8a3d",
@@ -109,7 +104,6 @@ const OCEAN: Palette = {
   warning: "#ffd54f",
   error: "#e57373",
   thinking: "#ffb74d",
-  pet: "#4fc3f7",
   syntax: {
     kw: "#4fc3f7",
     str: "#81c784",
@@ -141,7 +135,6 @@ const FOREST: Palette = {
   warning: "#d4c34f",
   error: "#e08070",
   thinking: "#c9a95c",
-  pet: "#a3e5b2",
   syntax: {
     kw: "#7bd88f",
     str: "#9ccc65",
@@ -173,7 +166,6 @@ const MIDNIGHT: Palette = {
   warning: "#fde68a",
   error: "#f87171",
   thinking: "#f0abfc",
-  pet: "#c4b5fd",
   syntax: {
     kw: "#a78bfa",
     str: "#9ae6b4",
@@ -205,7 +197,6 @@ const MONO: Palette = {
   warning: "#bdbdbd",
   error: "#e0e0e0",
   thinking: "#b0b0b0",
-  pet: "#e8e8e8",
   syntax: {
     kw: "#e8e8e8",
     str: "#b8b8b8",
@@ -243,45 +234,44 @@ function visibleBorder(bg: string, border: string): string {
   const raw = hex(border);
   if (raw && Math.abs(lum("#" + raw) - lum("#" + base)) >= 28) return border;
   const L = lum("#" + base);
+  // Channel shifts run red-green-blue order; a negative factor SUBTRACTS the
+  // requested proportion of each channel, and every channel clamps to 0-255
+  // so the derived border hex never overflows/underflows.
   const mix = (f: number) => {
-    const v = [0, 8, 16].map(s => Math.round((parseInt(base, 16) >> s & 255) + (f > 0 ? 255 - (parseInt(base, 16) >> s & 255) : parseInt(base, 16) >> s & 255) * Math.abs(f)));
-    return "#" + v.map(x => x.toString(16).padStart(2, "0")).join("");
+    const hex2 = (v: number) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0");
+    const ch = (s: number) => {
+      const c = parseInt(base, 16) >> s & 255;
+      return f > 0 ? hex2(c + (255 - c) * f) : hex2(c - c * Math.abs(f));
+    };
+    return "#" + ch(16) + ch(8) + ch(0);
   };
   return L < 128 ? mix(0.38) : mix(-0.35);
 }
 
 // Stitch in the generated (shiki-sourced) themes after the local defaults.
 // Ids from the registry win on collision — the six above always take priority.
+// Each generated palette is validated on a COPY: missing fields (including
+// syntax) are filled from LOOM_DARK and the border is derived on the copy, so
+// the imported generated object is never mutated.
 for (const t of GENERATED_THEMES) {
   if (!THEMES[t.id]) {
-    const p = (t as Theme).palette;
+    const src: any = (t as Theme).palette || {};
+    const p: any = Object.assign({}, LOOM_DARK, src);
+    if (!p.syntax || typeof p.syntax !== "object") p.syntax = {};
+    p.syntax = Object.assign({}, LOOM_DARK.syntax, p.syntax);
     p.border = visibleBorder(p.bg, p.border);
-    THEMES[t.id] = t as Theme;
+    THEMES[t.id] = { id: t.id, label: t.label, desc: t.desc, palette: p };
   }
 }
 
-const TUI_STATE = path.join(os.homedir(), ".loom", "tui.json");
-
 function loadSavedTheme(): string {
-  try {
-    if (fs.existsSync(TUI_STATE)) {
-      const data = JSON.parse(fs.readFileSync(TUI_STATE, "utf8"));
-      if (typeof data.theme === "string" && THEMES[data.theme]) return data.theme;
-    }
-  } catch {}
+  const data = loadTuiJson();
+  if (typeof data.theme === "string" && THEMES[data.theme]) return data.theme;
   return "loom";
 }
 
 export function saveThemePref(id: string) {
-  try {
-    let data: any = {};
-    if (fs.existsSync(TUI_STATE)) {
-      try { data = JSON.parse(fs.readFileSync(TUI_STATE, "utf8")) || {}; } catch {}
-    }
-    data.theme = id;
-    fs.mkdirSync(path.dirname(TUI_STATE), { recursive: true });
-    fs.writeFileSync(TUI_STATE, JSON.stringify(data, null, 2));
-  } catch {}
+  saveTuiJson({ theme: id });
 }
 
 const [themeId, setThemeId] = createSignal(loadSavedTheme());

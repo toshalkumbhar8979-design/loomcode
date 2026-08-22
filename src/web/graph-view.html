@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Loom Graph</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden;
+    background: #0f1117; color: #cbd2e0; font: 13px/1.45 ui-monospace, Consolas, monospace; }
+  #app { display: flex; height: 100%; }
+  #side { width: 260px; min-width: 260px; border-right: 1px solid #232838;
+    background: #141722; padding: 12px; overflow-y: auto; }
+  #side h1 { font-size: 15px; margin: 0 0 2px; color: #fff; }
+  #side .sub { color: #7c86a0; margin-bottom: 12px; }
+  #side h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+    color: #7c86a0; margin: 14px 0 6px; }
+  #search { width: 100%; padding: 6px 8px; border: 1px solid #2b3146; border-radius: 4px;
+    background: #0f1117; color: #e6e9f2; outline: none; }
+  #filters label { display: flex; align-items: center; gap: 7px; padding: 3px 0;
+    cursor: pointer; }
+  #filters input { accent-color: #4f9cf9; }
+  .swatch { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  #main { flex: 1; position: relative; }
+  #canvas { width: 100%; height: 100%; display: block; cursor: grab; }
+  #canvas.dragging { cursor: grabbing; }
+  #panel { position: absolute; left: 16px; right: 16px; bottom: 16px;
+    background: #161a26; border: 1px solid #2b3146; border-radius: 6px;
+    padding: 12px 14px; display: none; max-height: 38%; overflow: auto; }
+  #panel h2 { margin: 0 0 4px; font-size: 14px; color: #fff; }
+  #panel .meta { color: #7c86a0; margin-bottom: 6px; }
+  #panel pre { margin: 0; white-space: pre-wrap; color: #aeb7cc; }
+  #stats { position: absolute; top: 10px; right: 14px; color: #7c86a0; font-size: 12px; }
+  #hint { position: absolute; top: 10px; left: 14px; color: #7c86a0; font-size: 12px; }
+  .pill { display: inline-block; padding: 1px 7px; margin: 1px 3px 1px 0;
+    background: #232838; border-radius: 9px; color: #9fb0d0; font-size: 11px; }
+  .empty { color: #7c86a0; padding: 8px 2px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="side">
+    <h1>Loom Graph</h1>
+    <div class="sub" id="statsSide"></div>
+    <input id="search" placeholder="Search nodes..." autocomplete="off">
+    <h3>Types</h3>
+    <div id="filters"></div>
+    <h3>Selected</h3>
+    <div id="selInfo" class="empty">Click a node to inspect it.</div>
+  </div>
+  <div id="main">
+    <div id="hint">drag nodes &middot; wheel to zoom &middot; drag background to pan</div>
+    <div id="stats"></div>
+    <canvas id="canvas"></canvas>
+  </div>
+</div>
+<script>
+"use strict";
+/* Graph data is injected by the Loom server (loom graph open). */
+var GRAPH = window.__GRAPH__ || { nodes: [], edges: [] };
+var TYPE_COLORS = {
+  decision: "#4f9cf9", convention: "#3ecf8e", bugfix: "#f98f4f",
+  superseded: "#6b7080", note: "#8b93a7",
+};
+function colorOf(t) { return TYPE_COLORS[t] || TYPE_COLORS.note; }
+
+/* ---- force-directed simulation (license-free vanilla) ---- */
+var W, H;
+var nodes = [];
+var links = [];
+var byId = {};
+var selected = null;
+var dragging = null;
+var zoom = 1, panX = 0, panY = 0;
+
+function init() {
+  var seen = {};
+  GRAPH.nodes.forEach(function (n, i) {
+    var o = { id: n.id, label: n.title || n.id, type: n.type || "note",
+      confidence: typeof n.confidence === "number" ? n.confidence : 0.5,
+      tags: n.tags || [], body: n.body || "", source: n.source || "",
+      x: 0, y: 0, vx: 0, vy: 0, r: 8 + 14 * (n.confidence || 0.5), fx: null, fy: null };
+    if (!seen[o.id]) { seen[o.id] = 1; nodes.push(o); byId[o.id] = o; }
+  });
+  GRAPH.edges.forEach(function (e) {
+    if (byId[e.source] && byId[e.target] && e.source !== e.target) {
+      links.push({ a: byId[e.source], b: byId[e.target], type: e.type || "link" });
+    }
+  });
+  var n = nodes.length;
+  var R = Math.min(W, H) * 0.35;
+  nodes.forEach(function (o, i) {
+    var a = (i / Math.max(n, 1)) * Math.PI * 2;
+    o.x = W / 2 + R * Math.cos(a);
+    o.y = H / 2 + R * Math.sin(a);
+  });
+  buildFilters();
+  tick();
+}
+
+var tickTimer;
+function tick() {
+  var rep = 2400, spring = 0.04, grav = 0.02, damp = 0.85;
+  nodes.forEach(function (a) {
+    a.vx *= damp; a.vy *= damp;
+    nodes.forEach(function (b) {
+      if (a === b) return;
+      var dx = a.x - b.x, dy = a.y - b.y;
+      var d2 = dx * dx + dy * dy + 1;
+      var f = rep / d2;
+      var d = Math.sqrt(d2);
+      a.vx += (dx / d) * f; a.vy += (dy / d) * f;
+    });
+    a.vx -= (a.x - W / 2) * grav; a.vy -= (a.y - H / 2) * grav;
+  });
+  links.forEach(function (l) {
+    var dx = l.b.x - l.a.x, dy = l.b.y - l.a.y;
+    var d = Math.sqrt(dx * dx + dy * dy) || 1;
+    var want = 90, f = (d - want) * spring;
+    var ux = dx / d, uy = dy / d;
+    l.a.vx += ux * f; l.a.vy += uy * f;
+    l.b.vx -= ux * f; l.b.vy -= uy * f;
+  });
+  nodes.forEach(function (a) {
+    if (a.fx !== null) { a.x = a.fx; a.y = a.fy; a.vx = a.vy = 0; return; }
+    a.x += a.vx; a.y += a.vy;
+    a.x = Math.max(20, Math.min(W - 20, a.x));
+    a.y = Math.max(20, Math.min(H - 20, a.y));
+  });
+  draw();
+  tickTimer = requestAnimationFrame(tick);
+}
+
+/* ---- rendering ---- */
+var canvas = document.getElementById("canvas");
+var ctx = canvas.getContext("2d");
+function resize() {
+  W = canvas.clientWidth; H = canvas.clientHeight;
+  canvas.width = W * devicePixelRatio; canvas.height = H * devicePixelRatio;
+  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+}
+window.addEventListener("resize", resize); resize();
+
+function tx(x, y) { return { x: x * zoom + panX, y: y * zoom + panY }; }
+
+function visible(o) {
+  var q = document.getElementById("search").value.trim().toLowerCase();
+  if (q && (o.label.toLowerCase().indexOf(q) < 0)) return false;
+  var f = document.getElementById("f-" + o.type);
+  return !f || f.checked;
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.strokeStyle = "#2b3146"; ctx.lineWidth = 1;
+  links.forEach(function (l) {
+    if (!visible(l.a) || !visible(l.b)) return;
+    var p1 = tx(l.a.x, l.a.y), p2 = tx(l.b.x, l.b.y);
+    ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+  });
+  nodes.forEach(function (o) {
+    if (!visible(o)) return;
+    var p = tx(o.x, o.y), r = o.r * zoom;
+    ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = colorOf(o.type); ctx.fill();
+    ctx.strokeStyle = o === selected ? "#ffffff" : "#0f1117"; ctx.lineWidth = o === selected ? 2 : 1;
+    ctx.stroke();
+    ctx.fillStyle = "#e6e9f2"; ctx.font = "11px ui-monospace, Consolas, monospace";
+    ctx.textAlign = "center";
+    var label = o.label.length > 26 ? o.label.slice(0, 25) + ".." : o.label;
+    ctx.fillText(label, p.x, p.y + r + 12);
+  });
+  var vis = nodes.filter(visible).length;
+  document.getElementById("stats").textContent = vis + " / " + nodes.length + " nodes - " + links.length + " links";
+  document.getElementById("statsSide").textContent = nodes.length + " nodes, " + links.length + " links";
+}
+
+/* ---- interaction ---- */
+function hitTest(mx, my) {
+  for (var i = nodes.length - 1; i >= 0; i--) {
+    var o = nodes[i];
+    if (!visible(o)) continue;
+    var p = tx(o.x, o.y);
+    var dx = mx - p.x, dy = my - p.y;
+    if (dx * dx + dy * dy <= (o.r * zoom + 4) * (o.r * zoom + 4)) return o;
+  }
+  return null;
+}
+
+canvas.addEventListener("mousedown", function (e) {
+  var r = canvas.getBoundingClientRect();
+  var mx = e.clientX - r.left, my = e.clientY - r.top;
+  var o = hitTest(mx, my);
+  if (o) {
+    dragging = o;
+    canvas.classList.add("dragging");
+    o.fx = o.x; o.fy = o.y;
+    select(o);
+  } else {
+    dragging = null;
+    lastPan = { x: mx, y: my };
+  }
+});
+var lastPan = null;
+window.addEventListener("mousemove", function (e) {
+  var r = canvas.getBoundingClientRect();
+  var mx = e.clientX - r.left, my = e.clientY - r.top;
+  if (dragging) {
+    dragging.fx = (mx - panX) / zoom; dragging.fy = (my - panY) / zoom;
+  } else if (lastPan) {
+    panX += mx - lastPan.x; panY += my - lastPan.y;
+    lastPan = { x: mx, y: my };
+  }
+});
+window.addEventListener("mouseup", function () {
+  if (dragging) { dragging.fx = null; dragging.fy = null; dragging = null; }
+  lastPan = null;
+  canvas.classList.remove("dragging");
+});
+canvas.addEventListener("wheel", function (e) {
+  e.preventDefault();
+  var f = e.deltaY < 0 ? 1.1 : 0.9;
+  zoom = Math.max(0.2, Math.min(3, zoom * f));
+}, { passive: false });
+
+/* ---- side panel + filters ---- */
+function select(o) {
+  selected = o;
+  var el = document.getElementById("selInfo");
+  var html = '<div style="color:#fff;font-size:13px"><b>' + esc(o.label) + "</b></div>";
+  html += '<div class="meta">' + esc(o.type) +
+    (typeof o.confidence === "number" ? " &middot; confidence " + Math.round(o.confidence * 100) + "%" : "") + "</div>";
+  if (o.tags && o.tags.length) html += o.tags.map(function (t) { return '<span class="pill">#' + esc(t) + "</span>"; }).join("");
+  if (o.source) html += '<div class="meta" style="margin-top:6px">source: ' + esc(o.source) + "</div>";
+  if (o.body) {
+    var b = o.body.length > 600 ? o.body.slice(0, 600) + " …" : o.body;
+    html += "<pre>" + esc(b) + "</pre>";
+  }
+  el.innerHTML = html;
+}
+function esc(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function buildFilters() {
+  var types = {};
+  nodes.forEach(function (o) { types[o.type] = (types[o.type] || 0) + 1; });
+  var html = "";
+  Object.keys(types).sort().forEach(function (t) {
+    html += '<label><input type="checkbox" id="f-' + esc(t) + '" checked> ' +
+      '<span class="swatch" style="background:' + colorOf(t) + '"></span> ' +
+      esc(t) + " (" + types[t] + ")</label>";
+  });
+  document.getElementById("filters").innerHTML = html;
+  var boxes = document.querySelectorAll("#filters input");
+  for (var i = 0; i < boxes.length; i++) boxes[i].addEventListener("change", draw);
+}
+document.getElementById("search").addEventListener("input", draw);
+
+init();
+</script>
+</body>
+</html>

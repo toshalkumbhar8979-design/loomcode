@@ -168,6 +168,12 @@ class LoomCLI {
         return this.cmdMcp(args);
       case 'providers':
         return this.cmdProviders();
+      case 'format':
+        return this.cmdFormat(args);
+      case 'lsp':
+        return this.cmdLsp(args);
+      case 'graph':
+        return this.cmdGraph(args);
       case 'quit':
       case 'exit':
         return this.cmdExit();
@@ -194,6 +200,8 @@ class LoomCLI {
   │ /reset       Reset entire session              │
   │ /doctor      Run diagnostics                   │
   │ /providers   List all supported providers      │
+  │ /format      Manage formatters (file auto-fmt) │
+  │ /lsp         Manage LSP servers + diagnostics  │
   │ /exit        Exit Loom Code                    │
   │                                                │
   │ ESC          Interrupt current operation       │
@@ -242,14 +250,16 @@ class LoomCLI {
     const provider = args[0];
     if (!provider) {
       console.log('Usage: /connect <provider> [api-key]');
-      console.log('Providers: anthropic, openai, nvidia, google, local');
+      console.log('Run /providers to list every supported provider (built-ins + models.dev registry).');
       return;
     }
     const key = args[1];
     const result = connect(provider, key);
     console.log(result);
     if (!key) {
-      console.log(`Set API key with environment variable: ${provider.toUpperCase()}_API_KEY`);
+      const { envNamesFor } = require('../providers/registry');
+      const envHint = (envNamesFor(provider) || [])[0] || provider.toUpperCase() + '_API_KEY';
+      console.log(`Set API key with environment variable: ${envHint}`);
     }
   }
 
@@ -338,6 +348,76 @@ class LoomCLI {
     console.log('\nConnect with: /connect <provider>');
   }
 
+  cmdFormat(args) {
+    const plugin = require('./plugin-cmd');
+    console.log(plugin.formatCmd(args));
+  }
+
+  async cmdLsp(args) {
+    const plugin = require('./plugin-cmd');
+    console.log(await plugin.lspCmd(args));
+  }
+
+  async cmdGraph(args) {
+    // /graph — rebuild the memory graph and display it as text.
+    // Writes graph.json to .loom/graph/ for the TUI to consume.
+    // Dynamic import avoids static analysis by tsc (graph.ts has loose types).
+    const mod = await import('../core/graph.js');
+    const { buildGraph, renderGraphText } = mod;
+    const cwd = process.cwd();
+    const graph = buildGraph(cwd);
+    const outDir = path.join(cwd, '.loom', 'graph');
+    fs.mkdirSync(outDir, { recursive: true });
+    const jsonPath = path.join(outDir, 'graph.json');
+    fs.writeFileSync(jsonPath, JSON.stringify(graph, null, 2));
+    console.log(renderGraphText(graph));
+    console.log('');
+    console.log('Graph data written to ' + jsonPath);
+    if (args[0] === 'open' || args[0] === '--open') {
+      await this.openGraphBrowser(graph);
+    } else {
+      console.log('Run /graph in the TUI for the interactive view, or "loom graph open" for the browser graph.');
+    }
+  }
+
+  /**
+   * Serve the browser-based force-directed graph view (design doc: Loom
+   * Graph View Design) and open it in the default browser.
+   * @param {{ nodes: any[], edges: any[] }} graph
+   * @returns {Promise<void>}
+   */
+  async openGraphBrowser(graph) {
+    const http = require('http');
+    const template = fs.readFileSync(path.join(__dirname, '..', 'web', 'graph-view.html'), 'utf8');
+    const html = template.replace('window.__GRAPH__ || { nodes: [], edges: [] }', JSON.stringify(graph).replace(/<\/script/gi, '<\\/script'));
+    const server = http.createServer((req, res) => {
+      const p = req.url || '/';
+      if (p === '/' || p === '/index.html') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(html);
+      } else if (p === '/graph.json') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(graph));
+      } else {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('not found');
+      }
+    });
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => resolve(undefined));
+    });
+    const port = /** @type {any} */ (server.address()).port;
+    const url = 'http://127.0.0.1:' + port + '/';
+    console.log('Graph view: ' + url + '  (Ctrl+C to stop the server)');
+    try {
+      const { execSync } = require('child_process');
+      if (process.platform === 'win32') execSync('start "" "' + url + '"', { stdio: 'ignore', windowsHide: true });
+      else if (process.platform === 'darwin') execSync('open "' + url + '"', { stdio: 'ignore' });
+      else execSync('xdg-open "' + url + '"', { stdio: 'ignore' });
+    } catch { /* browser open failed; the URL was printed above */ }
+  }
+
   cmdSkills(args) {
     const plugin = require('./plugin-cmd');
     if (args[0] === 'install') console.log(plugin.installSkillCmd(args.slice(1)));
@@ -369,7 +449,7 @@ class LoomCLI {
     const commands = [
       '/help', '/init', '/memory', '/connect', '/model', '/models',
       '/status', '/clear', '/compact', '/undo', '/reset', '/doctor',
-      '/providers', '/skills', '/mcp', '/exit'
+      '/providers', '/skills', '/mcp', '/format', '/lsp', '/exit'
     ];
     const hits = commands.filter(c => c.startsWith(line));
     return [hits.length ? hits : commands, line];
@@ -407,6 +487,8 @@ async function main() {
   const printIdx = args.indexOf('-p');
   const printLongIdx = args.indexOf('--print');
   const printMode = printIdx !== -1 || printLongIdx !== -1;
+  const autoMode = args.includes('--auto') || args.includes('-a');
+  if (autoMode) cli.session.permissions.setAuto(true);
 
   if (args.includes('--version') || args.includes('-v')) {
     console.log(`loom-code v${VERSION}`);
@@ -419,6 +501,10 @@ if (args.includes('--help') || args.includes('-h')) {
     console.log('  loom "prompt"           Start with initial prompt');
     console.log('  loom -p "query"         Run one-shot, print result, exit');
     console.log('  loom --basic            Use basic line-mode REPL (no TUI)');
+    console.log('  loom --auto             Auto-approve permission prompts');
+    console.log('  loom acp                ACP server (JSON-RPC over stdio, for editor plugins)');
+    console.log('  loom web                Browser interface (HTTP server, opens the browser)');
+    console.log('  loom attach <url>       Attach the terminal to a running `loom web` server');
     console.log('  loom -s <session-id>    Resume a saved session');
     console.log('  loom --version           Show version');
     console.log('  loom --help              Show this help');
@@ -427,6 +513,17 @@ if (args.includes('--help') || args.includes('-h')) {
 
   const sIndex = args.indexOf('-s');
   const sessionId = sIndex !== -1 ? args[sIndex + 1] : null;
+
+  // loom graph [open] — memory graph subcommand.
+  //   loom graph         rebuild + print the graph as text, exit
+  //   loom graph open    serve the browser graph view and open it
+  if (args[0] === 'graph') {
+    const open = args[1] === 'open' || args[1] === '--open';
+    await cli.cmdGraph(open ? ['open'] : []);
+    if (!open) process.exit(0);
+    return;
+  }
+
   if (sessionId && sIndex !== -1) {
     const data = loadSession(sessionId);
     if (data && data.messages && data.messages.length) {
@@ -465,6 +562,7 @@ if (args.includes('--help') || args.includes('-h')) {
         const { spawnSync } = require('child_process');
         const tuiArgs = [tuiEntry];
         if (sessionId) tuiArgs.push('-s', sessionId);
+        if (autoMode) tuiArgs.push('--auto');
         const prompt = promptArgs.join(' ');
         if (prompt) tuiArgs.push(...prompt.split(/\s+/));
         process.exit(spawnSync(bunPath, tuiArgs, { stdio: 'inherit', env: process.env }).status ?? 0);

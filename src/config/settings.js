@@ -22,7 +22,7 @@ const DEFAULTS = {
   model: {
     anthropic: 'claude-sonnet-4-20250514',
     openai: 'gpt-5-fast',
-    nvidia: 'deepseek-ai/deepseek-v4-pro',
+    nvidia: 'meta/llama-3.1-8b-instruct',
     google: 'gemini-2.5-flash',
     openrouter: 'anthropic/claude-sonnet-4',
     tokenrouter: 'moonshotai/kimi-k3-free',
@@ -36,6 +36,10 @@ const DEFAULTS = {
   customEndpoints: {},
   recentModels: [],
   skillDisabled: [],
+  // OpenCode-style formatters / LSP. false = disabled (default). true = enable
+  // all built-ins. object = built-ins + per-id overrides/customs.
+  formatter: false,
+  lsp: false,
   baseUrls: {
     anthropic: 'https://api.anthropic.com',
     openai: 'https://api.openai.com/v1',
@@ -77,16 +81,8 @@ function saveConfig(config) {
 }
 
 function getApiKey(provider) {
-const envKeys = {
-    anthropic: ['ANTHROPIC_API_KEY', 'CLAUDE_API_KEY'],
-    openai: ['OPENAI_API_KEY'],
-    nvidia: ['NVIDIA_API_KEY', 'NVIDIA_NIM_API_KEY'],
-    google: ['GOOGLE_API_KEY', 'GEMINI_API_KEY'],
-    openrouter: ['OPENROUTER_API_KEY'],
-    tokenrouter: ['TOKENROUTER_API_KEY'],
-  };
-
-  const envNames = envKeys[provider] || [];
+  const { envNamesFor } = require('../providers/registry');
+  const envNames = envNamesFor(provider) || [];
   for (const key of envNames) {
     if (process.env[key]) return process.env[key];
   }
@@ -153,8 +149,10 @@ function getRecentModels() {
 // Whether a usable key exists for a provider (or it's a keyless local backend).
 function hasApiKey(provider) {
   if (provider === 'local') return true;
+  const { envNamesFor } = require('../providers/registry');
   const cfg = loadConfig();
-  return !!(cfg.apiKeys?.[provider] || process.env[provider.toUpperCase() + '_API_KEY']);
+  if (cfg.apiKeys?.[provider]) return true;
+  return (envNamesFor(provider) || []).some(n => !!process.env[n]);
 }
 
 module.exports = {

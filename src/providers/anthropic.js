@@ -20,9 +20,11 @@ function formatContentText(text) {
  * @property {string} model
  * @property {number} max_tokens
  * @property {Array<Object>} messages
- * @property {string=} system
+ * @property {string|Array<{type: string, text: string, cache_control?: {type: string}}>=} system
  * @property {number=} temperature
  * @property {Array<Object>=} tools
+ * @property {{ type: 'enabled', budget_tokens: number }=} thinking
+ * @property {boolean=} cache
  */
 
 /**
@@ -33,6 +35,9 @@ function formatContentText(text) {
 function buildBody(messages, options) {
   const systemMsgs = [];
   const out = [];
+  // Prompt-caching opt-out (on by default — cache_control is ignored by
+  // providers that don't support it and billed at write once, read cheap).
+  const useCache = options.cache !== false;
 
   // System prompt comes from options.system (session.systemPrompt); also
   // accept role:'system' entries in the message history.
@@ -53,7 +58,18 @@ function buildBody(messages, options) {
     }
     if (m.role === 'assistant') {
       const blocks = [];
-      if (m.content) blocks.push({ type: 'text', text: m.content });
+      // History may carry raw Anthropic content blocks (e.g. from a
+      // restored session): keep thinking blocks (with their signature)
+      // so the extended-thinking tool-use flow can resend them.
+      if (Array.isArray(m.content)) {
+        for (const b of m.content) {
+          if (b.type === 'text') blocks.push({ type: 'text', text: b.text });
+          else if (b.type === 'thinking') blocks.push({ type: 'thinking', thinking: b.thinking, signature: b.signature });
+          else if (b.type === 'tool_use') blocks.push({ type: 'tool_use', id: b.id, name: b.name, input: b.input || {} });
+        }
+      } else if (m.content) {
+        blocks.push({ type: 'text', text: m.content });
+      }
       for (const tc of m.toolCalls || []) {
         blocks.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input || {} });
       }
@@ -66,9 +82,51 @@ function buildBody(messages, options) {
     model: options.model,
     max_tokens: options.maxTokens || 8192,
     messages: out,
-    ...(systemMsgs.length && { system: systemMsgs.join('\n\n') }),
+    ...(systemMsgs.length && {
+      system: useCache
+        ? [{ type: 'text', text: systemMsgs.join('\n\n'), cache_control: { type: 'ephemeral' } }]
+        : systemMsgs.join('\n\n'),
+    }),
     ...(options.temperature !== undefined && { temperature: options.temperature }),
   };
+
+  // Prompt caching (Anthropic): a cache breakpoint on the system prompt and
+  // on the LAST message means each turn re-reads the stable prefix from the
+  // cache instead of re-paying full input cost. Opt out with options.cache === false.
+  // cache_control is NOT valid on thinking blocks — skip those when picking
+  // the breakpoint block, else the API 400s and the turn dies mid-session.
+  if (useCache && out.length) {
+    const last = out[out.length - 1];
+    if (Array.isArray(last.content) && last.content.length) {
+      for (let ci = last.content.length - 1; ci >= 0; ci--) {
+        const lb = last.content[ci];
+        if (!lb || lb.type === 'thinking') continue;
+        if (!lb.cache_control) lb.cache_control = { type: 'ephemeral' };
+        break;
+      }
+    } else if (typeof last.content === 'string' && last.content) {
+      last.content = [{ type: 'text', text: last.content, cache_control: { type: 'ephemeral' } }];
+    }
+  }
+
+  // Extended thinking (Claude reasons BEFORE every reply, including after
+  // each tool result — the opencode-style multi-pass thinking). Only enabled
+  // when the active model supports it (options.reasoning set by the session
+  // from the model's 'reasoning' tag). Anthropic requires temperature unset
+  // and max_tokens comfortably above the budget.
+  if (options.reasoning) {
+    let maxTokens = options.maxTokens || 8192;
+    // Explicit per-turn budget (/think low|medium|high) wins over the default.
+    const budget = options.thinkingBudget
+      ? Math.min(32768, Math.max(1024, Number(options.thinkingBudget)))
+      : Math.min(8192, Math.max(1024, maxTokens - 4096));
+    // budget_tokens must be strictly less than max_tokens (API requirement),
+    // so lift max_tokens when a small configured limit would collide.
+    if (budget >= maxTokens) maxTokens = budget + 1;
+    body.max_tokens = maxTokens;
+    body.thinking = { type: 'enabled', budget_tokens: budget };
+    delete body.temperature;
+  }
 
   if (options.tools && options.tools.length) {
     body.tools = options.tools.map(t => ({
@@ -177,8 +235,8 @@ async function stream(messages, options = {}, onDelta, onReasoning) {
 }
 
 const models = [
-  { id: 'claude-sonnet-4-20250514', name: 'Claude Sonnet 4', provider: 'anthropic', context: 200000, priceIn: 3, priceOut: 15 },
-  { id: 'claude-opus-4-20250514', name: 'Claude Opus 4', provider: 'anthropic', context: 200000, priceIn: 15, priceOut: 75 },
+  { id: 'claude-sonnet-4-20250514', name: 'Claude Sonnet 4', provider: 'anthropic', context: 200000, priceIn: 3, priceOut: 15, tags: ['reasoning'] },
+  { id: 'claude-opus-4-20250514', name: 'Claude Opus 4', provider: 'anthropic', context: 200000, priceIn: 15, priceOut: 75, tags: ['reasoning'] },
   { id: 'claude-3-5-haiku-20241022', name: 'Claude 3.5 Haiku', provider: 'anthropic', context: 200000, priceIn: 0.8, priceOut: 4 },
 ];
 

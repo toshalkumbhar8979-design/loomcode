@@ -19,6 +19,7 @@ if (args.includes("--help") || args.includes("-h")) {
   console.log("  bun run src/tui-open.tsx \"prompt\"   Start with prompt");
   console.log("  bun run src/tui-open.tsx -s <id>    Resume session");
   console.log("  bun run src/tui-open.tsx -p \"q\"     Print mode (one-shot)");
+  console.log("  bun run src/tui-open.tsx --auto     Auto-approve permissions");
   process.exit(0);
 }
 
@@ -26,6 +27,7 @@ const pIdx = args.indexOf("-p");
 const printMode = pIdx !== -1;
 const sIdx = args.indexOf("-s");
 const sessionId = sIdx !== -1 ? args[sIdx + 1] : null;
+const autoMode = args.includes("--auto") || args.includes("-a");
 const initialPrompt = args.filter((a, i) => !a.startsWith("-") && (sIdx === -1 || i !== sIdx + 1)).join(" ");
 
 defaultMcpInstall();
@@ -33,6 +35,7 @@ defaultMcpInstall();
 if (printMode) {
   const { Session } = require("./core/session.js");
   const sess = new Session();
+  if (autoMode) sess.permissions.setAuto(true);
   const query = args[pIdx + 1] || initialPrompt || "Hello";
   const resp = await sess.sendUserMessage(query);
   if (resp.type === "text") console.log(resp.content);
@@ -40,8 +43,8 @@ if (printMode) {
   process.exit(resp.type === "error" ? 1 : 0);
 }
 
-render(() => <App initialPrompt={initialPrompt} resumeSession={sessionId} />, {
-  targetFPS: 60,
+render(() => <App initialPrompt={initialPrompt} resumeSession={sessionId} autoMode={autoMode} />, {
+  targetFps: 60,
   useMouse: true,
   autoFocus: true,
   exitOnCtrlC: false,

@@ -1,15 +1,28 @@
-﻿// Interactive verification: keystrokes â†’ input signal â†’ autocomplete â†’ submit.
+// Interactive verification: keystrokes â†’ input signal â†’ autocomplete â†’ submit.
 // Quiet mode: prints only test names, per-test OK lines, and FAIL lines.
 // Never spawn MCP servers during tests (Session construction warms them).
 process.env.LOOM_MCP_NO_WARM = "1";
 // Never auto-create LOOM.md in the repo while the suite runs.
 process.env.LOOM_MEM_AUTO = "0";
+// Skip the powershell Set-Clipboard fallback in copyText — its synchronous
+// spawn blocks the event loop (and the mock key pipeline) for seconds.
+process.env.LOOM_NO_CLIPBOARD = "1";
+// No one-time session-start prompt on mount — tests drive it explicitly via
+// askSessionPermissions() (see test 36i).
+process.env.LOOM_NO_SESSION_PROMPT = "1";
+import "./suite-home.ts";
 import { testRender } from "@opentui/solid";
 import { App } from "./App.tsx";
-import { input, setInput, suggestions, autoKind, autoIndex, messages, modal, getSession, setMessages, inputMode, refreshUsage, modelName, appendMessage, thinking, toasts, refreshProviderState, setPromptHistory, getProjectFiles } from "./store.ts";
+import { input, setInput, setCursor, suggestions, autoKind, autoIndex, messages, modal, getSession, setMessages, inputMode, refreshUsage, modelName, appendMessage, thinking, setThinking, toasts, refreshProviderState, setPromptHistory, getProjectFiles, SLASH_LIST, setShowToolDetails, setShowThinking } from "./store.ts";
+// Static theme import: the App reads the SAME module instance's theme signal,
+// so palette()/setTheme() assertions reflect the live UI. (A dynamic import
+// would code-split a second instance whose signal never changes.)
+import { palette, setTheme as setThemeFn, themeOptions as themeOptionsFn } from "./theme.ts";
 import { getToolDefinitions, executeTool } from "../tools/index.js";
 import { formatTokens, formatUsd } from "../core/usage.js";
+import { saveSession, deleteSession } from "../core/session-store.js";
 import { MCP_PRESETS, CONNECTOR_PRESETS } from "./mcp-presets.ts";
+import { emit } from "../core/events.js";
 import { execSync } from "child_process";
 import path from "path";
 import os from "os";
@@ -17,6 +30,12 @@ import fs from "fs";
 const fs_mkdirSync = fs.mkdirSync, fs_writeFileSync = fs.writeFileSync, fs_rmSync = fs.rmSync;
 
 const strip = (s: string) => s.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "");
+
+// The chat renderer depends on these toggles (showToolDetails now gates
+// completed tool rows, opencode-style) — never inherit the user's persisted
+// ~/.loom/tui.json prefs, or the suite's expectations become machine-dependent.
+setShowToolDetails(true);
+setShowThinking(true);
 
 async function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -32,6 +51,30 @@ async function waitFor(cond: () => boolean, what: string, timeoutMs = 5000) {
   }
 }
 
+// Retrying click on the assistant reasoning header. The CliRenderer flushes
+// renders on its own schedule, so a captured frame can go stale between
+// capture and mouse dispatch (the header row shifts, the click misses, the
+// thought panel never opens). Re-capture and re-click until the click has an
+// effect (or the state already moved past it), then fall back to a long poll.
+async function clickHeader(label: (f: string) => boolean, pre: (f: string) => boolean, post: (f: string) => boolean, what: string): Promise<string> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const f0 = strip(setup.captureCharFrame());
+    if (!pre(f0)) return f0; // state already moved past the clickable phase
+    if (post(f0)) return f0; // effect already visible (e.g. re-click on open panel)
+    const rows = f0.split("\n");
+    let y = rows.findIndex(l => l.includes("Thinking"));
+    if (y < 0) y = rows.findIndex(l => l.includes(" Thought"));
+    if (y > 0) {
+      const row = rows[y];
+      const x = (row.includes("Thinking") ? row.indexOf("Thinking") : row.indexOf(" Thought")) + 1;
+      await setup.mockMouse.click(x, y);
+    }
+    const settled = await waitForFrame(post, what + " (attempt " + (attempt + 1) + ")", 2000);
+    if (post(settled)) return settled;
+  }
+  return waitForFrame(post, what, 8000);
+}
+
 // One-shot captureCharFrame() reads can lag the reactive state by a few
 // hundred ms (the CliRenderer flushes renders on its own schedule). Poll the
 // captured frame until the condition holds, returning the settled frame.
@@ -44,7 +87,7 @@ async function waitForFrame(cond: (f: string) => boolean, what: string, timeoutM
       console.assert(false, "FAIL: timed out waiting for frame: " + what);
       return f;
     }
-    await sleep(80);
+    await sleep(100);
   }
 }
 
@@ -107,13 +150,18 @@ await sleep(150);
 setup.mockInput.typeText("/");
 await sleep(200);
 frame = strip(setup.captureCharFrame());
-const lines = frame.split("\n");
-const connY = lines.findIndex(l => l.includes("/connect"));
-console.assert(connY > 0, "FAIL: /connect row not found in frame");
-const connX = lines[connY].indexOf("/connect") + 2;
-await setup.mockMouse.click(connX, connY);
-await sleep(300);
-console.assert(modal()?.type === "provider", "FAIL: click did not execute /connect");
+  let gotProv = modal()?.type === "provider";
+  for (let attempt = 0; attempt < 8 && !gotProv; attempt++) {
+    frame = strip(setup.captureCharFrame());
+    const connY = frame.split("\n").findIndex(l => l.includes("/connect"));
+    if (connY > 0) {
+      const connX = frame.split("\n")[connY].indexOf("/connect") + 2;
+      await setup.mockMouse.click(connX, connY);
+    }
+    await sleep(300);
+    gotProv = modal()?.type === "provider";
+  }
+  console.assert(gotProv, "FAIL: click did not execute /connect");
 setup.mockInput.pressEscape();
 await sleep(150);
 ok("click executes /connect");
@@ -149,15 +197,15 @@ const hasRange = frame.includes("/" + suggestions().length);
 console.assert(autoIndex() === 12, "FAIL: wheel scrolling should move autoIndex to 12, got " + autoIndex());
 console.assert(hasHelpGone, "FAIL: /help should have scrolled out of the popup window");
 console.assert(hasRange, "FAIL: range hint (N/" + suggestions().length + ") should show when list is longer than the window");
-for (let n = 0; n < 6; n++) { await setup.mockMouse.scroll(40, 16, "down"); await sleep(40); }
-await sleep(200);
+for (let n = 0; n < 24; n++) { await setup.mockMouse.scroll(40, 16, "down"); await sleep(30); }
+await sleep(300);
 frame = strip(setup.captureCharFrame());
-console.assert(frame.includes("/reset"), "FAIL: /reset should be visible after scrolling further");
+console.assert(frame.includes("/vim"), "FAIL: end-of-list commands should be visible after scrolling further");
 setup.mockInput.pressEscape();
 await sleep(150);
 ok("popup windowing");
 
-header("4: Press Enter â€” /compact should execute (or suggestion pick)");
+header("4: Enter with the popup open is safe (no accidental submit)");
 setup.mockInput.pressEnter();
 await sleep(200);
 ok("enter with popup open is safe");
@@ -179,15 +227,17 @@ await sleep(200);
 console.assert(modal() === null, "FAIL: Esc should close the settings modal");
 ok("esc closes modal");
 
-header("7: /companion + Enter â†’ companion modal");
+header("7: pets removed — no /companion slash, sidebar shows Auto status");
 setup.mockInput.typeText("/companion");
 await sleep(200);
-setup.mockInput.pressEnter();
-await sleep(300);
-console.assert(modal()?.type === "companion", "FAIL: /companion should open the companion modal");
+const slashCompanionGone = !SLASH_LIST.some(c => c.cmd === "companion");
+console.assert(slashCompanionGone, "FAIL: /companion should no longer exist after pet removal");
 setup.mockInput.pressEscape();
-await sleep(100);
-ok("companion modal opens");
+await sleep(150);
+const frame7 = strip(setup.captureCharFrame());
+console.assert(!frame7.includes("OpenPets"), "FAIL: OpenPets row should be gone from the sidebar");
+console.assert(!frame7.includes("Companion"), "FAIL: companion pet should not render in the sidebar");
+ok("pets removed, no companion leftovers");
 
 header("8: plain text + Enter adds user message, leaves splash");
 setup.mockInput.typeText("hello world");
@@ -217,27 +267,34 @@ frame = strip(setup.captureCharFrame());
 console.assert(frame.includes("Provider:"), "FAIL: frame does not show latest message (ChatArea not updating)");
 ok("slash commands execute");
 
-header("10: /undo then /redo roundtrip");
+header("10: /clear wipes the chat (confirm modal), /new starts fresh");
 setup.mockInput.pressEscape();
 await sleep(100);
 const sess = getSession();
 sess.messages = [{ role: "user", content: "a" }, { role: "assistant", content: "b" }];
 setMessages(sess.messages.map(x => ({ role: x.role, content: x.content })));
-setup.mockInput.typeText("/undo");
+setup.mockInput.typeText("/clear");
 await sleep(150);
 setup.mockInput.pressEnter();
 await sleep(250);
-const undoC = toasts().some(t => String(t.text).includes("Undone"));
-console.assert(sess.messages.length === 0, "FAIL: /undo should empty the session");
-console.assert(undoC, "FAIL: /undo should show a toast confirmation");
-setup.mockInput.typeText("/redo");
+console.assert(modal()?.type === "select", "FAIL: /clear should open the confirm modal");
+setup.mockInput.pressArrow("down");
+await sleep(100);
+setup.mockInput.pressEnter();
+await sleep(250);
+const cleared = toasts().some(t => String(t.text).includes("Session cleared"));
+console.assert(messages().length === 0, "FAIL: /clear should empty the chat");
+console.assert(cleared, "FAIL: /clear should show a confirmation toast");
+setup.mockInput.typeText("/new");
 await sleep(150);
 setup.mockInput.pressEnter();
 await sleep(250);
-const redoC = toasts().some(t => String(t.text).includes("Redone."));
-console.assert(sess.messages.length === 2, "FAIL: /redo should restore the exchange");
-console.assert(redoC, "FAIL: /redo should show a toast confirmation");
-ok("undo/redo roundtrip");
+setup.mockInput.pressArrow("down");
+await sleep(100);
+setup.mockInput.pressEnter();
+await sleep(250);
+console.assert(sess.messages.length === 0, "FAIL: /new should start a fresh session");
+ok("clear/new roundtrip");
 
 header("10b: unknown command â†’ error toast, not a chat message");
 setup.mockInput.typeText("/settingd");
@@ -336,13 +393,29 @@ await sleep(250);
 console.assert(messages().some(m => String(m.content).includes("Removed MCP server")), "FAIL: /mcp remove should delete the server");
 ok("skills/mcp subcommands");
 
-header("12: /share exports the session");
-setup.mockInput.typeText("/share");
+header("12: /sessions picker — picking a saved session jumps to it");
+const probeId = "tst" + Date.now().toString(36);
+saveSession({ conversationId: probeId, messages: [
+  { role: "user", content: "probe-a" },
+  { role: "assistant", content: "probe-b", reasoning: "think-1", toolCalls: [{ id: "tc1", name: "bash", input: { command: "echo hi" } }] },
+  { role: "tool", toolCallId: "tc1", content: "hi\n" },
+], config: {} });
+setup.mockInput.typeText("/sessions");
 await sleep(150);
 setup.mockInput.pressEnter();
 await sleep(300);
-console.assert(toasts().some(t => String(t.text).includes("Session exported")), "FAIL: /share should show an export toast");
-ok("share exports session");
+console.assert(modal()?.type === "select", "FAIL: /sessions should open the picker modal");
+setup.mockInput.typeText(probeId);
+await sleep(200);
+setup.mockInput.pressEnter();
+await sleep(300);
+console.assert(messages().some(m => String(m.content).includes("Resumed " + probeId)), "FAIL: /sessions pick should resume the session");
+console.assert(messages().some(m => m.role === "user" && String(m.content) === "probe-a"), "FAIL: picked session messages should be loaded");
+const resumed = messages().find(m => m.role === "assistant" && String(m.content) === "probe-b");
+console.assert(resumed && String(resumed.thinkingContent || "") === "think-1", "FAIL: resumed session should keep the thinking text");
+console.assert(resumed && resumed.parts?.some(p => p.type === "tool" && p.tool.name === "bash" && p.tool.status === "done" && String(p.tool.output || "").includes("hi")), "FAIL: resumed session should restore the tool row with its output");
+deleteSession(probeId);
+ok("sessions picker jumps to saved session");
 
 header("13: paste support (bracketed paste)");
 setup.mockInput.pasteBracketedText("/status");
@@ -372,15 +445,20 @@ header("14: typed text stays inside the input box (chat view)");
 setup.mockInput.typeText("regression check");
 await sleep(250);
 frame = strip(setup.captureCharFrame());
-// Multiline chatbox: "B |" header row, typed text on its own content row
-// inside the border — never interpolated into the border line itself.
+// Multiline chatbox: header row, typed text on its own content row, mode
+// name ("Build") at the box bottom — borderless panels (no box-drawing chars
+// around the input box), no single-letter "B |" header.
 {
   const lines14 = frame.split("\n");
   const textRow = lines14.find(l => l.includes("regression check")) || "";
-  console.assert(textRow.includes("regression check"), "FAIL: typed text should render in the input box");
-  console.assert(/^[│\u2502]/.test(textRow.trimStart()), "FAIL: typed text row should start with a box border (inside the box)");
-  console.assert(textRow.trimEnd().endsWith("│") || textRow.trimEnd().endsWith("\u2502"), "FAIL: typed text row should end with a box border, got " + JSON.stringify(textRow));
-  console.assert(frame.split("\n").some(l => /│\s*B\s*\|/.test(l)), "FAIL: input box should render the 'B |' header row");
+  // The sidebar starts at col 60 and can end the row with scrollbar
+  // half-blocks — inspect only the chat column (input box region).
+  const boxPart = textRow.slice(0, 60);
+  console.assert(boxPart.includes("regression check"), "FAIL: typed text should render in the input box");
+  console.assert(!/^[│\u2502]/.test(boxPart.trimStart()), "FAIL: input box should be borderless (no leading box line), got " + JSON.stringify(boxPart));
+  console.assert(!boxPart.trimEnd().endsWith("│") && !boxPart.trimEnd().endsWith("\u2502"), "FAIL: input box should be borderless (no trailing box line), got " + JSON.stringify(boxPart));
+  console.assert(!frame.split("\n").some(l => /B\s*\|/.test(l)), "FAIL: the single-letter 'B |' header row should be gone");
+  console.assert(frame.includes("Build") && frame.includes("all tools"), "FAIL: the mode name ('Build · all tools') should show at the bottom of the input box");
 }
 ok("text inside input box");
 
@@ -399,9 +477,9 @@ setup.mockInput.typeText("hello world");
 await sleep(150);
 setup.mockInput.pressEnter();
 await waitFor(() => messages().some(m => m.role === "assistant" && String(m.content).includes("mock")) && thinking() === false, "reply to copy");
-await waitFor(() => strip(setup.captureCharFrame()).includes("mock:") && !strip(setup.captureCharFrame()).includes("\u25C6 Loom is thinking"), "rendered reply line");
+await waitFor(() => strip(setup.captureCharFrame()).includes("mock reply"), "rendered reply line");
 const frame15 = strip(setup.captureCharFrame()).split("\n");
-const repY = frame15.findIndex(l => l.includes("mock:"));
+const repY = frame15.findIndex(l => l.includes("mock reply"));
 if (repY > 0) {
   try {
     await setup.mockMouse.drag(2, repY, 78, repY);
@@ -542,25 +620,26 @@ console.assert(messages().some(m => m.role === "system" && String(m.content).inc
 console.assert(!frame.includes("Tip: Type /help"), "FAIL: splash should leave when a command runs");
 ok("splash lifecycle");
 
-header("22: usage/billing footer + format helpers");
+header("22: usage status line + format helpers");
 console.assert(formatTokens(37283) === "37.3K", "FAIL: formatTokens(37283) should be 37.3K");
 console.assert(formatTokens(512) === "512", "FAIL: formatTokens(512) should be 512");
 console.assert(formatTokens(1500000) === "1.5M", "FAIL: formatTokens(1500000) should be 1.5M");
 console.assert(formatUsd(4.843) === "$4.84", "FAIL: formatUsd(4.843) should be $4.84");
 console.assert(formatUsd(120) === "$120", "FAIL: formatUsd(120) should be $120");
 refreshUsage();
-await waitFor(() => toasts().length === 0, "toasts to clear before footer frame checks");
+await waitFor(() => toasts().length === 0, "toasts to clear before status-line frame checks");
 await sleep(200);
 frame = strip(setup.captureCharFrame());
-const cwdShort = "\u2026" + process.cwd().slice(-9);
-const cwdInFooter = frame.includes(cwdShort) || frame.includes(process.cwd());
-const curModel = (modelName() || "default").split("/").pop();
-const modelInFooter = frame.includes(curModel.slice(0, 10));
-const lifeInFooter = frame.includes("lifetime") && frame.includes("budget");
-console.assert(cwdInFooter, "FAIL: footer should show the real working directory");
-console.assert(modelInFooter, "FAIL: footer should show the active model");
-console.assert(lifeInFooter, "FAIL: footer should show lifetime usage and monthly budget");
-ok("usage footer");
+// The status row is the one carrying the usage "NN%"; the cwd sits left of
+// it (truncated to fit the row), the hint right of it.
+const statusRow22 = frame.split("\n").find(l => /\(\d+%\)/.test(l)) || "";
+const cwdInFooter = statusRow22.includes("loomcode") || statusRow22.includes(process.cwd());
+const usageInFooter = /\d[\d.,]*[KM]? \(\d+%\) \u00B7 \$/.test(statusRow22);
+const hintInFooter = frame.includes("ctrl+p commands");
+console.assert(cwdInFooter, "FAIL: status line should show the real working directory, got " + JSON.stringify(statusRow22));
+console.assert(usageInFooter, "FAIL: status line should show usage like '53.7K (27%) · $8.17', got " + JSON.stringify(statusRow22));
+console.assert(hintInFooter, "FAIL: status line should show the 'ctrl+p commands' hint");
+ok("usage status line");
 
 header("23: file-diff patch â€” inline unified hunks for edits only");
 const { buildFileDiff, snapshotBefore, snapshotAfter, clearFileDiffs, formatDiffCount } = await import("../core/file-diffs.js");
@@ -600,6 +679,15 @@ setInput("");
 await sleep(200);
 appendMessage({ role: "assistant", content: "Changed both files.", fileDiffs: [d, d2] });
 await sleep(250);
+// The inline patch can be taller than the chat viewport (the chatbox now
+// grows taller too) — wheel-scroll up to reveal the patch header before
+// asserting both paths.
+for (let n = 0; n < 12; n++) {
+  frame = strip(setup.captureCharFrame());
+  if (frame.includes("app.ts") && frame.includes("util.ts")) break;
+  await setup.mockMouse.scroll(50, 8, "up");
+  await sleep(60);
+}
 frame = strip(setup.captureCharFrame());
 const diffPathShown = frame.includes("app.ts") && frame.includes("util.ts");
 const diffPlusShown = frame.includes("+2") && frame.includes("-1");
@@ -609,68 +697,111 @@ console.assert(diffPlusShown, "FAIL: +2/-1 counts should be visible");
 console.assert(hunkShown, "FAIL: colored hunk lines should be visible");
 ok("diff patch");
 
-header("23b: new-file writes show no patch; +Thought toggles in the header");
+header("23b: new-file writes render as a # Wrote block; + Thought toggles the reasoning body");
 setMessages([]);
 setInput("");
 await sleep(200);
-// A brand-new file (isNew) must NOT render a patch — nothing changed yet.
+// A brand-new file (isNew) renders opencode-style: "# Wrote <path>" with the
+// fresh content marked "+" — the agent DID write it, so it must be visible.
 const dNew = buildFileDiff("C:\\proj\\src\\brandnew.ts", null, "const x = 1;\nconst y = 2;\n");
 console.assert(dNew.isNew === true, "FAIL: isNew should be true for a new file");
 appendMessage({ role: "assistant", content: "Created the fresh module.", fileDiffs: [dNew], thinkingContent: "step one: plan\nstep two: create file\n", thinkTime: 3200 });
 await sleep(250);
 frame = strip(setup.captureCharFrame());
-console.assert(!frame.includes("brandnew.ts"), "FAIL: new-file diff must NOT render (nothing changed yet)");
-console.assert(frame.includes("+Thought") && frame.includes("3.2s"), "FAIL: header should show '+Thought · 3.2s' after output");
-// Click "+Thought" in the header → reasoning shows as plain text; clicking
-// again hides it again.
+console.assert(frame.includes("brandnew.ts"), "FAIL: new-file write should render the # Wrote block with the path");
+console.assert(frame.includes("# Wrote") && frame.includes("const x = 1") && frame.includes("const y = 2"), "FAIL: # Wrote block should show the written content with + lines");
+console.assert(frame.includes("+ Thought") && frame.includes("3.2s"), "FAIL: reasoning header should read '+ Thought \u00B7 3.2s' after output");
+// Click "+ Thought" → reasoning shows as plain text; clicking again hides it.
 const tLines = frame.split("\n");
-const ty = tLines.findIndex(l => l.includes("+Thought"));
-console.assert(ty > 0, "FAIL: +Thought row not found in frame");
-const tx = tLines[ty].indexOf("+Thought") + 2;
+const ty = tLines.findIndex(l => l.includes(" Thought"));
+console.assert(ty > 0, "FAIL: Thought row not found in frame");
+const tx = tLines[ty].indexOf(" Thought") + 1;
 await setup.mockMouse.click(tx, ty);
 frame = await waitForFrame(f => f.includes("step two: create file"), "clicked thought to reveal reasoning");
 const tLines2 = frame.split("\n");
-const ty2 = tLines2.findIndex(l => l.includes("+Thought"));
-const tx2 = tLines2[ty2].indexOf("+Thought") + 2;
+const ty2 = tLines2.findIndex(l => l.includes(" Thought"));
+const tx2 = tLines2[ty2].indexOf(" Thought") + 1;
 await setup.mockMouse.click(tx2, ty2);
 frame = await waitForFrame(f => !f.includes("step two: create file"), "second click to hide the thought panel");
-ok("new-file no-patch + thought toggle");
+ok("new-file Wrote block + thought toggle");
 
-header("23c: todos render in the patch region; live Thinking click-to-expand");
+header("23c: todos render in the chat as a # Todos block; live Thinking streams open");
 setMessages([]);
 setInput("");
 await sleep(200);
 appendMessage({ role: "assistant", content: "Working through tasks.", todos: [{ done: true, inProgress: false, cancelled: false, text: "setup" }, { done: false, inProgress: true, cancelled: false, text: "build" }] });
 await sleep(250);
 frame = strip(setup.captureCharFrame());
-console.assert(frame.includes("[x] setup") && frame.includes("[~] build"), "FAIL: todo block should render in the patch region");
-// Live thinking: while the turn runs the header reads "Loom is Thinking…"
-// with the spinner, and clicking it reveals the streamed reasoning and flips
-// it to "+Thought"; after the turn it stays "+Thought".
+// opencode-style TodoWrite: the "# Todos" block lives in the chat after the
+// last block with [✓]/[•] marks; the sidebar keeps its own copy.
+console.assert(frame.includes("# Todos") && frame.includes("[\u2713] setup") && frame.includes("[\u2022] build"), "FAIL: todos should render in the chat as '# Todos' with [\u2713]/[\u2022] marks");
+console.assert(frame.includes("Working through tasks."), "FAIL: the chat reply itself should still render");
+// Live thinking: while the turn runs the reasoning header reads "⠋ Thinking"
+// and the body streams LIVE (opencode-style, no click needed); after the turn
+// it collapses to "+ Thought · Ns" (click to re-open).
 setMessages([]);
 setInput("");
 await sleep(200);
-setup.mockInput.typeText("show your work");
-await sleep(60);
-setup.mockInput.pressEnter();
-await sleep(80); // still inside the 250ms mock turn
-frame = strip(setup.captureCharFrame());
-const thinkY = frame.split("\n").findIndex(l => l.includes("Loom is Thinking"));
-console.assert(thinkY > 0, "FAIL: header should read 'Loom is Thinking\u2026' with the spinner while the turn runs");
-const thinkX = frame.split("\n")[thinkY].indexOf("Loom is Thinking") + 2;
-await setup.mockMouse.click(thinkX, thinkY);
-frame = await waitForFrame(f => f.includes("mock reasoning"), "clicked Thinking to reveal reasoning");
-console.assert(frame.includes("+Thought"), "FAIL: clicking Thinking should flip the label to +Thought");
-// Click again → collapses and shows "Loom is Thinking…" again (turn still running).
-const tLines3 = frame.split("\n");
-const ty3 = tLines3.findIndex(l => l.includes("+Thought"));
-const tx3 = tLines3[ty3].indexOf("+Thought") + 2;
-await setup.mockMouse.click(tx3, ty3);
-frame = await waitForFrame(f => !f.includes("mock reasoning"), "second click to hide the thought panel");
-await waitFor(() => thinking() === false, "live turn to settle");
-frame = strip(setup.captureCharFrame());
-console.assert(frame.includes("+Thought"), "FAIL: after the turn the header should read +Thought");
-ok("live thinking toggle + todos");
+// Live thinking: while the turn runs the reasoning header reads "⠋ Thinking"
+// and the body streams LIVE (opencode-style, no click needed); after the turn
+// it collapses to "+ Thought · Ns" (click to re-open). The global 250ms mock
+// is too fast to observe the live body, so this test scopes a 1200ms mock —
+// long enough for the collapse/reopen clicks to land safely mid-turn.
+const realSend23c: any = _sessMock.sendUserMessage;
+_sessMock.sendUserMessage = function(text: string, callbacks: any) {
+  this.addMessage({ role: "user", content: text });
+  if (callbacks && callbacks.onReasoning) callbacks.onReasoning("mock reasoning about " + String(text).slice(0, 20));
+  if (callbacks && callbacks.onDelta) callbacks.onDelta("mock reply to " + String(text).slice(0, 20));
+  return new Promise((res) => setTimeout(() => res({ type: "success", content: "mock: " + String(text).slice(0, 40) }), 1200));
+};
+try {
+  setup.mockInput.typeText("show your work");
+  await sleep(60);
+  setup.mockInput.pressEnter();
+  await sleep(80); // still inside the 1200ms mock turn
+  frame = strip(setup.captureCharFrame());
+  const thinkY = frame.split("\n").findIndex(l => l.includes("Thinking"));
+  console.assert(thinkY > 0, "FAIL: header should read 'Thinking' with the spinner while the turn runs");
+  frame = await waitForFrame(f => f.includes("mock reasoning"), "reasoning body to stream live while the turn runs", 4000);
+  console.assert(frame.includes("Thinking"), "FAIL: the spinner header should still be live while the body streams");
+  // Clicking the live header collapses the streaming body and clicking again
+  // reopens it — all while the turn is STILL running (opencode toggles
+  // reasoning at any time, even mid-stream).
+  const liveHeader = (f: string) => {
+    const ls = f.split("\n");
+    const y = ls.findIndex(l => l.includes("Thinking"));
+    return y > 0 ? { y, x: ls[y].indexOf("Thinking") + 1 } : null;
+  };
+  let livePos = liveHeader(frame);
+  console.assert(livePos, "FAIL: live Thinking header not found");
+  if (livePos) await setup.mockMouse.click(livePos.x, livePos.y);
+  frame = await waitForFrame(f => !f.includes("mock reasoning"), "click the live header to collapse the streaming body", 2500);
+  livePos = liveHeader(frame);
+  console.assert(livePos, "FAIL: the Thinking header should remain while collapsed mid-turn");
+  console.assert(thinking() === true, "FAIL: the turn must still be running while the body is collapsed");
+  if (livePos) await setup.mockMouse.click(livePos.x, livePos.y);
+  frame = await waitForFrame(f => f.includes("mock reasoning"), "second click to reopen the streaming body", 2500);
+  const thinkingLabel = (f: string) => f.includes("Thinking") || f.includes(" Thought");
+  await waitFor(() => thinking() === false, "live turn to settle");
+  frame = strip(setup.captureCharFrame());
+  console.assert(frame.includes(" Thought"), "FAIL: after the turn the reasoning header should collapse to '+ Thought \u00B7 Ns'");
+  console.assert(!frame.includes("mock reasoning"), "FAIL: the reasoning body should collapse once the turn is done");
+  frame = await clickHeader(
+    thinkingLabel,
+    f => f.includes(" Thought") && !f.includes("mock reasoning"),
+    f => f.includes("mock reasoning"),
+    "clicked Thought to reveal reasoning"
+  );
+  frame = await clickHeader(
+    thinkingLabel,
+    f => f.includes(" Thought") && f.includes("mock reasoning"),
+    f => f.includes(" Thought") && !f.includes("mock reasoning"),
+    "second click to hide the thought panel"
+  );
+} finally {
+  _sessMock.sendUserMessage = realSend23c;
+}
+ok("todos block + live thinking toggle");
 
 header("24: interrupt resets state so the task can resume");
 const sess24 = getSession();
@@ -789,8 +920,17 @@ for (let y = fTabY + 1; y < sLines.length - 1; y++) {
 }
 console.assert(fRowY > fTabY, "FAIL: no file row visible in sidebar");
 const firstFile = getProjectFiles()[0];
-await setup.mockMouse.click(66, fRowY);
-await sleep(250);
+const wantBase = path.basename(firstFile);
+for (let attempt = 0; attempt < 5 && spawned26d.length < 1; attempt++) {
+  frame = strip(setup.captureCharFrame());
+  sLines = frame.split("\n");
+  let ry = -1;
+  for (let y = fTabY + 1; y < sLines.length - 1; y++) {
+    if ((sLines[y] || "").includes(wantBase)) { ry = y; break; }
+  }
+  if (ry > fTabY) await setup.mockMouse.click(sLines[ry].indexOf(wantBase) + 2, ry);
+  await sleep(300);
+}
 console.assert(spawned26d.length === 1, "FAIL: file click should call spawn once, got " + spawned26d.length);
 const gotAbs = String(spawned26d[0][spawned26d[0].length - 1]).replace(/\\/g, "/");
 const wantAbs = path.resolve(process.cwd(), firstFile).replace(/\\/g, "/");
@@ -1056,7 +1196,7 @@ fs_writeFileSync(path.join(mcpTmp, "probe.js"), [
   'console.log("MCP-SEED-OK");',
 ].join("\n"));
 try {
-  const out = execSync("bun run probe.js", { cwd: mcpTmp, encoding: "utf8", timeout: 60000, env: Object.assign({}, process.env, { USERPROFILE: mcpTmp, HOME: mcpTmp }) });
+  const out = execSync("bun run probe.js", { cwd: mcpTmp, encoding: "utf8", timeout: 60000, env: Object.assign({}, process.env, { USERPROFILE: mcpTmp, HOME: mcpTmp, LOOM_CONFIG_DIR: path.join(mcpTmp, ".loom") }) });
   console.assert(out.includes("MCP-SEED-OK"), "FAIL: default mcp seeding roundtrip failed");
 } catch (e) {
   console.assert(false, "FAIL: default mcp seeding probe errored: " + String(e?.message || e).slice(0, 300));
@@ -1072,16 +1212,22 @@ await sleep(300);
 console.assert(modal()?.type === "select", "FAIL: /theme should open the select modal");
 frame = strip(setup.captureCharFrame());
 console.assert(frame.includes("Select Theme") && frame.includes("Loom Dark"), "FAIL: theme picker should list themes");
-setup.mockInput.pressArrow("down");
-await sleep(120);
-setup.mockInput.pressArrow("down");
-await sleep(120);
+// Select Ocean by hovering its row (mouse-driven selection is reliable in the
+// test renderer — the live preview repaints between key dispatches) then Enter.
+const themeRows = frame.split("\n");
+const oceanY = themeRows.findIndex(l => l.includes("Ocean"));
+console.assert(oceanY > 0, "FAIL: Ocean row not found in theme picker");
+if (oceanY > 0) {
+  await setup.mockMouse.moveTo(themeRows[oceanY].indexOf("Ocean") + 1, oceanY);
+  await sleep(250);
+}
 setup.mockInput.pressEnter();
 await sleep(300);
 console.assert(modal() === null, "FAIL: theme picker should close on pick");
 console.assert(toasts().some(t => String(t.text).startsWith("Theme:")), "FAIL: /theme should show a toast confirmation");
-const themeMod = await import("../tui/theme.ts");
-const { palette: pal, setTheme: st, themeOptions: to } = themeMod;
+const pal = palette;
+const st = setThemeFn;
+const to = themeOptionsFn;
 console.assert(to().length >= 5, "FAIL: at least 5 themes should be available, got " + to().length);
 const oceanBg = pal().bg;
 const themeFile = path.join(os.homedir(), ".loom", "tui.json");
@@ -1092,6 +1238,29 @@ const okTheme = st("loom");
 console.assert(okTheme && pal().bg === "#191817", "FAIL: setTheme('loom') should restore the default");
 console.assert(st("nope") === false, "FAIL: unknown theme id should be rejected");
 ok("theme switching");
+
+// Hover preview: moving the mouse over a theme row (no click) must move the
+// selection and repaint the app with that theme; Esc restores the original.
+setup.mockInput.typeText("/theme");
+await sleep(150);
+setup.mockInput.pressEnter();
+await sleep(300);
+frame = strip(setup.captureCharFrame());
+const thRows = frame.split("\n");
+const hoverY = thRows.findIndex(l => l.includes("Loom Dark"));
+console.assert(hoverY > 0, "FAIL: theme picker should list Loom Dark");
+const hoverX = thRows[hoverY].indexOf("Loom Dark") + 1;
+await setup.mockMouse.moveTo(hoverX, hoverY + 1);
+await sleep(250);
+const hoverFrame = strip(setup.captureCharFrame());
+const hoverRow = hoverFrame.split("\n")[hoverY + 1];
+console.assert(hoverRow && hoverRow.includes("> "), "FAIL: hovering a theme row should move the selection");
+console.assert(pal().bg !== "#191817", "FAIL: hovering a theme row should live-preview it (bg=" + pal().bg + ")");
+setup.mockInput.pressEscape();
+await sleep(300);
+console.assert(modal() === null, "FAIL: Esc should close the theme picker");
+console.assert(pal().bg === "#191817", "FAIL: Esc should restore the pre-picker theme");
+ok("theme hover preview");
 
 header("33: speed â€” parallel tools, warm MCP, prompt guidance");
 const { Session: SessionCls } = await import("../core/session.js");
@@ -1137,7 +1306,7 @@ await tx34("first-turn prompt");
 await waitFor(() => thinking() === true, "first turn to start thinking");
 console.assert(thinking() === true, "FAIL: first submit should set thinking");
 await tx34("held");
-console.assert(q34.input() === "held", "FAIL: busy Enter must keep text in the input bar (got " + JSON.stringify(q34.input()) + ")");
+console.assert(q34.queuedDrafts().includes("held") && q34.input() === "", "FAIL: busy Enter should queue the draft and clear the bar (input=" + JSON.stringify(q34.input()) + " q=" + JSON.stringify(q34.queuedDrafts()) + ")");
 console.assert(messages().filter((m) => m.role === "user").length === 1, "FAIL: busy Enter must not send the message");
 await waitFor(() => thinking() === false, "first turn to settle");
 setup.mockInput.pressEnter(); // enter with the held text still in the bar
@@ -1171,9 +1340,10 @@ frame = strip(setup.captureCharFrame());
 console.assert(frame.includes("Speed:") && frame.includes("\u2014"), "FAIL: speed row should show em-dash when no data");
 ok("sidebar speed row");
 
-header("36: permission popup â€” Allow / Always allow / Deny / custom answer");
+header("36: permission popup — Allow / Always allow / Deny only (no custom answer)");
 const q36 = await import("./store.ts");
-// 36a: typing goes to the popup (custom answer), never to the input bar.
+// 36a: typing must NOT open an answer editor on a PERMISSION — a permission is
+// Allow / Always allow / Deny, nothing else; the draft input stays untouched.
 const p36a: any = q36.requestPermission("bash", "npm install -g foo", "dangerous command");
 await sleep(150);
 await pumpRenders();
@@ -1181,30 +1351,29 @@ frame = strip(setup.captureCharFrame());
 console.assert(frame.includes("Permission needed"), "FAIL: permission popup should appear");
 console.assert(frame.includes("npm install -g foo"), "FAIL: popup should show the command");
 console.assert(frame.includes("recommended"), "FAIL: Allow should be marked recommended");
+console.assert(!frame.includes("Type your answer"), "FAIL: permissions must not offer a type-your-answer row");
 const inputBefore36 = q36.input();
 setup.mockInput.typeText("no thanks");
 await sleep(100);
 await pumpRenders();
 console.assert(q36.input() === inputBefore36, "FAIL: typing while popup open must not reach the input bar");
-console.assert(q36.permission() !== null, "FAIL: popup should stay open while typing the answer");
+console.assert(q36.permission() !== null, "FAIL: popup should stay open while typing");
 frame = strip(setup.captureCharFrame());
-console.assert(frame.includes("Answer"), "FAIL: typing an answer should switch the popup to answer mode, got:\n" + frame);
-console.assert(frame.includes("no thanks"), "FAIL: answer input should show the typed text");
-console.assert(!frame.includes("Question —"), "FAIL: full-screen Question overlay must not open");
-// Esc returns to the permission options (no resolve yet).
-setup.mockInput.pressEscape();
-await sleep(100);
-await pumpRenders();
-console.assert(q36.permission() !== null, "FAIL: Esc in Question popup should return to options, not resolve");
-setup.mockInput.typeText("no thanks");
-await sleep(100);
+console.assert(frame.includes("Permission needed"), "FAIL: permission popup must NOT switch to answer mode, got:\n" + frame);
+console.assert(!frame.includes("Answer"), "FAIL: permission popup must not show the answer editor");
+console.assert(!frame.includes("no thanks"), "FAIL: typed text must not appear in the permission popup");
+// Down to Deny + Enter denies.
+setup.mockInput.pressArrow("down");
+await sleep(50);
+setup.mockInput.pressArrow("down");
+await sleep(50);
 setup.mockInput.pressEnter();
 const res36a = await p36a;
-console.assert(res36a === false, "FAIL: typed denial should deny");
+console.assert(res36a.approved === false, "FAIL: Deny should deny");
 await pumpRenders();
 frame = strip(setup.captureCharFrame());
 console.assert(!frame.includes("Permission needed"), "FAIL: popup should close after answering");
-ok("permission popup custom deny");
+ok("permission popup is options-only");
 
 // 36b: Enter on the recommended option approves.
 const p36b: any = q36.requestPermission("write", "C:/x/y.txt", "");
@@ -1212,9 +1381,10 @@ await sleep(150);
 await pumpRenders();
 frame = strip(setup.captureCharFrame());
 console.assert(frame.includes("Permission needed") && frame.includes("change a file"), "FAIL: popup should show file-change wording");
+console.assert(!frame.includes("Allow all commands in this session"), "FAIL: non-bash permissions must not offer the allow-all row");
 setup.mockInput.pressEnter();
 const res36b = await p36b;
-console.assert(res36b === true, "FAIL: Allow (recommended) should approve");
+console.assert(res36b.approved === true, "FAIL: Allow (recommended) should approve");
 await pumpRenders();
 ok("permission popup allow");
 
@@ -1228,7 +1398,7 @@ setup.mockInput.pressArrow("down");
 await sleep(50);
 setup.mockInput.pressEnter();
 const res36c = await p36c;
-console.assert(res36c === false, "FAIL: Deny should block the command");
+console.assert(res36c.approved === false, "FAIL: Deny should block the command");
 await pumpRenders();
 ok("permission popup deny");
 
@@ -1240,7 +1410,7 @@ setup.mockInput.pressArrow("down");
 await sleep(50);
 setup.mockInput.pressEnter();
 const res36d = await p36d;
-console.assert(res36d === true, "FAIL: Always allow should approve");
+console.assert(res36d.approved === true, "FAIL: Always allow should approve");
 const rule36 = getSession().permissions.checkRule("npm install -g foo");
 console.assert(rule36 === "allow", "FAIL: Always allow should save a rule, got " + String(rule36));
 getSession().permissions.clearRule("npm install -g foo");
@@ -1253,9 +1423,348 @@ await sleep(150);
 await pumpRenders();
 setup.mockInput.pressEscape();
 const res36e = await p36e;
-console.assert(res36e === false, "FAIL: Esc should deny");
+console.assert(res36e.approved === false, "FAIL: Esc should deny");
 await pumpRenders();
 ok("permission popup esc denies");
+
+// 36f: QUESTION mode (the ask tool) — options are clickable/enterable and a
+// typed answer is a legitimate answer, not a denial.
+const p36f: any = q36.requestPermission("ask", "Which approach should I use?", "question", true, ["Refactor", "Rewrite", "Keep as-is"]);
+await sleep(150);
+await pumpRenders();
+frame = strip(setup.captureCharFrame());
+console.assert(frame.includes("Question"), "FAIL: question popup should show a Question title");
+console.assert(frame.includes("Which approach should I use?"), "FAIL: question popup should show the question text");
+console.assert(frame.includes("Refactor") && frame.includes("Rewrite") && frame.includes("Keep as-is"), "FAIL: question popup should list the options");
+console.assert(frame.includes("Type your answer"), "FAIL: question popup should offer the type-your-answer row");
+console.assert(!frame.includes("Allow") && !frame.includes("Permission needed") && !frame.includes("Always allow"), "FAIL: question popup must not show permission rows");
+console.assert(!frame.includes("recommended"), "FAIL: question popup must not mark anything recommended");
+// Enter on the first (highlighted) option answers with it.
+setup.mockInput.pressEnter();
+const res36f = await p36f;
+console.assert(res36f.approved === true, "FAIL: picking an option should approve");
+console.assert(res36f.note === "Refactor", "FAIL: option answer should come back as the note, got: " + String(res36f.note));
+await pumpRenders();
+frame = strip(setup.captureCharFrame());
+console.assert(!frame.includes("Question"), "FAIL: question popup should close after answering");
+// Second question: typing opens the inline answer editor (no overlay).
+const p36g: any = q36.requestPermission("ask", "What port for the server?", "question", true, ["8080", "3000"]);
+await sleep(150);
+await pumpRenders();
+setup.mockInput.typeText("9090");
+await sleep(100);
+await pumpRenders();
+console.assert(q36.permission() !== null, "FAIL: question popup should stay open while typing");
+frame = strip(setup.captureCharFrame());
+console.assert(frame.includes("Answer"), "FAIL: typing should switch the question popup to answer mode, got:\n" + frame);
+console.assert(frame.includes("9090"), "FAIL: typed answer should show in the editor");
+console.assert(!frame.includes("Question —"), "FAIL: full-screen Question overlay must not open");
+console.assert(q36.input() === "", "FAIL: typing a question answer must not reach the input bar");
+// Esc back to the options, then answer via the typed text again.
+setup.mockInput.pressEscape();
+await sleep(100);
+await pumpRenders();
+console.assert(q36.permission() !== null, "FAIL: Esc in answer mode should return to options, not resolve");
+setup.mockInput.typeText("9090");
+await sleep(100);
+setup.mockInput.pressEnter();
+const res36g = await p36g;
+console.assert(res36g.approved === true, "FAIL: typed question answer should approve");
+console.assert(res36g.note === "9090", "FAIL: typed answer should come back as the note, got: " + String(res36g.note));
+await pumpRenders();
+frame = strip(setup.captureCharFrame());
+console.assert(!frame.includes("Question"), "FAIL: question popup should close after the typed answer");
+ok("question popup options + typed answer");
+
+// 36h: bash permissions offer a 4th row — "Allow all commands in this
+// session" — which switches the session to auto-approve mode.
+getSession().permissions.setAuto(false);
+const p36h: any = q36.requestPermission("bash", "npm install -g zzz", "");
+await sleep(150);
+await pumpRenders();
+frame = strip(setup.captureCharFrame());
+console.assert(frame.includes("Allow all commands in this session"), "FAIL: bash popup should offer the allow-all-in-session row, got:\n" + frame);
+setup.mockInput.pressArrow("down");
+await sleep(50);
+setup.mockInput.pressArrow("down");
+await sleep(50);
+setup.mockInput.pressArrow("down");
+await sleep(50);
+setup.mockInput.pressEnter();
+const res36h = await p36h;
+console.assert(res36h.approved === true, "FAIL: allow-all should approve the command");
+console.assert(getSession().permissions.auto === true, "FAIL: allow-all should flip the session to auto-approve");
+getSession().permissions.setAuto(false);
+await pumpRenders();
+ok("permission popup allow-all-in-session");
+
+// 36i: the one-time session-start prompt ("Allow all commands in this
+// session?") + the Shift+Tab auto-approve toggle.
+q36.setAutoPerm(false);
+getSession().permissions.setAuto(false);
+const p36i: any = q36.askSessionPermissions();
+await sleep(150);
+await pumpRenders();
+frame = strip(setup.captureCharFrame());
+console.assert(frame.includes("Session permissions"), "FAIL: session-start popup should appear, got:\n" + frame);
+console.assert(frame.includes("Allow all commands in this session?"), "FAIL: session-start popup should ask the question");
+console.assert(frame.includes("Allow all commands") && frame.includes("Ask each time"), "FAIL: session-start popup should offer both options");
+console.assert(frame.includes("Shift+Tab"), "FAIL: session-start popup should mention the Shift+Tab toggle");
+console.assert(!frame.includes("Type your answer"), "FAIL: session-start popup must not offer a free-answer row");
+// Enter on "Allow all commands" → session-wide auto-approve ON.
+setup.mockInput.pressEnter();
+await sleep(150);
+await pumpRenders();
+await p36i;
+console.assert(getSession().permissions.auto === true, "FAIL: session-start Allow should flip auto-approve on");
+frame = strip(setup.captureCharFrame());
+console.assert(!frame.includes("Session permissions"), "FAIL: session-start popup should close after answering");
+console.assert(frame.includes("auto"), "FAIL: status line should show the auto indicator");
+// Shift+Tab toggles auto-approve OFF, then back ON.
+setup.mockInput.pressTab({ shift: true });
+await sleep(150);
+console.assert(getSession().permissions.auto === false, "FAIL: Shift+Tab should toggle auto-approve off");
+console.assert(q36.toasts().some(t => String(t.text).includes("Auto-approve OFF")), "FAIL: toggle off should toast");
+setup.mockInput.pressTab({ shift: true });
+await sleep(150);
+console.assert(getSession().permissions.auto === true, "FAIL: Shift+Tab should toggle auto-approve back on");
+console.assert(q36.toasts().some(t => String(t.text).includes("Auto-approve ON")), "FAIL: toggle on should toast");
+frame = strip(setup.captureCharFrame());
+console.assert(frame.includes("Auto:") && frame.includes("no asks"), "FAIL: sidebar should show auto-approve status when on, got:\n" + frame);
+// "Ask each time" keeps per-command asks.
+q36.setSessionAuto(false);
+const p36j: any = q36.askSessionPermissions();
+await sleep(150);
+await pumpRenders();
+setup.mockInput.pressArrow("down");
+await sleep(50);
+setup.mockInput.pressEnter();
+await sleep(150);
+await pumpRenders();
+await p36j;
+console.assert(getSession().permissions.auto === false, "FAIL: Ask each time must keep auto-approve off");
+frame = strip(setup.captureCharFrame());
+console.assert(!frame.includes("Session permissions"), "FAIL: session-start popup should close after Ask each time");
+console.assert(frame.includes("Auto:") && frame.includes("asks per command"), "FAIL: sidebar should show auto-approve off state");
+q36.setSessionAuto(false);
+await pumpRenders();
+ok("session-start prompt + Shift+Tab auto-approve toggle");
+
+// 36j: opencode-style tool activity — every tool call gets its OWN row and
+// STAYS in the transcript as a muted line once done ("→ Read src/a.ts",
+// "← Edit src/b.ts") — never one merged patch for all commands. A running
+// tool shows its pending label spinning ("~ Preparing edit..."). Todos render
+// as the "# Todos" block after the last block; the footer (▣ Loom) shows once
+// the turn ends.
+header("36j: per-tool rows persist + todos after last");
+setMessages([]);
+setInput("");
+await sleep(200);
+const realSend36j: any = _sessMock.sendUserMessage;
+_sessMock.sendUserMessage = function(text: string, callbacks: any) {
+  this.addMessage({ role: "user", content: text });
+  if (callbacks && callbacks.onTool) {
+    // read fires + resolves synchronously: its row must still STAY in the
+    // transcript (done rows persist, muted — opencode keeps every tool call).
+    callbacks.onTool("read", { filePath: "src/a.ts" });
+    if (callbacks.onToolResult) callbacks.onToolResult("read", { result: "ok" }, { filePath: "src/a.ts" });
+    // edit runs long enough to observe its running row, then resolves.
+    setTimeout(() => callbacks.onTool("edit", { filePath: "src/b.ts" }), 150);
+    if (callbacks.onToolResult) setTimeout(() => callbacks.onToolResult("edit", { result: "ok" }, { filePath: "src/b.ts" }), 700);
+    // Todos mid-turn: the App listener patches them onto the message so the
+    // todos block shows in the chat after the last block. The real session
+    // only emits after a todowrite TOOL call, so mirror setTodos + emit here.
+    if (this.setTodos) setTimeout(() => {
+      this.setTodos([{ content: "task a", status: "completed" }, { content: "task b", status: "pending" }]);
+      emit("todos:changed", this.todos || []);
+    }, 400);
+  }
+  return new Promise((res) => setTimeout(() => {
+    if (callbacks && callbacks.onDelta) callbacks.onDelta("done reading");
+    res({ type: "success", content: "done" });
+  }, 900));
+};
+try {
+  setup.mockInput.typeText("go read files");
+  await sleep(60);
+  setup.mockInput.pressEnter();
+  await sleep(80); // first tool already ran + RESULTED, still inside the mock turn
+  frame = strip(setup.captureCharFrame());
+  console.assert(frame.includes("Read src/a.ts"), "FAIL: the finished read row must STAY in the transcript, got:\n" + frame);
+  // Second tool fired at +150; its running row renders on the ~100ms stream
+  // flush and stays visible until the result at +700.
+  frame = await waitForFrame(f => f.includes("Preparing edit..."), "running edit row ('~ Preparing edit...') to render", 4000);
+  console.assert(frame.includes("Read src/a.ts"), "FAIL: the finished row above must not flicker while the edit runs");
+  frame = await waitForFrame(f => !f.includes("Preparing edit..."), "edit row to finish", 4000);
+  await waitFor(() => thinking() === false, "turn to settle");
+  await sleep(150);
+  frame = strip(setup.captureCharFrame());
+  console.assert(frame.includes("Read src/a.ts") && frame.includes("Edit src/b.ts"), "FAIL: each tool must keep its OWN persisted row (no single merged patch for all commands)");
+  console.assert(frame.includes("# Todos") && frame.includes("[\u2713] task a") && frame.includes("[ ] task b"), "FAIL: todos block should render in the chat after the last block");
+  console.assert(frame.includes("\u25A3 Loom"), "FAIL: the message footer (▣ Loom) should render once the turn is done");
+  _sessMock.setTodos([]);
+  await sleep(100);
+} finally {
+  _sessMock.sendUserMessage = realSend36j;
+}
+ok("per-tool rows persist + todos after last");
+
+// 36k: parts stream INTERLEAVED, opencode-style — thinking, a tool, thinking
+// again, an edit, then the reply — each rendered WHERE it arrived (the model
+// "thinks on the read, then decides, then edits, then answers", never the old
+// fixed "thinking on top, tools below" layout). Settled reasoning parts each
+// collapse to their own "+ Thought" line and expand individually.
+header("36k: interleaved parts — think, read, think, edit, reply");
+setMessages([]);
+setInput("");
+await sleep(200);
+const realSend36k: any = _sessMock.sendUserMessage;
+_sessMock.sendUserMessage = function(text: string, callbacks: any) {
+  this.addMessage({ role: "user", content: text });
+  if (callbacks && callbacks.onReasoning) callbacks.onReasoning("thinking about the plan");
+  if (callbacks && callbacks.onTool) {
+    callbacks.onTool("read", { filePath: "src/a.ts" });
+    if (callbacks.onToolResult) callbacks.onToolResult("read", { result: "ok" }, { filePath: "src/a.ts" });
+    setTimeout(() => callbacks.onReasoning("now I know what to change"), 200);
+    setTimeout(() => callbacks.onTool("edit", { filePath: "src/b.ts" }), 350);
+    if (callbacks.onToolResult) setTimeout(() => callbacks.onToolResult("edit", { result: "ok" }, { filePath: "src/b.ts" }), 600);
+  }
+  return new Promise((res) => setTimeout(() => {
+    if (callbacks && callbacks.onDelta) callbacks.onDelta("final answer text");
+    res({ type: "success", content: "mock: " + String(text).slice(0, 40) });
+  }, 700));
+};
+try {
+  setup.mockInput.typeText("investigate then fix");
+  await sleep(60);
+  setup.mockInput.pressEnter();
+  await sleep(80);
+  // Second reasoning part is LIVE and streaming; the finished read row sits
+  // ABOVE it, the running edit streams BELOW it — interleaved, not stacked.
+  frame = await waitForFrame(f => f.includes("now I know what to change"), "second reasoning body to stream below the read row", 4000);
+  console.assert(frame.includes("Read src/a.ts"), "FAIL: the done read row should sit above the second thinking");
+  frame = await waitForFrame(f => f.includes("Preparing edit..."), "the running edit row to stream below the live thinking", 4000);
+  const rowOf = (s: string) => frame.split("\n").findIndex(l => l.includes(s));
+  console.assert(rowOf("Read src/a.ts") < rowOf("now I know what to change"), "FAIL: thinking must stream BELOW the read row (interleaved, not all on top)");
+  console.assert(rowOf("now I know what to change") < rowOf("Preparing edit..."), "FAIL: the edit row must stream below the thinking");
+  await waitFor(() => thinking() === false, "interleaved turn to settle");
+  await sleep(150);
+  frame = strip(setup.captureCharFrame());
+  console.assert((frame.match(/\+ Thought/g) || []).length === 2, "FAIL: both settled reasoning parts should each show '+ Thought', got:\n" + frame);
+  console.assert(rowOf("Read src/a.ts") < rowOf("Edit src/b.ts") && rowOf("Edit src/b.ts") < rowOf("final answer text"), "FAIL: settled order must be read, then edit, then the reply");
+  console.assert(!frame.includes("now I know what to change"), "FAIL: settled reasoning bodies must collapse to their + Thought rows");
+  frame = await clickHeader(
+    (f: string) => f.includes(" Thought"),
+    f => !f.includes("thinking about the plan"),
+    f => f.includes("thinking about the plan"),
+    "clicked the first + Thought to reveal its body"
+  );
+} finally {
+  _sessMock.sendUserMessage = realSend36k;
+}
+ok("interleaved parts stream in arrival order");
+
+// 36l: TOOL OUTPUT BLOCKS — the agent's freedom, opencode-style: bash with
+// output swaps its row for the "$ command" block (collapsed to 10 lines,
+// expandable), and ANY tool at all (MCP/custom) renders through the generic
+// fallback with its output in a "# {tool} {args}" block — no registry entry
+// needed. Quiet generic tools without output keep their ⚙ row. /details off
+// hides completed tool parts (opencode's shouldHide), on restores them.
+header("36l: bash + generic tool output blocks — agent's work shows in chat");
+setMessages([]);
+setInput("");
+await sleep(200);
+const realSend36l: any = _sessMock.sendUserMessage;
+const OUT36l = Array.from({ length: 14 }, (_, i) => "build out " + (i + 1));
+_sessMock.sendUserMessage = function(text: string, callbacks: any) {
+  this.addMessage({ role: "user", content: text });
+  if (callbacks && callbacks.onTool) {
+    callbacks.onTool("bash", { command: "npm run build" });
+    if (callbacks.onToolResult) callbacks.onToolResult("bash", { result: OUT36l.join("\n") }, { command: "npm run build" });
+    callbacks.onTool("mcp__server__read_graph", { query: "x" });
+    if (callbacks.onToolResult) callbacks.onToolResult("mcp__server__read_graph", { result: "graph: a -> b -> c -> d -> e" }, { query: "x" });
+    callbacks.onTool("mcp__server__touch", { path: "z" });
+    if (callbacks.onToolResult) callbacks.onToolResult("mcp__server__touch", { result: "" }, { path: "z" });
+  }
+  return new Promise((res) => setTimeout(() => {
+    if (callbacks && callbacks.onDelta) callbacks.onDelta("build output reviewed");
+    res({ type: "success", content: "mock: " + String(text).slice(0, 40) });
+  }, 500));
+};
+try {
+  setup.mockInput.typeText("check the build output");
+  await sleep(60);
+  setup.mockInput.pressEnter();
+  frame = await waitForFrame(f => f.includes("build out 1"), "the bash output block to render", 4000);
+  console.assert(frame.includes("$ npm run build"), "FAIL: bash with output must render its block with the $ command title, got:\n" + frame);
+  console.assert(frame.includes("build out 10") && !frame.includes("build out 11"), "FAIL: bash output must collapse to 10 lines with a click-to-expand hint");
+  console.assert(frame.includes("Click to expand"), "FAIL: a collapsed block must offer click-to-expand");
+  frame = await waitForFrame(f => f.includes("server.read_graph"), "the generic MCP tool block to render", 4000);
+  console.assert(frame.includes("# server.read_graph [query=x]"), "FAIL: ANY tool must render via the generic fallback '# tool args'");
+  console.assert(frame.includes("graph: a -> b -> c"), "FAIL: the generic block must show the tool's output");
+  console.assert(frame.includes("\u2699 server.touch [path=z]"), "FAIL: a generic tool without output keeps its \u2699 row");
+  await waitFor(() => thinking() === false, "output-blocks turn to settle");
+  await sleep(150);
+  frame = strip(setup.captureCharFrame());
+  console.assert(frame.includes("build out 1") && frame.includes("graph: a -> b"), "FAIL: blocks must persist after the turn settles");
+  setup.mockInput.typeText("/details");
+  await sleep(150);
+  setup.mockInput.pressEnter();
+  await waitFor(() => toasts().some(t => String(t.text) === "Tool details: off"), "the /details off toast");
+  await sleep(200);
+  frame = await waitForFrame(f => !f.includes("server.read_graph") && !f.includes("build out 1") && !f.includes("Click to expand"), "tool blocks to hide when tool details are off", 4000);
+  console.assert(!frame.includes("server.read_graph") && !frame.includes("build out 1") && !frame.includes("Click to expand"), "FAIL: completed tool rows must hide too, got:\n" + frame);
+  setup.mockInput.typeText("/details");
+  await sleep(150);
+  setup.mockInput.pressEnter();
+  await waitFor(() => toasts().some(t => String(t.text) === "Tool details: on"), "the /details on toast");
+  await sleep(200);
+  frame = await waitForFrame(f => f.includes("server.read_graph") && f.includes("build out 1"), "tool blocks to restore when tool details are on", 4000);
+  console.assert(frame.includes("server.read_graph") && frame.includes("build out 1"), "FAIL: /details on must restore the tool blocks, got:\n" + frame);
+} finally {
+  _sessMock.sendUserMessage = realSend36l;
+}
+ok("tool output blocks render for bash + any generic tool");
+
+// 36m: LIVE terminal output — a bash command streams its output into a
+// growing, collapsible "$ cmd" block WHILE it runs (with a "● streaming"
+// badge); the finished block replaces it with the full result. The
+// callId pins the stream to its own row.
+header("36m: live terminal output streams into a collapsible block");
+setMessages([]);
+setInput("");
+await sleep(200);
+const realSend36m: any = _sessMock.sendUserMessage;
+_sessMock.sendUserMessage = function(text: string, callbacks: any) {
+  this.addMessage({ role: "user", content: text });
+  if (callbacks && callbacks.onTool) callbacks.onTool("bash", { command: "long build" }, "call-1");
+  setTimeout(() => { if (callbacks && callbacks.onToolOutput) callbacks.onToolOutput({ id: "call-1" }, "compiling module 1\n", "out"); }, 100);
+  setTimeout(() => { if (callbacks && callbacks.onToolOutput) callbacks.onToolOutput({ id: "call-1" }, "compiling module 2\n", "out"); }, 300);
+  setTimeout(() => { if (callbacks && callbacks.onToolOutput) callbacks.onToolOutput({ id: "call-1" }, "compiling module 3\n", "out"); }, 900);
+  setTimeout(() => {
+    if (callbacks && callbacks.onToolResult) callbacks.onToolResult("bash", { result: "compiling module 1\ncompiling module 2\ncompiling module 3\nbuild finished" }, { command: "long build" }, "call-1");
+  }, 1300);
+  return new Promise((res) => setTimeout(() => {
+    if (callbacks && callbacks.onDelta) callbacks.onDelta("live output reviewed");
+    res({ type: "success", content: "mock: " + String(text).slice(0, 40) });
+  }, 1000));
+};
+try {
+  setup.mockInput.typeText("run the long build");
+  await sleep(60);
+  setup.mockInput.pressEnter();
+  frame = await waitForFrame(f => f.includes("compiling module 1"), "the live bash block to stream its first chunk", 4000);
+  console.assert(frame.includes("$ long build"), "FAIL: the live block must carry the $ command title");
+  console.assert(frame.includes("\u25CF streaming"), "FAIL: the live block must show the streaming badge");
+  console.assert(!frame.includes("compiling module 3"), "FAIL: the live block must not show output that hasn't streamed yet");
+  frame = await waitForFrame(f => f.includes("compiling module 2"), "the live block to grow with chunk 2", 4000);
+  console.assert(!frame.includes("compiling module 3"), "FAIL: the live block must not show output that hasn't streamed yet");
+  frame = await waitForFrame(f => f.includes("build finished") && !f.includes("\u25CF streaming"), "the finished block to replace the live one", 5000);
+  console.assert(frame.includes("compiling module 1") && frame.includes("build finished"), "FAIL: the finished block must keep the full result");
+} finally {
+  _sessMock.sendUserMessage = realSend36m;
+}
+ok("live terminal output streams and collapses on finish");
 
 header("37: /budget — status, level switch, sidebar signal, restore");
 const settings37 = require("../config/settings.js");
@@ -1542,9 +2051,11 @@ header("43: chat output renders markdown (bold/code/links) without raw markers")
   console.assert(frame.includes("inline code"), "FAIL: inline code should render its content");
   console.assert(!frame.includes("`inline code`"), "FAIL: backticks must not leak into chat");
   // The chat column wraps and the sidebar border glyphs slide between the two
-  // halves — assert on the two visible fragments instead of the full string.
+  // halves — flatten the full frame but assert only fragments that stay on one
+  // terminal row each ("docs(https://" and "x.dev)."), so the sidebar text
+  // interleaving can never break the match.
   const flat43 = frame.replace(/\s+/g, "");
-  console.assert(flat43.includes("docs(https://x.") && flat43.includes("dev)."), "FAIL: link should render as label (url), got:\n" + frame);
+  console.assert(flat43.includes("docs(https://") && flat43.includes("x.dev)."), "FAIL: link should render as label (url), got:\n" + frame);
   console.assert(!frame.includes("[docs]("), "FAIL: raw link markdown must not leak into chat");
   console.assert(frame.split("\n").some(l => /•\s+item one/.test(l)), "FAIL: list bullet should render as • marker");
   console.assert(frame.split("\n").some(l => /•\s+item two/.test(l)), "FAIL: second bullet should render too");
@@ -1552,7 +2063,7 @@ header("43: chat output renders markdown (bold/code/links) without raw markers")
 }
 ok("chat markdown rendering");
 
-header("44: /mcp add preset picker (custom path)");
+header("44: /mcp add preset picker (custom path — one-line add)");
 
 setup.mockInput.typeText("/mcp");
 await sleep(150);
@@ -1570,35 +2081,26 @@ frame = strip(setup.captureCharFrame());
 console.assert(frame.includes("Custom"), "FAIL: preset picker should include a Custom entry, got:\n" + frame);
 setup.mockInput.pressEnter();
 await sleep(300);
-console.assert(modal()?.type === "addserver", "FAIL: picking Custom… should open the one-shot add form, got " + String(modal()?.type));
+console.assert(modal()?.type === "input", "FAIL: picking Custom… should open the one-line add input, got " + String(modal()?.type));
 frame = strip(setup.captureCharFrame());
-console.assert(frame.includes("Name"), "FAIL: form should show a Name field, got:\n" + frame);
-console.assert(frame.includes("Command"), "FAIL: form should show a Command field, got:\n" + frame);
-console.assert(frame.includes("Args"), "FAIL: form should show an Args field, got:\n" + frame);
-console.assert(frame.includes("Env vars"), "FAIL: form should show an Env vars field, got:\n" + frame);
+console.assert(frame.includes("one line"), "FAIL: the add input should say 'one line', got:\n" + frame);
+console.assert(frame.includes("stm32"), "FAIL: the input placeholder should show a one-liner example, got:\n" + frame);
 
-// All four fields on one modal; Up/Down/Tab moves focus; typing edits the
-// active field. Fill them and press Enter on the last field to save.
-setup.mockInput.typeText("probe-mcp");
+// Type a claude/opencode-style one-liner and press Enter to add.
+setup.mockInput.typeText("-e PROBE_KEY=probe123 probe-mcp -- echo hello");
 await sleep(60);
-setup.mockInput.pressArrow("down"); // Command
-setup.mockInput.typeText("echo");
-await sleep(60);
-setup.mockInput.pressArrow("down"); // Args
-setup.mockInput.typeText("hello");
-await sleep(60);
-setup.mockInput.pressArrow("down"); // Env vars
-setup.mockInput.typeText("PROBE_KEY=probe123");
-await sleep(60);
-setup.mockInput.pressEnter();       // save
+setup.mockInput.pressEnter();
 await sleep(300);
 console.assert(modal()?.type === "mcp", "FAIL: after adding the custom server the flow should reopen the /mcp browser");
 const mcp44 = require("../mcp/mcp-manager.js");
-console.assert(mcp44.listServers().some(s => s.name === "probe-mcp"), "FAIL: guided add should persist the server");
+console.assert(mcp44.listServers().some(s => s.name === "probe-mcp"), "FAIL: one-line add should persist the server");
+const probe44 = mcp44.loadServers().servers["probe-mcp"];
+console.assert(probe44 && probe44.args.join(" ") === "hello", "FAIL: args should be parsed, got " + String(probe44 && probe44.args));
+console.assert(probe44 && probe44.env && probe44.env.PROBE_KEY === "probe123", "FAIL: -e env should be parsed and stored");
 mcp44.removeServer("probe-mcp");
 setup.mockInput.pressEscape();
 await sleep(150);
-ok("mcp preset picker + one-shot add form");
+ok("mcp preset picker + one-line add");
 
 header("45: /connectors — hosting/cloud presets live in their own browser");
 setup.mockInput.typeText("/connectors");
@@ -1614,29 +2116,273 @@ console.assert(frame.includes("Next.js"), "FAIL: connector picker should list Ne
 console.assert(frame.includes("Railway"), "FAIL: connector picker should list Railway, got:\n" + frame);
 console.assert(frame.includes("Vercel"), "FAIL: connector picker should list Vercel, got:\n" + frame);
 console.assert(!frame.includes("Playwright"), "FAIL: dev-tool MCP presets must not leak into /connectors, got:\n" + frame);
-// Pick Railway (index 2) — token prompt comes from the same one-shot form.
+// Pick Railway (index 2) — it needs a token, so the GUIDED key-entry dialog
+// opens: one masked field ("Paste your API token"), no raw command line.
 setup.mockInput.pressArrow("down");
 await sleep(40);
 setup.mockInput.pressArrow("down");
 await sleep(40);
 setup.mockInput.pressEnter();
 await sleep(300);
-// A preset pick opens the same AddServerModal — env field shows KEY= placeholders.
-console.assert(modal()?.type === "addserver", "FAIL: preset pick should open the add form, got " + String(modal()?.type));
+console.assert(modal()?.type === "input", "FAIL: preset pick should open the key-entry input, got " + String(modal()?.type));
 frame = strip(setup.captureCharFrame());
-console.assert(frame.includes("RAILWAY_API_TOKEN"), "FAIL: form should prefill the env key, got:\n" + frame);
-// Fill Env vars (focus starts there for a preset with prompts), press Enter to save.
+console.assert(frame.includes("Railway"), "FAIL: the key dialog should name the preset, got:\n" + frame);
+console.assert(frame.includes("API token"), "FAIL: the key dialog should ask for the token label, got:\n" + frame);
+// Typing is masked (no raw token visible), Enter lands the connector.
 setup.mockInput.typeText("railway_fake_token");
 await sleep(60);
+frame = strip(setup.captureCharFrame());
+console.assert(!frame.includes("railway_fake_token"), "FAIL: the token must be masked in the key dialog");
 setup.mockInput.pressEnter();
 await sleep(400);
-console.assert(modal()?.type === "connectors", "FAIL: saving the preset form should reopen the connectors browser, got " + String(modal()?.type));
+console.assert(modal()?.type === "connectors", "FAIL: adding the preset should reopen the connectors browser, got " + String(modal()?.type));
 const mcp45 = require("../mcp/mcp-manager.js");
-console.assert(mcp45.listServers().some(s => s.name === "railway"), "FAIL: railway should be added");
+const rail45 = mcp45.loadServers().servers["railway"];
+console.assert(rail45, "FAIL: railway should be added");
+console.assert(rail45 && rail45.env && rail45.env.RAILWAY_API_TOKEN === "railway_fake_token", "FAIL: the guided token should be stored in env");
 mcp45.removeServer("railway");
 setup.mockInput.pressEscape();
 await sleep(150);
-ok("connectors browser + one-shot add form");
+ok("connectors browser + guided key add");
+
+header("46: Ctrl+A select-all — highlight, typing replaces, backspace deletes");
+setInput("select me");
+q36.setSelStart(-1); q36.setSelEnd(-1);
+setCursor(0);
+await pumpRenders();
+setup.mockInput.pressKeys(["\x01"]);
+await waitFor(() => q36.selStart() === 0 && q36.selEnd() === q36.input().length, "ctrl+a select-all", 8000);
+console.assert(q36.selStart() === 0 && q36.selEnd() === q36.input().length, "FAIL: Ctrl+A should select the whole draft, got " + q36.selStart() + ".." + q36.selEnd());
+// Typing replaces the selection (readline behavior), then backspace on a
+// fresh selection deletes it entirely.
+setup.mockInput.typeText("x");
+await waitFor(() => q36.input() === "x", "typing to replace selection");
+console.assert(q36.input() === "x", "FAIL: typing should replace the selection, got '" + q36.input() + "'");
+console.assert(q36.selStart() === -1, "FAIL: selection must clear after typing");
+setInput("delete me");
+setCursor(0);
+await pumpRenders();
+setup.mockInput.pressKeys(["\x01"]);
+await waitFor(() => q36.selStart() === 0 && q36.selEnd() === q36.input().length, "ctrl+a re-select", 8000);
+setup.mockInput.pressBackspace();
+await waitFor(() => q36.input() === "", "backspace to delete selection");
+console.assert(q36.selStart() === -1, "FAIL: selection must clear after delete");
+setInput("");
+await pumpRenders();
+ok("ctrl+a select-all + replace + delete");
+// NOTE: the Ctrl+C copy branch is deliberately not driven by pressing \x03 —
+// the mock renderer treats that byte as a teardown signal and stops flushing
+// frames for the rest of the suite. The copy path (copyText) is the same one
+// the mouse-drag select-to-copy handler uses.
+
+header("47: ESC must be pressed twice to interrupt a running task");
+getSession().interrupted = false;
+setThinking(true);
+await pumpRenders();
+setup.mockInput.pressEscape();
+await waitFor(() => toasts().some((t: any) => String(t.text || "").includes("Press ESC again")), "first-ESC toast", 8000);
+console.assert(thinking() === true, "FAIL: first ESC alone must NOT interrupt the task");
+console.assert(getSession().interrupted === false, "FAIL: first ESC must not set the interrupt flag");
+setup.mockInput.pressEscape();
+await waitFor(() => thinking() === false, "second ESC to interrupt", 8000);
+console.assert(thinking() === false, "FAIL: second ESC should interrupt the task");
+console.assert(getSession().interrupted === true, "FAIL: second ESC should set the interrupt flag");
+getSession().interrupted = false;
+ok("esc two-press interrupt");
+
+header("48: permission popup — mouse click Allow / Deny rows");
+const p48: any = q36.requestPermission("bash", "echo mouse", "");
+await waitForFrame(f => f.includes("Deny") && f.includes("Permission needed"), "deny row render", 10000);
+let frame48 = strip(setup.captureCharFrame());
+let denyLine = frame48.split("\n").findIndex(l => l.includes("Deny") && !l.includes("answer"));
+let denyCol = frame48.split("\n")[denyLine].indexOf("Deny") + 1;
+await setup.mockMouse.click(denyCol, denyLine);
+const res48 = await p48;
+console.assert(res48.approved === false, "FAIL: mouse click on Deny should deny");
+await waitForFrame(f => !f.includes("Permission needed"), "popup close after deny");
+// Click Allow approves (down+up on the same row).
+const p48b: any = q36.requestPermission("bash", "echo mouse 2", "");
+await waitForFrame(f => f.includes("Allow") && f.includes("Permission needed"), "allow row render");
+frame48 = strip(setup.captureCharFrame());
+const allowLine = frame48.split("\n").findIndex(l => l.includes("Allow"));
+const allowCol = frame48.split("\n")[allowLine].indexOf("Allow") + 1;
+await setup.mockMouse.click(allowCol, allowLine);
+const res48b = await p48b;
+console.assert(res48b.approved === true, "FAIL: mouse click on Allow should approve");
+await waitForFrame(f => !f.includes("Permission needed"), "popup close after allow");
+ok("permission popup mouse clicks");
+
+header("49: keybinds — custom command_list, custom leader, session_interrupt rebind, restore");
+const kbs = await import("../tui/keybinds.ts");
+const kbFile = path.join(os.homedir(), ".loom", "tui.json");
+let kbBackup: string | null = null;
+try { kbBackup = fs.readFileSync(kbFile, "utf8"); } catch {}
+function writeKeybinds(obj: any) {
+  let cur: any = {};
+  try { cur = JSON.parse(fs.readFileSync(kbFile, "utf8")); } catch {}
+  fs.writeFileSync(kbFile, JSON.stringify(Object.assign(cur, obj), null, 2), "utf8");
+  kbs.reload();
+}
+// 1) Rebind the palette key: ctrl+o opens it, ctrl+p is dead.
+writeKeybinds({ keybinds: { command_list: "ctrl+o" } });
+setup.mockInput.pressKey("o", { ctrl: true });
+await waitForFrame(f => f.includes("Command Palette"), "custom ctrl+o palette", 8000);
+console.assert(strip(setup.captureCharFrame()).includes("Command Palette"), "FAIL: ctrl+o should open the palette after rebind");
+setup.mockInput.pressEscape();
+await waitForFrame(f => !f.includes("Command Palette"), "palette close (ESC) after rebind", 8000);
+setup.mockInput.pressKey("p", { ctrl: true });
+await sleep(300);
+console.assert(!strip(setup.captureCharFrame()).includes("Command Palette"), "FAIL: ctrl+p should be dead after rebind");
+// 2) Custom leader key: ctrl+g then h runs /help.
+writeKeybinds({ leader: "ctrl+g" });
+setup.mockInput.pressKey("g", { ctrl: true });
+setup.mockInput.pressKey("h", {});
+await waitFor(() => messages().some((m: any) => m.role === "system" && String(m.content).includes("Loom Code -- Slash Commands")), "ctrl+g+h help", 8000);
+console.assert(messages().some((m: any) => m.role === "system" && String(m.content).includes("Loom Code -- Slash Commands")), "FAIL: ctrl+g then h should run /help");
+// 3) session_interrupt rebind: ctrl+z clears the draft, ESC is unbound.
+writeKeybinds({ keybinds: { session_interrupt: "ctrl+z" } });
+setInput("stale draft");
+await pumpRenders();
+setup.mockInput.pressKey("z", { ctrl: true });
+await waitFor(() => q36.input() === "", "ctrl+z clears draft", 8000);
+console.assert(q36.input() === "", "FAIL: ctrl+z should clear the draft after rebind");
+setInput("stale draft 2");
+await pumpRenders();
+setup.mockInput.pressEscape();
+await sleep(300);
+console.assert(q36.input() === "stale draft 2", "FAIL: ESC should be unbound after rebinding session_interrupt");
+setInput("");
+await pumpRenders();
+// 4) modal_cancel mirrors the custom session_interrupt key (ctrl+z closes a modal).
+writeKeybinds({ keybinds: { session_interrupt: "ctrl+z", command_list: "ctrl+p" } });
+setup.mockInput.pressKey("p", { ctrl: true });
+await waitForFrame(f => f.includes("Command Palette"), "palette opens", 8000);
+setup.mockInput.pressKey("z", { ctrl: true });
+await waitForFrame(f => !f.includes("Command Palette"), "ctrl+z cancels the modal (mirror)", 8000);
+console.assert(modal() === null, "FAIL: ctrl+z should close the modal via the modal_cancel mirror");
+// 5) Leader disabled: ctrl+x then h does nothing.
+writeKeybinds({ leader: "none" });
+const helpBefore = messages().filter((m: any) => m.role === "system" && String(m.content).includes("Loom Code -- Slash Commands")).length;
+setup.mockInput.pressKey("x", { ctrl: true });
+setup.mockInput.pressKey("h", {});
+await sleep(300);
+const helpAfter = messages().filter((m: any) => m.role === "system" && String(m.content).includes("Loom Code -- Slash Commands")).length;
+console.assert(helpAfter === helpBefore, "FAIL: ctrl+x should not arm a disabled leader");
+// 6) Restore the original config; the defaults must be back.
+try {
+  if (kbBackup === null) { try { fs.rmSync(kbFile, { force: true }); } catch {} }
+  else fs.writeFileSync(kbFile, kbBackup, "utf8");
+} catch {}
+kbs.reload();
+console.assert(kbs.is("command_list", "ctrl+p") && kbs.leaderKey() === "ctrl+x", "FAIL: restore should bring back the default palette key + leader");
+ok("keybinds custom + restore");
+
+header("50: first-run welcome tips \u2014 sidebar card shows, \u2715 dismisses + persists");
+const wFile = path.join(os.homedir(), ".loom", "tui.json");
+let wBackup: string | null = null;
+try { wBackup = fs.readFileSync(wFile, "utf8"); } catch {}
+const q50 = await import("./store.ts");
+q50.setWelcomeTipSeen(false);
+q50.setSidebarVisible(true);
+await pumpRenders();
+let frame50 = strip(setup.captureCharFrame());
+console.assert(frame50.includes("Welcome"), "FAIL: welcome card should show for first-run users");
+console.assert(frame50.includes("providers"), "FAIL: welcome card should mention the provider count");
+const closeRow = frame50.split("\n").findIndex(l => l.includes("Welcome"));
+const closeCol = frame50.split("\n")[closeRow].indexOf("\u2715") + 1;
+console.assert(closeCol > 1, "FAIL: welcome card should have a \u2715 close button");
+await setup.mockMouse.click(closeCol, closeRow);
+await sleep(250);
+frame50 = strip(setup.captureCharFrame());
+console.assert(!frame50.includes("Welcome"), "FAIL: \u2715 should dismiss the welcome card");
+await sleep(150);
+let persistedSeen = false;
+try { persistedSeen = !!JSON.parse(fs.readFileSync(wFile, "utf8")).welcomeTipSeen; } catch {}
+console.assert(persistedSeen, "FAIL: dismissing should persist welcomeTipSeen in tui.json");
+q50.setWelcomeTipSeen(false);
+await pumpRenders();
+await sleep(150);
+try {
+  if (wBackup === null) { try { fs.rmSync(wFile, { force: true }); } catch {} }
+  else fs.writeFileSync(wFile, wBackup, "utf8");
+} catch {}
+ok("welcome tips \u2715 dismiss + persist");
+
+header("51: pasted drafts past 10 lines compress \u2014 badge + preview, any edit expands");
+const q51 = await import("./store.ts");
+q51.setInput("");
+await sleep(150);
+const bigPaste = Array.from({ length: 15 }, (_, i) => "paste line " + (i + 1)).join("\r\n");
+setup.mockInput.pasteBracketedText(bigPaste);
+await sleep(250);
+console.assert(q51.input().split("\n").length === 15, "FAIL: the full pasted text must stay in the draft, got " + q51.input().split("\n").length + " lines");
+let frame51 = strip(setup.captureCharFrame());
+console.assert(frame51.includes("pasted ~15 lines"), "FAIL: compressed paste should show a 'pasted ~15 lines' badge, got:\n" + frame51);
+console.assert(frame51.includes("paste line 1"), "FAIL: compressed paste should preview the first lines");
+console.assert(!frame51.includes("paste line 15"), "FAIL: compressed paste must NOT expand the box to 15 rows (line 15 visible)");
+ok("big paste compresses");
+// Any edit expands the full text back into the scrollable box.
+setup.mockInput.typeText("!");
+await sleep(250);
+frame51 = strip(setup.captureCharFrame());
+console.assert(!frame51.includes("pasted ~15 lines"), "FAIL: typing should clear the paste-compression badge");
+console.assert(frame51.includes("paste line 15"), "FAIL: after editing, the full text (incl. line 15) must be reachable");
+q51.setInput("");
+await sleep(150);
+ok("editing expands a compressed paste");
+
+// ── 52: vim mode + status-line template ──
+header("52: /vim modal editing + statusLine template");
+const q52 = await import("./store.ts");
+setup.mockInput.pressEscape(); // clear any pending state
+await sleep(100);
+setMessages([]); setInput(""); q52.setVimMode(false); q52.setVimNormal(false);
+try { require("../../config/settings.js").saveConfig(Object.assign({}, require("../../config/settings.js").loadConfig(), { statusLine: "" })); } catch {}
+// /vim turns the mode on
+setup.mockInput.typeText("/vim");
+await sleep(150);
+setup.mockInput.pressEnter();
+await sleep(300);
+console.assert(q52.vimMode() === true, "FAIL: /vim should enable vimMode");
+console.assert(q52.toasts().some((t: any) => String(t.text).includes("Vim mode: on")), "FAIL: /vim should toast");
+// type a draft, Esc → NORMAL, x deletes char under cursor, i returns to INSERT
+setup.mockInput.typeText("abcd");
+await sleep(150);
+setup.mockInput.pressArrow("left"); // cursor before 'd' (end of "abcd")
+await sleep(80);
+setup.mockInput.pressEscape();
+await sleep(150);
+console.assert(q52.vimNormal() === true, "FAIL: Esc should enter NORMAL mode");
+setup.mockInput.typeText("x"); // delete 'd'
+await sleep(150);
+console.assert(input() === "abc", "FAIL: NORMAL x should delete char, got " + JSON.stringify(input()));
+setup.mockInput.typeText("A"); // append at end → INSERT
+await sleep(120);
+console.assert(q52.vimNormal() === false, "FAIL: A should return to INSERT");
+setup.mockInput.typeText("!");
+await sleep(120);
+console.assert(input() === "abc!", "FAIL: INSERT typing should append, got " + JSON.stringify(input()));
+// status-line template renders placeholders into the frame
+try {
+  const st = require("../../config/settings.js");
+  st.saveConfig(Object.assign({}, st.loadConfig(), { statusLine: "TPL<{mode}>" }));
+  if (process.env.LOOM_DIAG) {
+    const pathx = require("path"), fsx2 = require("fs");
+    const cfgPath = process.env.LOOM_CONFIG_DIR ? pathx.join(process.env.LOOM_CONFIG_DIR, "config.json") : pathx.join(require("os").homedir(), ".loom", "config.json");
+    let raw = "(missing)"; try { raw = fsx2.readFileSync(cfgPath, "utf8"); } catch {}
+    console.error("[DIAG-TPL] cfgFile=" + cfgPath + " hasTPL=" + raw.includes("TPL") + " readback=" + JSON.stringify(st.loadConfig().statusLine));
+  }
+  (globalThis as any).__loomStatusAt = 0; // invalidate InputBar's 1.5s config cache
+} catch {}
+setInput(" "); await sleep(150); setInput(""); // nudge a render so the row recomputes
+// Poll instead of sleeping — the renderer flushes on its own schedule.
+frame = await waitForFrame(f => f.includes("TPL<"), "statusLine template to render", 6000);
+console.assert(frame.includes("TPL<"), "FAIL: statusLine template should render in the input bar");
+setup.mockInput.pressEscape();
+await sleep(100);
+try { require("../../config/settings.js").saveConfig(Object.assign({}, require("../../config/settings.js").loadConfig(), { statusLine: "" })); } catch {}
+q52.setVimMode(false); q52.setVimNormal(false);
+ok("vim editing + status template");
 
 console.log("");
 _sessMock.sendUserMessage = _realSendAll;

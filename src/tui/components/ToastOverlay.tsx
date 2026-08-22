@@ -22,7 +22,7 @@ export function ToastOverlay() {
               paddingX={1} paddingY={0} marginTop={0}
               backgroundColor={ui.bgPanel}
             >
-              <text fg={t.kind === "error" ? ui.error : t.kind === "ok" ? ui.success : ui.fg} bold={t.kind !== "info"}>
+              <text fg={t.kind === "error" ? ui.error : t.kind === "ok" ? ui.success : ui.fg}>
                 {" " + t.text}
               </text>
             </box>

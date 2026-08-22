@@ -1,0 +1,824 @@
+<!doctype html>
+<html lang="en" data-theme="loom">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<meta name="description" content="Loom Code — a terminal-native AI coding agent, in the browser.">
+<title>Loom Code</title>
+<style>
+  /* ── Design tokens (Loom brand: warm charcoal + terracotta) ─────────────────── */
+  :root {
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Inter, Arial, sans-serif;
+
+    --fs-xs: .6875rem; --fs-sm: .8125rem; --fs-base: .9375rem; --fs-md: 1rem;
+    --fs-lg: 1.125rem; --fs-xl: 1.375rem; --fs-2xl: 1.75rem;
+
+    --r-xs: 3px; --r-sm: 5px; --r-md: 8px; --r-lg: 12px; --r-pill: 999px;
+    --sp: 4px;                 /* 4px base scale */
+    --space-1: calc(var(--sp)*1); --space-2: calc(var(--sp)*2); --space-3: calc(var(--sp)*3);
+    --space-4: calc(var(--sp)*4); --space-5: calc(var(--sp)*5); --space-6: calc(var(--sp)*6);
+    --space-8: calc(var(--sp)*8); --space-10: calc(var(--sp)*10);
+
+    --ease: cubic-bezier(.2,.7,.2,1);
+    --dur: 160ms;
+  }
+  :root[data-theme="loom"] {
+    --bg:#191817; --bg-panel:#211f1e; --bg-panel2:#2a2725; --bg-input:#25221f; --bg-hover:#322e2a; --bg-msg:#131211; --bg-code:#131211;
+    --border: color-mix(in srgb, var(--bg-panel2) 72%, #000 0%); --border-strong:#5a534d; --rail:#4a4440;
+    --fg:#f0ebe4; --fg-dim:#a89e93; --fg-muted:#6e655c;
+    --primary:#e07856; --primary-soft:#f4a27f; --accent:#e8b06f; --secondary:#b8d0a8;
+    --success:#a3c084; --warning:#e0b356; --error:#e06c5a; --thinking:#d9a35f;
+    --glow: 0 0 0 1px color-mix(in srgb, var(--primary) 60%, transparent), 0 0 0 4px color-mix(in srgb, var(--primary) 18%, transparent);
+    --btn-fg:#1a1715;
+  }
+  :root[data-theme="light"] {
+    --bg:#faf7f2; --bg-panel:#f3eee6; --bg-panel2:#eae3d8; --bg-input:#ffffff; --bg-hover:#e7ddd0; --bg-msg:#efe9df; --bg-code:#efe9df;
+    --border:#c9bfae; --border-strong:#b6a994; --rail:#c9bfae;
+    --fg:#2b2620; --fg-dim:#6f675c; --fg-muted:#9a9082;
+    --primary:#c2593a; --primary-soft:#a34a2f; --accent:#b0742f; --secondary:#5c7a4a;
+    --success:#5f8a3d; --warning:#a97a1a; --error:#b33c2e; --thinking:#a5682a;
+    --glow: 0 0 0 1px color-mix(in srgb, var(--primary) 55%, transparent), 0 0 0 4px color-mix(in srgb, var(--primary) 16%, transparent);
+    --btn-fg:#fefdfb;
+  }
+
+  /* ── Reset & base ───────────────────────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; color: var(--fg); background: var(--bg);
+    font-family: var(--sans); font-size: var(--fs-base); line-height: 1.55;
+    -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+  }
+  h1,h2,h3,h4 { line-height: 1.25; margin: 0 0 var(--space-2); font-weight: 650; }
+  p { margin: 0 0 var(--space-2); }
+  a { color: var(--primary-soft); text-decoration: none; }
+  a:hover { text-decoration: underline; text-underline-offset: 2px; }
+  button { font: inherit; color: inherit; }
+  :focus-visible { outline: none; box-shadow: var(--glow); border-radius: var(--r-sm); }
+  ::selection { background: color-mix(in srgb, var(--primary) 35%, transparent); }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
+  }
+
+  /* ── App shell ──────────────────────────────────────────────────────────────── */
+  .app-root { display: grid; grid-template-rows: auto 1fr; height: 100vh; height: 100dvh; overflow: hidden; }
+
+  /* Status row (thesis — a terminal status line, not a generic header) */
+  .statusbar {
+    display: flex; align-items: center; gap: var(--space-4);
+    padding: 0 var(--space-4); height: 44px; min-height: 44px;
+    background: var(--bg-panel); border-bottom: 1px solid var(--border);
+    font-family: var(--mono); font-size: var(--fs-xs);
+    -webkit-app-region: no-drag; position: relative; z-index: 30;
+  }
+  .wordmark { display: inline-flex; align-items: baseline; gap: 3px; font-weight: 700; letter-spacing: -.02em; font-size: var(--fs-sm); margin-right: var(--space-2); }
+  .wordmark .dot { color: var(--primary); }
+  .wordmark .ver { color: var(--fg-muted); font-weight: 500; font-size: var(--fs-xs); letter-spacing: 0; }
+  .status-mid { display: flex; align-items: center; gap: var(--space-3); color: var(--fg-dim); flex: 1; min-width: 0; overflow: hidden; }
+  .status-mid .pipe { color: var(--border-strong); }
+  .status-mid .prov { color: var(--primary); font-weight: 600; }
+  .status-mid .model { color: var(--fg); }
+  .chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border: 1px solid var(--border); border-radius: var(--r-pill); color: var(--fg-dim); font-size: var(--fs-xs); }
+  .chip.mode-build { color: var(--primary); border-color: color-mix(in srgb, var(--primary) 40%, transparent); }
+  .chip.mode-plan { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+  .chip.mode-chat { color: var(--secondary); border-color: color-mix(in srgb, var(--secondary) 40%, transparent); }
+  .live { display: none; align-items: center; gap: 6px; color: var(--fg-dim); }
+  .live.on { display: inline-flex; }
+ .live b { color: var(--primary); font-weight: 600; }
+  .live .pulse { width: 7px; height: 7px; border-radius: 999px; background: var(--primary); animation: pulse 1s var(--ease) infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.7); } }
+  .status-actions { display: flex; align-items: center; gap: var(--space-2); }
+
+  /* Buttons */
+  .btn { display: inline-flex; align-items: center; gap: 6px; justify-content: center;
+    border: 1px solid var(--border); background: var(--bg-panel2); color: var(--fg);
+    padding: 6px 11px; border-radius: var(--r-sm); cursor: pointer;
+    font-size: var(--fs-sm); font-family: var(--mono); transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease), color var(--dur) var(--ease); }
+  .btn:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+  .btn.primary { background: var(--primary); border-color: color-mix(in srgb, var(--primary) 85%, #000); color: var(--btn-fg); font-weight: 600; }
+  .btn.primary:hover { background: color-mix(in srgb, var(--primary) 90%, #000); }
+  .btn.ghost { background: transparent; border-color: transparent; color: var(--fg-dim); }
+  .btn.ghost:hover { background: var(--bg-hover); color: var(--fg); }
+  .btn.icon { padding: 6px; width: 32px; height: 32px; }
+  .btn.danger { color: var(--error); border-color: color-mix(in srgb, var(--error) 45%, transparent); }
+  .btn.danger:hover { background: color-mix(in srgb, var(--error) 14%, transparent); }
+  .btn[disabled] { opacity: .45; cursor: not-allowed; }
+  .btn.icon svg { width: 16px; height: 16px; display: block; }
+  .menu-btn { display: none; }
+
+  /* Body split */
+  .split { display: grid; grid-template-columns: 288px 1fr; min-height: 0; }
+
+  /* Sessions rail */
+  .rail { background: var(--bg-panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
+  .rail-head { padding: var(--space-3); display: flex; flex-direction: column; gap: var(--space-3); border-bottom: 1px solid var(--border); }
+  .rail-search { position: relative; }
+  .rail-search input {
+    width: 100%; padding: 7px 10px 7px 30px; background: var(--bg-input); border: 1px solid var(--border); color: var(--fg);
+    border-radius: var(--r-sm); font: var(--fs-sm) var(--mono);
+  }
+  .rail-search input::placeholder { color: var(--fg-muted); }
+  .rail-search input:focus { outline: none; border-color: var(--primary); box-shadow: var(--glow); border-radius: var(--r-sm); }
+  .rail-search .s-ico { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); color: var(--fg-muted); pointer-events: none; }
+  .rail-list { flex: 1; overflow-y: auto; padding: var(--space-2); }
+  .rail-section { font-family: var(--mono); font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .08em; color: var(--fg-muted); margin: var(--space-3) var(--space-2) var(--space-2); }
+  .session-row { display: grid; grid-template-columns: 2px 1fr auto; gap: var(--space-3); align-items: start;
+    padding: var(--space-2) var(--space-2) var(--space-2) 0; border-radius: var(--r-sm); cursor: pointer; position: relative; }
+  .session-row:hover { background: var(--bg-hover); }
+  .session-row.active { background: var(--bg-hover); }
+  .session-row.active::before { content: ""; position: absolute; left: 0; top: 6px; bottom: 6px; width: 2px; background: var(--primary); border-radius: var(--r-pill); }
+  .session-row .wrap { min-width: 0; }
+  .session-row .id { font-family: var(--mono); font-size: var(--fs-sm); color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .session-row .meta { font-family: var(--mono); font-size: var(--fs-xs); color: var(--fg-muted); margin-top: 2px; }
+  .session-row .badge { font-family: var(--mono); font-size: 10px; color: var(--fg-dim); padding: 1px 5px; border: 1px solid var(--border); border-radius: var(--r-pill); white-space: nowrap; }
+  .session-row .badge.active { color: var(--success); border-color: color-mix(in srgb, var(--success) 45%, transparent); align-self: center; }
+  .rail-foot { padding: var(--space-2); border-top: 1px solid var(--border); display: flex; gap: var(--space-2); }
+  .rail-foot .btn { flex: 1; }
+
+  /* Session view */
+  .session-view { display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; background: var(--bg); }
+  .session-bar { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-4); border-bottom: 1px solid var(--border); background: var(--bg-panel); font-family: var(--mono); font-size: var(--fs-xs); color: var(--fg-dim); }
+  .session-bar .sid { color: var(--fg); }
+  .session-bar .sp { color: var(--border-strong); }
+  .session-bar .ml { color: var(--fg-dim); }
+  .session-bar .close { margin-left: auto; }
+
+  /* Transcript — turns along a thread rail */
+  .transcript { flex: 1; overflow-y: auto; scroll-behavior: smooth; position: relative; padding: var(--space-6) var(--space-4) var(--space-8); }
+  .transcript-stream { max-width: 880px; margin: 0 auto; position: relative; padding-left: 34px; }
+  .transcript-stream::before { content: ""; position: absolute; left: 13px; top: 4px; bottom: 4px; width: 2px; background: var(--rail); opacity: .55; border-radius: var(--r-pill); }
+  .turn { position: relative; padding: var(--space-2) 0 var(--space-5); }
+  .turn::before { content: ""; position: absolute; left: -26px; top: 10px; width: 10px; height: 10px; border-radius: 999px; background: var(--bg); border: 2px solid var(--rail); }
+  .turn.user::before { border-color: var(--secondary); }
+  .turn.loom::before { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 25%, var(--bg)); }
+  .role { font-family: var(--mono); font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .1em; color: var(--fg-muted); margin-bottom: var(--space-1); display: flex; align-items: center; gap: 6px; }
+  .role .glyph { color: var(--primary); }
+  .turn.user .role .glyph { color: var(--secondary); }
+  .turn .content { font-size: var(--fs-base); color: var(--fg); max-width: 76ch; }
+  .turn .content p:last-child { margin-bottom: 0; }
+
+  /* Markdown elements */
+  .turn .content h2 { font-size: var(--fs-lg); margin-top: var(--space-4); }
+  .turn .content h3 { font-size: var(--fs-md); margin-top: var(--space-3); }
+  .turn .content h4 { font-size: var(--fs-base); margin-top: var(--space-3); color: var(--fg-dim); }
+  .turn .content ul, .turn .content ol { margin: var(--space-2) 0 var(--space-2) var(--space-5); padding: 0; }
+  .turn .content li { margin: 3px 0; }
+  .turn .content blockquote { margin: var(--space-2) 0; padding: 2px 0 2px var(--space-3); border-left: 2px solid var(--border-strong); color: var(--fg-dim); }
+  .turn .content code { font-family: var(--mono); font-size: .85em; background: var(--bg-code); border: 1px solid var(--border); padding: 1px 5px; border-radius: var(--r-xs); }
+  pre.code { position: relative; margin: var(--space-3) 0; background: var(--bg-code); border: 1px solid var(--border); border-radius: var(--r-sm); overflow: hidden; }
+  pre.code code { display: block; font-family: var(--mono); font-size: var(--fs-sm); padding: var(--space-3); overflow-x: auto; border: 0; background: transparent; }
+  pre.code .copy { position: absolute; top: 6px; right: 6px; font-family: var(--mono); font-size: var(--fs-xs); color: var(--fg-muted);
+    background: var(--bg-panel2); border: 1px solid var(--border); border-radius: var(--r-xs); padding: 2px 7px; cursor: pointer; opacity: 0; transition: opacity var(--dur) var(--ease); }
+  pre.code:hover .copy { opacity: 1; }
+  pre.code .copy:hover { color: var(--primary); border-color: var(--primary); }
+
+  /* Tool chips */
+  .tools { display: flex; flex-direction: column; gap: var(--space-2); margin: var(--space-2) 0; }
+  .tool { background: var(--bg-panel); border: 1px solid var(--border); border-radius: var(--r-sm); font-family: var(--mono); font-size: var(--fs-xs); }
+  .tool summary { cursor: pointer; list-style: none; padding: 6px 10px; display: flex; align-items: center; gap: 8px; color: var(--fg-dim); }
+  .tool summary::-webkit-details-marker { display: none; }
+  .tool summary .tn { color: var(--accent); font-weight: 600; }
+  .tool summary .tr { color: var(--fg-muted); margin-left: auto; font-size: 10px; }
+  .tool summary .arr { color: var(--fg-muted); transition: transform var(--dur) var(--ease); }
+  .tool[open] summary .arr { transform: rotate(90deg); }
+  .tool .tres { padding: 0 var(--space-3) var(--space-3); border-top: 1px solid var(--border); color: var(--fg-dim); white-space: pre-wrap; word-break: break-word; }
+
+  .reasoning { font-style: italic; color: var(--fg-muted); border-left: 2px solid color-mix(in srgb, var(--thinking) 50%, transparent); padding: var(--space-1) var(--space-3); margin: var(--space-2) 0; font-size: var(--fs-sm); }
+  .err-line { color: var(--error); border-left: 2px solid var(--error); padding: var(--space-1) var(--space-3); margin: var(--space-2) 0; font-size: var(--fs-sm); }
+  .caret::after { content: "▍"; color: var(--primary); animation: blink 1s step-start infinite; margin-left: 1px; }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* Empty state (thesis first-run) */
+  .empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: var(--space-8); gap: var(--space-4); }
+  .empty .logo { font-family: var(--mono); color: var(--primary-soft); font-size: clamp(8px, 2.4vw, 12px); line-height: 1.15; white-space: pre; text-shadow: 0 0 18px color-mix(in srgb, var(--primary) 25%, transparent); }
+  .empty h1 { font-family: var(--sans); font-size: var(--fs-xl); font-weight: 650; letter-spacing: -.01em; }
+  .empty p { color: var(--fg-dim); max-width: 42ch; margin: 0; }
+  .empty .hints { display: flex; flex-wrap: wrap; gap: var(--space-2); justify-content: center; max-width: 560px; }
+  .empty .hint { font-family: var(--mono); font-size: var(--fs-sm); color: var(--fg-dim); border: 1px solid var(--border); background: var(--bg-panel); padding: 8px 12px; border-radius: var(--r-md); cursor: pointer; transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease); }
+  .empty .hint:hover { border-color: var(--primary); color: var(--fg); background: var(--bg-hover); }
+  .empty .hint .sl { color: var(--primary); }
+
+  /* Composer */
+  .composer { border-top: 1px solid var(--border); background: var(--bg-panel); padding: var(--space-3) var(--space-4); }
+  .composer-inner { max-width: 880px; margin: 0 auto; padding-left: 34px; }
+  .composer-controls { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-2); }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--r-pill); padding: 2px; background: var(--bg-input); }
+  .seg button { font-family: var(--mono); font-size: var(--fs-xs); border: 0; background: transparent; color: var(--fg-dim); padding: 4px 11px; border-radius: var(--r-pill); cursor: pointer; text-transform: uppercase; letter-spacing: .06em; }
+  .seg button.active.build { background: color-mix(in srgb, var(--primary) 88%, #000); color: var(--btn-fg); }
+  .seg button.active.plan { background: color-mix(in srgb, var(--accent) 85%, #000); color: #1a1715; }
+  .seg button.active.chat { background: color-mix(in srgb, var(--secondary) 80%, #000); color: #14140f; }
+  .seg button[disabled] { opacity: .4; cursor: not-allowed; }
+  .composer-hint { margin-left: auto; font-family: var(--mono); font-size: var(--fs-xs); color: var(--fg-muted); }
+  .composer-row { display: grid; grid-template-columns: 1fr auto; gap: var(--space-2); align-items: end; }
+  #input { width: 100%; resize: none; background: var(--bg-input); color: var(--fg); border: 1px solid var(--border); border-radius: var(--r-md); padding: 12px 14px; font: var(--fs-base) var(--sans); line-height: 1.5; max-height: 220px; overflow-y: auto; }
+  #input:focus { outline: none; border-color: var(--primary); box-shadow: var(--glow); }
+  #input::placeholder { color: var(--fg-muted); }
+  .send-col { display: flex; flex-direction: column; gap: var(--space-2); }
+  #sendBtn { height: 44px; }
+  #stopBtn { display: none; height: 40px; }
+
+  /* Auth overlay */
+  .overlay { position: fixed; inset: 0; background: color-mix(in srgb, var(--bg) 70%, transparent); backdrop-filter: blur(6px); display: flex; align-items: center; justify-content: center; z-index: 100; }
+  .auth-card { width: min(360px, 92vw); background: var(--bg-panel); border: 1px solid var(--border); border-radius: var(--r-lg); padding: var(--space-8) var(--space-6) var(--space-6); box-shadow: 0 10px 40px rgba(0,0,0,.35); }
+  .auth-card .wordmark { font-size: var(--fs-md); display: flex; justify-content: center; margin-bottom: var(--space-3); }
+  .auth-card p { text-align: center; color: var(--fg-dim); font-family: var(--mono); font-size: var(--fs-sm); margin-bottom: var(--space-4); }
+  .auth-card input { width: 100%; background: var(--bg-input); border: 1px solid var(--border); color: var(--fg); border-radius: var(--r-sm); padding: 10px 12px; margin-bottom: var(--space-3); font: var(--fs-sm) var(--mono); }
+  .auth-card input:focus { outline: none; border-color: var(--primary); box-shadow: var(--glow); }
+  #loginErr { color: var(--error); font-size: var(--fs-sm); min-height: 1.2em; text-align: center; margin-bottom: var(--space-2); }
+
+  /* Modal (servers) */
+  .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; z-index: 90; padding: var(--space-4); }
+  .modal { width: min(560px, 96vw); max-height: 80vh; display: flex; flex-direction: column; background: var(--bg-panel); border: 1px solid var(--border); border-radius: var(--r-lg); box-shadow: 0 12px 48px rgba(0,0,0,.4); }
+  .modal-h { display: flex; align-items: center; padding: var(--space-4) var(--space-5); border-bottom: 1px solid var(--border); }
+  .modal-h h2 { margin: 0; font-size: var(--fs-md); }
+  .modal-b { padding: var(--space-4) var(--space-5); overflow-y: auto; }
+  .srv { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--r-sm); margin-bottom: var(--space-2); font-family: var(--mono); font-size: var(--fs-sm); }
+  .srv .dot { width: 8px; height: 8px; border-radius: 999px; background: var(--success); flex-shrink: 0; }
+  .srv.off .dot { background: var(--fg-muted); }
+  .srv .nm { color: var(--fg); font-weight: 600; }
+  .srv .cmd { color: var(--fg-muted); font-size: var(--fs-xs); margin-left: auto; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .srv .cmd code { color: var(--fg-dim); }
+  .muted { color: var(--fg-muted); }
+  .skel { height: 42px; border-radius: var(--r-sm); background: var(--bg-panel2); position: relative; overflow: hidden; margin-bottom: var(--space-2); }
+  .skel::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--fg) 8%, transparent), transparent); animation: shimmer 1.4s infinite; }
+  @keyframes shimmer { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+
+  /* Toast */
+  .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--bg-panel2); color: var(--fg); border: 1px solid var(--border-strong); border-radius: var(--r-md); padding: 8px 14px; font-family: var(--mono); font-size: var(--fs-sm); z-index: 120; box-shadow: 0 6px 24px rgba(0,0,0,.4); opacity: 0; transition: opacity var(--dur) var(--ease), transform var(--dur) var(--ease); pointer-events: none; }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .hidden { display: none !important; }
+
+  /* Responsive */
+  @media (max-width: 1024px) {
+    .split { grid-template-columns: 1fr; }
+    .rail { position: fixed; top: 44px; bottom: 0; left: 0; width: 288px; transform: translateX(-100%); transition: transform var(--dur) var(--ease); z-index: 40; box-shadow: 8px 0 32px rgba(0,0,0,.3); }
+    .rail.open { transform: translateX(0); }
+    .menu-btn { display: inline-flex; }
+    .transcript-stream { padding-left: 26px; }
+    .transcript-stream::before { left: 9px; }
+    .composer-inner { padding-left: 26px; }
+    .turn::before { left: -22px; }
+    .status-mid .model { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  }
+  @media (max-width: 560px) {
+    .status-mid .pipe:not(:first-child), .status-mid .budget { display: none; }
+    .statusbar { padding: 0 var(--space-3); gap: var(--space-2); }
+    .empty .logo { font-size: 8px; }
+  }
+</style>
+</head>
+<body>
+<div class="app-root">
+
+  <!-- Status row -->
+  <header class="statusbar" role="banner">
+    <button class="btn ghost icon menu-btn" id="menuBtn" aria-label="Toggle sessions">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+    </button>
+    <span class="wordmark">loom<span class="dot">.</span><span class="ver" id="verBadge"></span></span>
+
+    <div class="status-mid" aria-live="off">
+      <span><span class="prov" id="cfgProv">—</span><span class="pipe"> · </span><span class="model" id="cfgModel">loading</span></span>
+      <span class="pipe" id="cfgPipe2"> · </span>
+      <span class="chip budget mode-build" id="cfgBudget">auto</span>
+    </div>
+
+    <span class="live" id="live" aria-hidden="true">
+      <span class="pulse"></span>
+      <span>working · <b id="liveRate">0c</b></span>
+    </span>
+
+    <div class="status-actions">
+      <button class="btn ghost icon" id="themeBtn" aria-label="Toggle theme" title="Switch theme">
+        <svg id="themeIco" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+      </button>
+      <button class="btn" id="serversBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/></svg>
+        Servers
+      </button>
+      <button class="btn primary" id="newBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" width="15" height="15"><path d="M12 5v14M5 12h14"/></svg>
+        New
+      </button>
+    </div>
+  </header>
+
+  <!-- Split -->
+  <div class="split" id="split">
+
+    <!-- Sessions rail -->
+    <aside class="rail" id="rail" aria-label="Saved sessions">
+      <div class="rail-head">
+        <div class="rail-search">
+          <span class="s-ico">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+          </span>
+          <input id="search" type="search" placeholder="Filter sessions…" aria-label="Filter sessions">
+        </div>
+        <div class="rail-section" style="margin:0">Threads</div>
+      </div>
+      <div class="rail-list" id="railList" aria-busy="false"></div>
+      <div class="rail-foot">
+        <button class="btn ghost" id="themeBtn2">Theme</button>
+      </div>
+    </aside>
+
+    <!-- Session view -->
+    <section class="session-view" id="sessionView" aria-live="off">
+      <!-- session bar -->
+      <div class="session-bar hidden" id="sessionBar">
+        <span class="sid" id="barId">—</span>
+        <span class="sp">·</span>
+        <span id="barWhen">—</span>
+        <span class="sp">·</span>
+        <span class="ml" id="barCount">0 messages</span>
+        <button class="btn ghost close" id="closeBtn" aria-label="Back to sessions" title="Back to sessions">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+
+      <!-- transcript -->
+      <div class="transcript" id="transcript" tabindex="0" aria-label="Conversation transcript">
+        <!-- empty state -->
+        <div class="empty" id="empty">
+<pre class="logo"> ██╗      ██████╗  ██████╗ ███╗   ███╗      ██████╗ ██████╗ ██████╗ ███████╗
+ ██║     ██╔═══██╗██╔═══██╗████╗ ████║     ██╔════╝██╔═══██╗██╔══██╗██╔════╝
+ ██║     ██║   ██║██║   ██║██╔████╔██║     ██║     ██║   ██║██║  ██║█████╗
+ ██║     ██║   ██║██║   ██║██║╚██╔╝██║     ██║     ██║   ██║██║  ██║██╔══╝
+ ███████╗╚██████╔╝╚██████╔╝██║ ╚═╝ ██║     ╚██████╗██████╔╝██████╔╝███████╗
+ ╚══════╝ ╚═════╝  ╚═════╝ ╚═╝     ╚═╝      ╚═════╝╚═════╝ ╚═════╝ ╚══════╝</pre>
+          <h1>Start a thread</h1>
+          <p>Loom Code runs your tools, providers, and saved sessions — here in the browser. Send a message below, or resume a thread from the rail.</p>
+          <div class="hints" id="hints">
+            <button class="hint" data-q="Explain what this project does"><span class="sl">/</span>Explain this project</button>
+            <button class="hint" data-q="List the files in src/"><span class="sl">/</span>List files in src</button>
+            <button class="hint" data-q="Find and summarize any open TODOs"><span class="sl">/</span>Find TODOs</button>
+          </div>
+        </div>
+        <div class="transcript-stream hidden" id="stream"></div>
+      </div>
+
+      <!-- composer -->
+      <div class="composer" id="composer">
+        <div class="composer-inner">
+          <div class="composer-controls">
+            <div class="seg" id="modeSeg" role="group" aria-label="Mode for new chats">
+              <button data-mode="build" class="build active">Build</button>
+              <button data-mode="plan" class="plan">Plan</button>
+              <button data-mode="chat" class="chat">Chat</button>
+            </div>
+            <span class="composer-hint" id="composerHint">Enter to send · Shift+Enter newline · Esc to stop</span>
+          </div>
+          <div class="composer-row">
+            <textarea id="input" rows="1" placeholder="Message Loom…" aria-label="Message input"></textarea>
+            <div class="send-col">
+              <button class="btn primary" id="sendBtn" aria-label="Send message">Send</button>
+              <button class="btn danger" id="stopBtn" aria-label="Stop">Stop</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
+
+<!-- Auth overlay -->
+<div class="overlay hidden" id="authOverlay">
+  <form class="auth-card" id="authForm">
+    <div class="wordmark">loom<span class="dot">.</span></div>
+    <p>This server is password-protected.</p>
+    <input id="loginUser" placeholder="Username" autocomplete="username" aria-label="Username">
+    <input id="loginPass" type="password" placeholder="Password" autocomplete="current-password" aria-label="Password">
+    <div id="loginErr"></div>
+    <button class="btn primary" type="submit" style="width:100%">Log in</button>
+  </form>
+</div>
+
+<!-- Servers modal -->
+<div class="modal-bg hidden" id="serversModal">
+  <div class="modal" role="dialog" aria-label="Connected servers" aria-modal="true">
+    <div class="modal-h"><h2>Connected servers</h2>
+      <button class="btn ghost icon" id="serversClose" aria-label="Close" style="margin-left:auto">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="modal-b" id="serversList"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+(function () {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const store = (k, v) => { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch {} return v; };
+  const load = (k, d) => { try { return localStorage.getItem(k) ?? d; } catch { return d; } };
+
+  const state = { view: "home", id: null, messages: [], busy: false, sessions: [], filter: "", mode: "build", cfg: null };
+
+  // ── HTTP ──────────────────────────────────────────────────────────────────
+  async function api(path, options) {
+    const res = await fetch(path, options);
+    if (res.status === 401) { showAuth(); throw Object.assign(new Error("unauthorized"), { unauthorized: true }); }
+    const ct = res.headers.get("content-type") || "";
+    const data = ct.includes("json") ? await res.json().catch(() => ({})) : await res.text();
+    if (!res.ok) throw new Error(data && data.error ? data.error : res.statusText);
+    return data;
+  }
+  const post = (p, body) => api(p, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+  function toast(msg) {
+    const t = $("toast"); t.textContent = msg; t.classList.add("show");
+    clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove("show"), 1800);
+  }
+  function relTime(iso) {
+    if (!iso) return "—";
+    const d = new Date(iso), s = (Date.now() - d.getTime()) / 1000;
+    if (s < 60) return "just now";
+    if (s < 3600) return Math.floor(s / 60) + "m ago";
+    if (s < 86400) return Math.floor(s / 3600) + "h ago";
+    if (s < 604800) return Math.floor(s / 86400) + "d ago";
+    return d.toLocaleDateString();
+  }
+  // escape-first HTML; entities built by concatenation so they survive un-mangled
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return c === "&" ? "&" + "amp;" : c === "<" ? "&" + "lt;" : c === ">" ? "&" + "gt;" : c === '"' ? "&" + "quot;" : "&" + "#39;";
+    });
+  }
+
+  // ── Markdown (escape-first, code-protected) ────────────────────────────────
+  function md(src) {
+    const slots = [];
+    const stash = (html) => { slots.push(html); return "\u0000S" + (slots.length - 1) + "\u0000"; };
+    src = String(src || "");
+    let s = src.replace(/```(\w+)?\n([\s\S]*?)```/g, (m, lang, code) => {
+      return stash(`<pre class="code"><button class="copy" data-copy aria-label="Copy code">copy</button><code>${esc(code.replace(/\n$/, ""))}</code></pre>`);
+    });
+    s = esc(s);
+    s = s.replace(/`([^`\n]+)`/g, (_, c) => stash(`<code>${c}</code>`));
+    s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+    s = s.replace(/_([^_\n]+)_/g, "<em>$1</em>");
+    s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer noopener">$1</a>');
+    s = s.replace(/^###\s+(.*)$/gm, "<h4>$1</h4>");
+    s = s.replace(/^##\s+(.*)$/gm, "<h3>$1</h3>");
+    s = s.replace(/^#\s+(.*)$/gm, "<h2>$1</h2>");
+    s = s.replace(/^---$/gm, "<hr>");
+    // blockquote: esc() already turned ">" into ">" — match the escaped form
+    var GT = String.fromCharCode(38) + "gt;"; // ">"
+    s = s.replace(new RegExp("^" + GT + "\\s?(.*)$", "gm"), "<blockquote>$1</blockquote>");
+    s = s.replace(/(?:^|\n)((?:[-*]\s+.*(?:\n|$))+)/g, (m, list) => {
+      const items = list.trim().split(/\n/).map((l) => "<li>" + l.replace(/^[-*]\s+/, "") + "</li>").join("");
+      return stash(`<ul>${items}</ul>`);
+    });
+    s = s.replace(/(?:^|\n)((?:\d+\.\s+.*(?:\n|$))+)/g, (m, list) => {
+      const items = list.trim().split(/\n/).map((l) => "<li>" + l.replace(/^\d+\.\s+/, "") + "</li>").join("");
+      return stash(`<ol>${items}</ol>`);
+    });
+    s = s.split(/\n{2,}/).map((p) => {
+      if (/^\u0000S\d+\u0000$/.test(p.trim()) || /^\s*<(h\d|ul|ol|blockquote|hr|pre|table)/.test(p)) return p;
+      if (!p.trim()) return "";
+      return "<p>" + p.replace(/\n/g, "<br>") + "</p>";
+    }).join("");
+    s = s.replace(/\u0000S(\d+)\u0000/g, (_, i) => slots[+i]);
+    return s;
+  }
+
+  // ── Theme ─────────────────────────────────────────────────────────────────
+  function applyTheme(t) {
+    document.documentElement.setAttribute("data-theme", t === "light" ? "light" : "loom");
+    store("loom.web.theme", t);
+    const ico = $("themeIco");
+    if (ico) ico.innerHTML = t === "light"
+      ? '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>'
+      : '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>';
+  }
+  function toggleTheme() { applyTheme((load("loom.web.theme") || initialTheme()) === "light" ? "loom" : "light"); }
+  function initialTheme() {
+    const saved = load("loom.web.theme");
+    if (saved) return saved;
+    return window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "loom";
+  }
+  $("themeBtn").addEventListener("click", toggleTheme);
+  $("themeBtn2").addEventListener("click", toggleTheme);
+  applyTheme(initialTheme());
+
+  // ── Auth ──────────────────────────────────────────────────────────────────
+  function showAuth() {
+    $("authOverlay").classList.remove("hidden");
+    $("loginPass").focus();
+  }
+  async function checkAuth() {
+    try { const a = await api("/api/auth"); if (a.required) showAuth(); else boot(); }
+    catch (e) { if (e.unauthorized) { /* shown */ } else boot(); }
+  }
+  $("authForm").addEventListener("submit", async (e) => {
+    e.preventDefault(); $("loginErr").textContent = "";
+    try {
+      await post("/api/auth", { username: $("loginUser").value, password: $("loginPass").value });
+      $("authOverlay").classList.add("hidden"); boot();
+    } catch (err) { $("loginErr").textContent = err.message || "Login failed"; }
+  });
+
+  // ── Config → status bar ───────────────────────────────────────────────────
+  async function loadCfg() {
+    try {
+      const c = await api("/api/config"); state.cfg = c;
+      $("cfgProv").textContent = c.provider || "—";
+      $("cfgModel").textContent = c.model || "—";
+      $("cfgBudget").textContent = c.budget || "auto";
+      $("cfgBadge") || ($("verBadge").textContent = c.version ? "v" + c.version : "");
+      $("verBadge").textContent = c.version ? "v" + c.version : "";
+      const b = $("cfgBudget"); b.className = "chip budget mode-" + (c.budget && c.budget !== "auto" ? c.budget : "build");
+      if (c.budget === "auto") { b.classList.remove("mode-build"); b.textContent = "auto"; }
+    } catch {}
+  }
+
+  // ── Sessions rail ─────────────────────────────────────────────────────────
+  async function refreshSessions() {
+    const list = $("railList"); list.setAttribute("aria-busy", "true");
+    try {
+      const { sessions } = await api("/api/sessions");
+      state.sessions = sessions;
+      const f = state.filter.toLowerCase();
+      const rows = sessions.filter((s) => !f || (s.id + " " + (s.provider || "") + " " + (s.model || "")).toLowerCase().includes(f));
+      list.innerHTML = "";
+      if (!rows.length) {
+        list.innerHTML = '<div class="muted" style="padding:14px;text-align:center">' + (sessions.length ? "No threads match your filter." : "No threads yet. Start a New chat.") + "</div>";
+      } else {
+        for (const s of rows) {
+          const r = document.createElement("div");
+          r.className = "session-row" + (s.id === state.id ? " active" : "");
+          r.setAttribute("role", "button"); r.setAttribute("tabindex", "0"); r.dataset.id = s.id;
+          r.innerHTML =
+            '<span></span>' +
+            '<span class="wrap"><span class="id" title="' + esc(s.id) + '">' + esc(s.id) + "</span>" +
+            '<span class="meta">' + relTime(s.createdAt) + " · " + (s.messageCount || 0) + " msgs" + (s.model ? " · " + esc(s.model) : "") + "</span></span>" +
+            (s.active ? '<span class="badge active">live</span>' : '<span class="badge">' + (s.provider ? esc(s.provider) : "") + "</span>");
+          const open = () => openSession(s.id);
+          r.addEventListener("click", open);
+          r.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } });
+          list.appendChild(r);
+        }
+      }
+    } catch (e) { list.innerHTML = '<div class="muted" style="padding:14px">' + esc(e.message) + "</div>"; }
+    finally { list.setAttribute("aria-busy", "false"); }
+  }
+  $("search").addEventListener("input", (e) => { state.filter = e.target.value; refreshSessions(); });
+
+  // ── Session view ──────────────────────────────────────────────────────────
+  function showEmpty(show) {
+    $("empty").classList.toggle("hidden", !show);
+    $("stream").classList.toggle("hidden", show);
+    $("sessionBar").classList.toggle("hidden", show);
+    if (show) $("composerHint").textContent = "Enter to send · Shift+Enter newline · Esc to stop";
+  }
+  async function openSession(id) {
+    state.id = id; state.messages = []; state.view = "chat";
+    closeRail();
+    showEmpty(false);
+    $("stream").innerHTML = "";
+    $("barId").textContent = id; $("barCount").textContent = "0 messages"; $("barWhen").textContent = "loading";
+    try {
+      const { session } = await api("/api/sessions/" + id);
+      console.log("barWhen date:", new Date(session.createdAt).toLocaleString());
+      $("barWhen").textContent = relTime(session.createdAt);
+      for (const m of (session.messages || [])) renderMessage(m);
+      $("barCount").textContent = (session.messages || []).length + " messages";
+    } catch (e) { renderError("Could not load transcript: " + e.message); }
+    refreshSessions(); setModeForExisting();
+    $("input").focus();
+  }
+  function setModeForExisting() {
+    // mode applies to NEW chats only; disable the control when viewing an existing thread
+    document.querySelectorAll("#modeSeg button").forEach((b) => b.disabled = true);
+  }
+  function setModeForNew() { document.querySelectorAll("#modeSeg button").forEach((b) => b.disabled = false); }
+
+  async function newChat() {
+    history.replaceState && history.replaceState(null, "", "/");
+    state.messages = [];
+    try {
+      const { id } = await post("/api/sessions", { mode: state.mode });
+      state.id = id; state.view = "chat";
+      showEmpty(false); $("stream").innerHTML = "";
+      $("barId").textContent = id; $("barWhen").textContent = "just now"; $("barCount").textContent = "0 messages";
+      closeRail(); refreshSessions(); setModeForNew();
+      $("input").focus(); showEmpty(true); // start on the empty prompt for this fresh thread
+      showEmpty(false);
+    } catch (e) { toast("Could not start a new chat: " + e.message); }
+  }
+  $("newBtn").addEventListener("click", newChat);
+  $("closeBtn").addEventListener("click", () => { state.view = "home"; state.id = null; showEmpty(true); refreshSessions(); });
+
+  document.querySelectorAll("#modeSeg button").forEach((b) => {
+    b.addEventListener("click", () => {
+      state.mode = b.dataset.mode;
+      document.querySelectorAll("#modeSeg button").forEach((x) => x.classList.remove("active"));
+      b.classList.add("active");
+    });
+  });
+
+  // ── Render messages ───────────────────────────────────────────────────────
+  function renderMessage(m) {
+    if (m.role === "tool") return;
+    const turn = document.createElement("article");
+    turn.className = "turn " + (m.role === "user" ? "user" : "loom");
+    const role = document.createElement("div");
+    role.className = "role";
+    role.innerHTML = '<span class="glyph">' + (m.role === "user" ? "»" : "λ") + "</span> " + (m.role === "user" ? "you" : "loom");
+    const content = document.createElement("div");
+    content.className = "content";
+    content.innerHTML = md(m.content || "");
+    turn.append(role, content);
+    $("stream").appendChild(turn);
+    scrollDown();
+  }
+  function startAssistantTurn() {
+    const turn = document.createElement("article");
+    turn.className = "turn loom";
+    turn.innerHTML = '<div class="role"><span class="glyph">λ</span> loom</div>' +
+      '<div class="reasoning hidden" id="curReasoning"></div>' +
+      '<div class="tools" id="curTools"></div>' +
+      '<div class="content cur"><span class="caret"></span></div>';
+    $("stream").appendChild(turn);
+    scrollDown();
+    return {
+      turn,
+      content: turn.querySelector(".content"),
+      tools: turn.querySelector("#curTools"),
+      reason: turn.querySelector("#curReasoning"),
+      raw: "", raf: 0,
+    };
+  }
+  function updateContent(cur) {
+    cur.content.innerHTML = md(cur.raw) + '<span class="caret"></span>';
+    scrollDown();
+  }
+  function addTool(cur, name, input, result) {
+    const d = document.createElement("details");
+    d.className = "tool"; if (result == null) d.open = false; else d.open = true;
+    const tinput = (() => { try { return JSON.stringify(input); } catch { return ""; } })().slice(0, 160);
+    const summary = document.createElement("summary");
+    summary.innerHTML = '<span class="arr">▸</span><span class="tn">' + esc(name) + '</span> <span class="tr" style="overflow:hidden;text-overflow:ellipsis;max-width:40ch;white-space:nowrap">' + esc(tinput) + "</span>";
+    const res = document.createElement("div");
+    res.className = "tres";
+    if (result != null) res.textContent = typeof result === "string" ? result : JSON.stringify(result);
+    d.append(summary, res);
+    cur.tools.appendChild(d);
+    scrollDown();
+    return { d, res };
+  }
+  function renderError(msg) {
+    const turn = document.createElement("article");
+    turn.className = "turn loom";
+    turn.innerHTML = '<div class="role"><span class="glyph">λ</span> loom</div><div class="err-line">' + esc(msg) + "</div>";
+    $("stream").appendChild(turn); scrollDown();
+  }
+  function scrollDown() {
+    const t = $("transcript"); requestAnimationFrame(() => { t.scrollTop = t.scrollHeight; });
+  }
+
+  // ── Streaming send ───────────────────────────────────────────────────────
+  let liveTimer = null, liveStart = 0, liveChars = 0;
+  function liveStart_() { liveStart = Date.now(); liveChars = 0; $("live").classList.add("on"); }
+  function liveStop() { $("live").classList.remove("on"); $("liveRate").textContent = "0c"; clearInterval(liveTimer); liveTimer = null; }
+  function liveTick() {
+    const el = (Date.now() - liveStart) / 1000 | 0;
+    const rate = el > 0 ? Math.round(liveChars / el) : liveChars;
+    $("liveRate").textContent = liveChars + "c · " + el + "s · " + rate + "c/s";
+  }
+
+  async function send(text) {
+    if (state.busy || !text.trim()) return;
+    if (!state.id) { await newChat(); if (!state.id) return; }
+    state.busy = true; setBusy(true);
+    if (state.view === "home") showEmpty(false);
+    renderMessage({ role: "user", content: text });
+    $("input").value = ""; autosize();
+    cur = startAssistantTurn();
+    lastTurnText = "";
+    liveStart_(); liveTimer = setInterval(liveTick, 250);
+
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: state.id, message: text }),
+      });
+      if (res.status === 401) { showAuth(); return; }
+      if (!res.ok) { const b = await res.json().catch(() => ({})); throw new Error(b.error || res.statusText); }
+      const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read(); if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf("\n\n")) !== -1) {
+          const raw = buf.slice(0, idx); buf = buf.slice(idx + 2);
+          const line = raw.split("\n").find((l) => l.startsWith("data: "));
+          if (!line) continue;
+          let ev; try { ev = JSON.parse(line.slice(6)); } catch { continue; }
+          handleEvent(ev);
+        }
+      }
+    } catch (e) { finishTurn("error", e.message || String(e)); }
+    finally { cleanupSend(); refreshSessions(); }
+  }
+  let cur = null;
+  let lastTurnText = "";
+  function handleEvent(ev) {
+    if (ev.type === "delta") { liveChars += (ev.text || "").length; cur.raw += ev.text || ""; if (!cur.raf) cur.raf = requestAnimationFrame(() => { cur.raf = 0; updateContent(cur); }); }
+    else if (ev.type === "reasoning") { cur.reason.classList.remove("hidden"); cur.reason.textContent += (ev.text || ""); scrollDown(); }
+    else if (ev.type === "tool.use") { addTool(cur, ev.name, ev.input, null); }
+    else if (ev.type === "tool.result") { // append a result chip
+      const last = cur.tools.lastElementChild;
+      if (last && last.querySelector(".tn")?.textContent === ev.name) {
+        const res = last.querySelector(".tres"); if (res) res.textContent = String(ev.result != null ? (typeof ev.result === "string" ? ev.result : JSON.stringify(ev.result)) : "");
+      } else addTool(cur, ev.name, ev.input, ev.result);
+      scrollDown();
+    }
+    else if (ev.type === "request.completed") { finishTurn("ok", ev.response && ev.response.text); }
+    else if (ev.type === "request.error") { finishTurn("error", ev.message || "(error)"); }
+  }
+  function finishTurn(kind, text) {
+    if (!cur) return;
+    if (kind === "ok" && cur.raw === "" && text) cur.raw = text;
+    if (kind === "error") { renderError(text); cur.turn.remove(); }
+    else { cur.content.innerHTML = md(cur.raw); }
+    lastTurnText = cur.raw;
+    cur = null; liveStop();
+  }
+  function cleanupSend() {
+    state.busy = false; setBusy(false);
+    state.messages.push({ role: "assistant", content: lastTurnText });
+    lastTurnText = "";
+  }
+  function setBusy(b) {
+    $("sendBtn").style.display = b ? "none" : "";
+    $("stopBtn").style.display = b ? "" : "none";
+    $("input").setAttribute("disabled", b ? "true" : "false");
+    if (!b) $("input").removeAttribute("disabled");
+  }
+  async function stop() {
+    if (!state.busy) return;
+    try { await post("/api/cancel", { id: state.id }); } catch {}
+  }
+
+  // ── Composer wiring ───────────────────────────────────────────────────────
+  function autosize() { const el = $("input"); el.style.height = "auto"; el.style.height = Math.min(el.scrollHeight, 220) + "px"; }
+  $("input").addEventListener("input", autosize);
+  $("input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send($("input").value.trim()); }
+    else if (e.key === "Escape") stop();
+  });
+  $("sendBtn").addEventListener("click", () => send($("input").value.trim()));
+  $("stopBtn").addEventListener("click", stop);
+  $("hints").addEventListener("click", (e) => {
+    const b = e.target.closest(".hint"); if (!b) return;
+    $("input").value = b.dataset.q; autosize(); $("input").focus();
+  });
+
+  // event delegation: copy buttons
+  $("stream").addEventListener("click", (e) => {
+    const c = e.target.closest(".copy"); if (!c) return;
+    const code = c.parentElement && c.parentElement.querySelector("code");
+    if (!code) return;
+    navigator.clipboard.writeText(code.textContent || "").then(() => { c.textContent = "copied"; setTimeout(() => (c.textContent = "copy"), 1200); });
+  });
+
+  // ── Servers modal ─────────────────────────────────────────────────────────
+  async function openServers() {
+    $("serversModal").classList.remove("hidden");
+    $("serversList").innerHTML = '<div class="skel"></div><div class="skel"></div>';
+    try {
+      const { servers } = await api("/api/servers");
+      if (!servers.length) { $("serversList").innerHTML = '<div class="muted">No MCP servers configured. Add them from the TUI with <code>/mcp add</code>.</div>'; return; }
+      $("serversList").innerHTML = servers.map((s) =>
+        '<div class="srv' + (s.enabled ? "" : " off") + '"><span class="dot"></span><span class="nm">' + esc(s.name) + "</span><span class=\"cmd\"><code>" + esc((s.command || "") + " " + (s.args || []).join(" ")) + "</code></span></div>"
+      ).join("");
+    } catch (e) { $("serversList").innerHTML = '<div class="muted">' + esc(e.message) + "</div>"; }
+  }
+  $("serversBtn").addEventListener("click", openServers);
+  $("serversClose").addEventListener("click", () => $("serversModal").classList.add("hidden"));
+  $("serversModal").addEventListener("click", (e) => { if (e.target === $("serversModal")) $("serversModal").classList.add("hidden"); });
+
+  // ── Rail toggle (mobile) ─────────────────────────────────────────────────
+  function closeRail() { $("rail").classList.remove("open"); }
+  $("menuBtn").addEventListener("click", () => $("rail").classList.toggle("open"));
+
+  // ── Boot ──────────────────────────────────────────────────────────────────
+  function boot() {
+    showEmpty(true);
+    loadCfg(); refreshSessions(); setModeForNew(); autosize();
+  }
+  checkAuth();
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !$("serversModal").classList.contains("hidden")) $("serversModal").classList.add("hidden");
+  });
+})();
+</script>
+</body>
+</html>

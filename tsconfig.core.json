@@ -17,5 +17,5 @@
     "resolveJsonModule": true
   },
   "include": ["src/core", "src/tools", "src/providers", "src/mcp", "src/config", "src/skills"],
-  "exclude": ["**/*.test.js", "**/test-*"]
+  "exclude": ["**/*.test.js", "**/test-*", "src/lib/graph.js"]
 }

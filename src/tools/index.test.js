@@ -1,4 +1,4 @@
-// Unit tests for the tool layer (src/tools/index.js).
+﻿// Unit tests for the tool layer (src/tools/index.js).
 // Runs with:  bun test src/tools/index.test.js
 process.env.LOOM_MCP_NO_WARM = "1";
 process.env.LOOM_MEM_AUTO = "0";
@@ -25,9 +25,9 @@ function tmpFile(name, content) {
   return p;
 }
 
-test("getToolDefinitions: build exposes all 10 base tools", () => {
+test("getToolDefinitions: build exposes all 13 base tools", () => {
   const defs = tools.getToolDefinitions("build");
-  expect(defs.map((d) => d.name).sort()).toEqual(["bash", "edit", "glob", "grep", "mcp", "read", "task", "todowrite", "webfetch", "write"]);
+  expect(defs.map((d) => d.name).sort()).toEqual(["ask", "bash", "edit", "glob", "grep", "lsp", "mcp", "read", "task", "todowrite", "webfetch", "websearch", "write"]);
   for (const d of defs) {
     expect(d.description).toBeTruthy();
     expect(d.input_schema).toBeTruthy();
@@ -37,7 +37,7 @@ test("getToolDefinitions: build exposes all 10 base tools", () => {
 
 test("getToolDefinitions: plan exposes read-only tools + task, chat none", () => {
   const plan = tools.getToolDefinitions("plan");
-  expect(plan.map((d) => d.name).sort()).toEqual(["glob", "grep", "read", "task", "todowrite", "webfetch"]);
+  expect(plan.map((d) => d.name).sort()).toEqual(["glob", "grep", "read", "task", "todowrite", "webfetch", "websearch"]);
   expect(tools.getToolDefinitions("chat")).toEqual([]);
 });
 

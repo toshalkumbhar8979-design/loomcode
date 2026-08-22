@@ -14,6 +14,29 @@
 //   the built-ins and can add custom subagents or disable any agent.
 const { loadConfig } = require('../config/settings');
 
+// Registry of live child sessions keyed by runId — the parent TUI and the
+// /subagents panel cancel a subagent by runId. Cleaned on natural completion.
+const subagentChildren = new Map();
+
+function newRunId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  return 'sub-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+}
+
+// Cancel a live subagent by runId. Returns true if a running child was found
+// and interrupted; false if the runId is unknown (already finished/never ran).
+function cancelSubagent(runId) {
+  const child = subagentChildren.get(runId);
+  if (!child) return false;
+  try { child.interrupt(); } catch {}
+  return true;
+}
+
+// List live runIds (for diagnostics / tests).
+function liveSubagentRunIds() {
+  return Array.from(subagentChildren.keys());
+}
+
 // Pattern semantics (last match wins):
 //   ['*']            → everything allowed (default for primaries)
 //   ['read','glob']  → only those tools
@@ -187,12 +210,14 @@ function buildSubagentBlock(agent) {
 /** @typedef {object} SubagentResult
  *  @property {string} agent          display name of the subagent
  *  @property {string} id             agent id
+ *  @property {string} [runId]        unique id of this run (set on every successful or failed delegation)
  *  @property {string} content        final answer (capped at 8000 chars)
  *  @property {number} tokensIn       child session input tokens
  *  @property {number} tokensOut      child session output tokens
  *  @property {number} costUsd        child session cost in USD
  *  @property {number} durationMs     wall time of the run
  *  @property {boolean} interrupted   true when aborted mid-run
+ *  @property {string} [error]        set when the child returned an error result
  */
 /** @typedef {{error: string}} SubagentError */
 
@@ -208,6 +233,7 @@ function buildSubagentBlock(agent) {
  *  @param {function} [opts.onProgress]
  *  @returns {Promise<SubagentResult|SubagentError>} */
 async function runSubagent(opts) {
+  const runId = newRunId();
   const agent = resolveAgent(opts.agentId);
   if (!agent) {
     return { error: 'Unknown agent: "' + opts.agentId + '". Available: ' + Object.keys(loadAgents()).join(', ') };
@@ -254,22 +280,30 @@ async function runSubagent(opts) {
     try { opts.signal.addEventListener('abort', () => child.interrupt()); } catch {}
   }
 
+  // Register for cancellation by runId; unregister on natural completion.
+  subagentChildren.set(runId, child);
   const progress = (type, text) => {
     try {
-      if (opts.onProgress) opts.onProgress({ id: agent.id, agent: agent.name, type, text });
+      if (opts.onProgress) opts.onProgress({ runId, id: agent.id, agent: agent.name, type, text });
     } catch {}
   };
-  progress('status', 'started');
 
   const t0 = Date.now();
-  const resp = await child.sendUserMessage(prompt, {
-    onDelta: (t) => progress('delta', t),
-    onReasoning: (t) => progress('reasoning', t),
-    onTool: (name, inp) => progress('tool', name),
-    onToolResult: (name, out) => progress('toolResult', name),
-  });
+  let resp;
+  try {
+    // 'start' carries the prompt so the tracker can show what was delegated.
+    progress('start', prompt);
+    resp = await child.sendUserMessage(prompt, {
+      onDelta: (t) => progress('delta', t),
+      onReasoning: (t) => progress('reasoning', t),
+      onTool: (name, inp) => progress('tool', name),
+      onToolResult: (name, out) => progress('toolResult', name),
+    });
+  } finally {
+    subagentChildren.delete(runId);
+  }
   const durationMs = Date.now() - t0;
-  progress('status', resp.interrupted ? 'interrupted' : 'done');
+  const interrupted = !!resp.interrupted;
 
   if (parent) {
     parent.tokensIn += child.tokensIn;
@@ -278,18 +312,38 @@ async function runSubagent(opts) {
     parent.sessionCost += child.sessionCost;
   }
 
-  const content = resp.type === 'error'
-    ? '[subagent error] ' + String(resp.content || '')
-    : String(resp.content || '(no response)');
+  if (resp.type === 'error') {
+    const errMsg = '[subagent error] ' + String(resp.content || '');
+    progress('error', errMsg);
+    return {
+      agent: agent.name,
+      id: agent.id,
+      runId,
+      content: errMsg,
+      tokensIn: child.tokensIn,
+      tokensOut: child.tokensOut,
+      costUsd: child.sessionCost,
+      durationMs,
+      interrupted,
+      error: errMsg,
+    };
+  }
+  const content = String(resp.content || '(no response)');
+  // 'done' carries the final cost/tokens so the panel can render them. The
+  // interrupted flag distinguishes user-cancelled runs from clean completions.
+  if (opts.onProgress) {
+    try { opts.onProgress({ runId, id: agent.id, agent: agent.name, type: 'done', text: content, interrupted, durationMs, tokensIn: child.tokensIn, tokensOut: child.tokensOut, costUsd: child.sessionCost }); } catch {}
+  }
   return {
     agent: agent.name,
     id: agent.id,
+    runId,
     content: content.slice(0, 8000),
     tokensIn: child.tokensIn,
     tokensOut: child.tokensOut,
     costUsd: child.sessionCost,
     durationMs,
-    interrupted: !!resp.interrupted,
+    interrupted,
   };
 }
 
@@ -302,4 +356,6 @@ module.exports = {
   buildAgentTurnBlock,
   buildSubagentBlock,
   runSubagent,
+  cancelSubagent,
+  liveSubagentRunIds,
 };

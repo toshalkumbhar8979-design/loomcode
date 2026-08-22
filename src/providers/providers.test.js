@@ -11,6 +11,11 @@ import path from "path";
 const USAGE_TMP = path.join(os.tmpdir(), "loom-prov-" + process.pid + "-" + Date.now() + ".json");
 process.env.LOOM_USAGE_FILE = USAGE_TMP;
 
+// Hermetic config dir: the index must load with ONLY the 7 built-in providers
+// (no models.dev cache), so the count assertions stay deterministic.
+const CFG_TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-prov-cfg-"));
+process.env.LOOM_CONFIG_DIR = CFG_TMP;
+
 let PROVIDERS, PROVIDER_ORDER, getModelMeta, ProviderRouter;
 let anthropic, openaiCompat;
 
@@ -22,6 +27,7 @@ beforeAll(() => {
 
 afterAll(() => {
   try { fs.rmSync(USAGE_TMP, { force: true }); } catch {}
+  try { fs.rmSync(CFG_TMP, { recursive: true, force: true }); } catch {}
 });
 
 const SONNET = "claude-sonnet-4-20250514";
@@ -82,14 +88,17 @@ test("anthropic buildBody: system prompt + history, tool blocks", () => {
   expect(body.model).toBe(SONNET);
   expect(body.max_tokens).toBe(1000);
   expect(body.temperature).toBe(0.5);
-  expect(body.system).toContain("system prompt");
-  expect(body.system).toContain("from history");
+  // system is a cached content block array by default — flatten for asserts
+  const sys = Array.isArray(body.system) ? body.system.map((b) => b.text).join("\n\n") : body.system;
+  expect(sys).toContain("system prompt");
+  expect(sys).toContain("from history");
   expect(body.messages).toHaveLength(3);
   // tool call -> tool_use block
   expect(body.messages[1].role).toBe("assistant");
   expect(body.messages[1].content[1]).toEqual({ type: "tool_use", id: "t1", name: "read", input: { filePath: "a.ts" } });
-  // tool result -> tool_result with the call id
-  expect(body.messages[2].content[0]).toEqual({ type: "tool_result", tool_use_id: "t1", content: "file contents" });
+  // tool result -> tool_result with the call id; it is ALSO the last message,
+  // so prompt caching stamps a breakpoint on it
+  expect(body.messages[2].content[0]).toEqual({ type: "tool_result", tool_use_id: "t1", content: "file contents", cache_control: { type: "ephemeral" } });
 });
 
 test("anthropic buildBody: temperature omitted when undefined, tools mapped", () => {
@@ -101,6 +110,37 @@ test("anthropic buildBody: temperature omitted when undefined, tools mapped", ()
   );
   expect(withTools.tools[0].name).toBe("read");
   expect(withTools.tools[0].input_schema).toEqual({ type: "object" });
+});
+
+test("anthropic buildBody: extended thinking enabled for reasoning models", () => {
+  const body = anthropic.buildBody([{ role: "user", content: "x" }], {
+    model: SONNET,
+    reasoning: true,
+    maxTokens: 8192,
+    temperature: 0.7,
+  });
+  expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 4096 });
+  // Extended thinking requires temperature unset.
+  expect(body.temperature).toBeUndefined();
+  // Budget stays below max_tokens so output tokens remain.
+  expect(body.thinking.budget_tokens).toBeLessThan(body.max_tokens);
+  // No thinking block without the flag.
+  const plain = anthropic.buildBody([{ role: "user", content: "x" }], { model: SONNET });
+  expect(plain.thinking).toBeUndefined();
+});
+
+test("openai-compat buildRequest: reasoning effort high for o-series", () => {
+  const build = openaiCompat.buildRequest;
+  const o = build([{ role: "user", content: "x" }], { model: "o3-mini", reasoning: true });
+  expect(o.reasoning_effort).toBe("high");
+  expect(o.temperature).toBeUndefined();
+  // Non-effort reasoning models (DeepSeek R1) don't get the param.
+  const r1 = build([{ role: "user", content: "x" }], { model: "deepseek-reasoner", reasoning: true });
+  expect(r1.reasoning_effort).toBeUndefined();
+  expect(r1.temperature).toBe(0.7);
+  // Without the flag, no effort.
+  const plain = build([{ role: "user", content: "x" }], { model: "o3-mini" });
+  expect(plain.reasoning_effort).toBeUndefined();
 });
 
 test("anthropic normalizeBlocks: text + tool_use, ignores unknown", () => {

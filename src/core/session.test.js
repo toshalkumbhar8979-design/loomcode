@@ -163,6 +163,9 @@ test("runTurn: executes tool calls in order, then finishes", async () => {
 
 test("runTurn: permission prompt denied blocks the bash call", async () => {
   const s = freshSession();
+  // bash defaults to allow now (dangerous commands still ask) — pin an
+  // explicit ask rule to exercise the prompt path.
+  s.permissions.loadConfig({ permission: { bash: "ask" } });
   let asks = 0;
   let calls = 0;
   s.getResponse = async () => {
@@ -205,15 +208,20 @@ test("runTurn: abort preserves partial streamed text", async () => {
   expect(res2.interrupted).toBe(true);
 });
 
-test("runTurn: 50-iteration tool limit returns a stop message", async () => {
+test("runTurn: no tool-use cap — long tool chains run until the model stops", async () => {
   const s = freshSession();
-  s.getResponse = async () => ({
-    type: "assistant",
-    content: "",
-    toolCalls: [{ id: "t" + Math.random(), name: "todowrite", input: { todos: [] } }],
-  });
+  let calls = 0;
+  s.getResponse = async () => {
+    calls++;
+    if (calls <= 60) {
+      return { type: "assistant", content: "", toolCalls: [{ id: "t" + calls, name: "todowrite", input: { todos: [{ text: "step " + calls, status: "pending" }] } }] };
+    }
+    return { type: "assistant", content: "finally done", toolCalls: [] };
+  };
   const res = await s.runTurn({});
-  expect(res.content).toContain("tool limit");
+  expect(res.type).toBe("text");
+  expect(res.content).toContain("finally done");
+  expect(calls).toBe(61);
 });
 
 test("runTurn: model errors surface as error responses", async () => {

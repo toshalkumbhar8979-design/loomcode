@@ -3,8 +3,9 @@ const { getModelMeta } = require('../providers');
 const { getToolDefinitions, getAllToolDefinitions, executeTool } = require('../tools');
 const { agentToolAllowed, filterToolDefs } = require('./agents');
 const { loadConfig, saveConfig } = require('../config/settings');
-const { PermissionManager } = require('./permissions');
+const { PermissionManager, normPathArg } = require('./permissions');
 const { emit } = require('./events');
+const hooks = require('./hooks');
 const { match: matchSkill } = require('../skills/skill-matcher.js');
 
 // Template written when LOOM.md is auto-created (or via /init).
@@ -16,7 +17,6 @@ const MEMORY_TEMPLATE =
   '## Code Style\n<!-- Coding conventions, linting rules, etc. -->\n\n' +
   '## Architecture\n<!-- Key architectural decisions and patterns -->\n';
 
-const MAX_TOOL_ITERATIONS = 50;
 // Compaction: run when the estimated context exceeds this fraction of the model window.
 const COMPACT_DEFAULT_THRESHOLD = 0.75;
 // Keep this many most-recent messages verbatim; summarize the rest.
@@ -70,6 +70,8 @@ class Session {
     this.tokensOut = 0;
     this.sessionCost = 0;
     this.permissions = new PermissionManager();
+    // OpenCode-style permission tree (config.permission + config.agent.<id>.permission).
+    this.permissions.loadConfig(this.config);
     // Restore saved permission rules ("always allow"/"never") and persist new
     // ones chosen through the TUI permission popup.
     this.permissions.loadRules(this.config.permissionRules || {});
@@ -199,13 +201,16 @@ class Session {
 ## Memory (from LOOM.md)
 ${memory}
 
+When the user states a durable preference, correction, or project fact ("we use bun", "never touch X", "deploy via Y"), persist it yourself: append ONE dated bullet under the "## Remembered" heading of ./LOOM.md using the edit tool (create the heading if missing). Keep it terse; don't ask permission for obvious preferences. Don't store secrets or one-off task details.
+
 ## Skills
 ${this.loadSkills()}
 
 ## Behavior
 - Decide before acting: if the answer needs no external data, reply directly with ZERO tool calls. Simple or conversational questions are answered in one message, nothing runs.
 - When tools ARE needed, act first and batch independent calls (e.g., read a file, grep a symbol, glob files at once). Never call tools speculatively or one at a time when they can be batched.
-- Never call a time/date tool or a sequential-thinking tool — today's date is already in Environment, and you do not need to "think" via a tool. If a tool offers a thinking step, skip it and answer.
+- Never call a time/date tool or a sequential-thinking tool — today's date is already in Environment, and you never need to "think" via a tool.
+- Extended thinking is ON when your model supports it: reason BEFORE you act and re-evaluate AFTER every tool result. For complex or multi-step tasks, think hard at each stage (plan → act → check) instead of rushing to the answer — this is what separates a good result from a guessed one.
 - Be terse in the final reply: say what changed and nothing else.
 - Never narrate ("I will now read the file…"). Just call the tool.
 - Prefer edits over full-file writes when the change is small.
@@ -233,7 +238,7 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
 - Inspect, edit, and verify the result yourself end-to-end.
 - When done, summarize in 1-2 sentences.` : ''}${this.mode === 'plan' ? `- Read-only tools only: read, glob, grep, webfetch, todowrite. No MCP tools.
 - Investigate thoroughly, then output a "## Plan" with ordered steps (exact file path + what changes each step makes). No narration.` : ''}${this.mode === 'chat' ? `- No tools available; answer conversationally.
-- If the user wants code changes, tell them to switch to Build mode (Tab or /build) and resend.` : ''}`;
+- If the user wants code changes, tell them to switch to Build mode (Tab or /build) and resend.` : ''}${this.config.outputStyle ? `\n\n## Output style\n${this.config.outputStyle}` : ''}`;
   }
 
   // Create ./LOOM.md with a template when missing, so memory exists from the
@@ -253,27 +258,20 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
   }
 
   loadMemory() {
+    // Layered memory with @imports (src/core/memory.js): global ~/.loom/LOOM.md
+    // then project LOOM.md / .loom/LOOM.md, plus CLAUDE.md compatibility.
     const fs = require('fs');
     const path = require('path');
     const cwd = process.cwd();
-    const os = require('os');
     let memory = '';
-
-    const candidates = [
-      path.join(cwd, 'LOOM.md'),
-      path.join(cwd, '.loom', 'LOOM.md'),
-      path.join(cwd, '.claude', 'CLAUDE.md'),
-      path.join(os.homedir(), '.loom', 'LOOM.md'),
-    ];
-
-    for (const p of candidates) {
+    try { memory = require('./memory').loadMemory(); } catch {}
+    for (const p of [path.join(cwd, '.claude', 'CLAUDE.md')]) {
       try {
-        if (fs.existsSync(p)) {
-          memory += `\n## From ${path.basename(p)}\n${fs.readFileSync(p, 'utf8')}\n`;
+        if (!memory && fs.existsSync(p)) {
+          memory = '## From ' + path.basename(p) + '\n' + fs.readFileSync(p, 'utf8');
         }
       } catch {}
     }
-
     if (!memory) memory = '(No memory file found.)';
     return memory;
   }
@@ -319,6 +317,9 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
       }
       this.agent = agent;
       this._agentBlock = buildAgentTurnBlock(agent);
+      this.permissions.setAgent(agent.id);
+    } else {
+      this.permissions.setAgent(null);
     }
 
     // Config is loaded at construction; only provider pivots (setModel, /connect)
@@ -363,6 +364,8 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
         this._agentBlock = null;
       }
     }
+    // stop hook — fires when the whole turn ends (success, error, interrupt).
+    try { await hooks.runHook('stop', { reason: resp?.type || 'end' }); } catch {}
     emit('turn:end', {
       text,
       type: resp?.type,
@@ -486,8 +489,11 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
   }
 
   async runTurn(callbacks = {}) {
-    let iterations = 0;
     let lastContent = '';
+    // Doom-loop guard: three identical (tool, args) calls in a row = the model
+    // is stuck; the permission.doom_loop rule (default ask) decides.
+    /** @type {{ key: string|null, count: number }} */
+    let doomRun = { key: null, count: 0 };
     // Accumulate the streamed text so an interrupt preserves partial output
     // instead of returning "(interrupted)" and losing what was already said.
     let streamed = '';
@@ -536,7 +542,11 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
       return { type: 'text', content: streamed || '(interrupted)', interrupted: true };
     };
 
-    while (iterations < MAX_TOOL_ITERATIONS) {
+    // No tool-use cap: the model decides when a turn is finished; the user can
+    // always Esc-interrupt a runaway loop.
+    let ranTools = false;
+    let nudged = false;
+    while (true) {
       if (this.interrupted) {
         return finishInterrupted();
       }
@@ -594,13 +604,44 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
       const toolCalls = resp.toolCalls || [];
 
       if (!toolCalls.length) {
-        return { type: 'text', content: resp.content || '(no response)' };
+        const text = String(resp.content || '');
+        // Silent-stop guard: models occasionally end a turn with an EMPTY
+        // reply right after running tools (truncation / provider hiccup),
+        // which reads to the user like "the agent just stopped". One
+        // automatic continuation instead of dead-ending with '(no response)'.
+        if (!text.trim() && ranTools && !nudged && !this.interrupted) {
+          nudged = true;
+          this.addMessage({ role: 'user', content: '(your last reply was empty — continue where you left off and finish the task)' });
+          continue;
+        }
+        return { type: 'text', content: text || '(no response)' };
       }
+      ranTools = true;
 
       // Execute independent tool calls in parallel; results are appended in the
       // original call order so the conversation history stays deterministic.
       const outcomes = await Promise.all(toolCalls.map(async (tc) => {
-        if (callbacks.onTool) callbacks.onTool(tc.name, tc.input);
+        if (callbacks.onTool) callbacks.onTool(tc.name, tc.input, tc.id);
+
+        // Doom-loop guard: three identical (tool, args) calls in a row means
+        // the model is stuck repeating itself. The permission.doom_loop rule
+        // (default ask) decides whether to allow the third one.
+        const doomKey = tc.name + ':' + JSON.stringify(tc.input || {});
+        if (doomRun.key === doomKey) doomRun.count++;
+        else { doomRun.key = doomKey; doomRun.count = 1; }
+        if (doomRun.count === 3) {
+          const dAction = this.permissions.resolveKey('doom_loop', doomKey);
+          if (dAction === 'deny') {
+            return { tc, outcome: { error: 'Doom-loop detected: ' + tc.name + ' called 3 times with identical input. Permission denied.' } };
+          }
+          if (dAction === 'ask' && !this.permissions.auto && callbacks.onPermissionRequest) {
+            const res = await callbacks.onPermissionRequest(tc.name, String(doomKey), 'repeated identical call (doom loop)');
+            const approved = res && typeof res === 'object' ? !!res.approved : !!res;
+            if (!approved) {
+              return { tc, outcome: { error: 'Doom-loop detected: ' + tc.name + ' called 3 times with identical input.' } };
+            }
+          }
+        }
 
         // Agent gate (defense in depth — the schema is filtered in getResponse
         // too): a subagent can never call a tool outside its agent's list.
@@ -608,26 +649,44 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
           return { tc, outcome: { error: `Tool "${tc.name}" is not available to the ${this.agent.name} agent.` } };
         }
 
-        // mcp add spawns arbitrary stdio servers with optional env secrets —
-        // gate it like bash (only the "add" action; list/remove/enable/disable
-        // only touch the local config).
+        // OpenCode-style permission gate: every named tool resolves through
+        // config.permission (+ config.agent.<agent>.permission) with
+        // wildcard patterns and the last matching rule winning. ask'able
+        // results flow through the TUI popup; doom_loop/external_directory
+        // are checked separately where they apply.
+        const permKey = { read:'read', edit:'edit', write:'edit', glob:'glob', grep:'grep', bash:'bash',
+                          task:'task', skill:'skill', lsp:'lsp', question:'question', ask:'question', webfetch:'webfetch',
+                          websearch:'websearch' }[tc.name];
         const isMcpAdd = tc.name === 'mcp' && tc.input && tc.input.action === 'add';
-        if (tc.name === 'bash' || tc.name === 'edit' || tc.name === 'write' || isMcpAdd) {
-          const target = (tc.input && tc.input.command) || (tc.input && tc.input.filePath) || '';
-          let permission = await this.permissions.check(target);
-          // Shell commands always ask unless the user saved a rule for them:
-          // "Allow"/"Always allow" in the popup records a rule and skips the
-          // prompt on identical commands afterwards.
-          const savedRule = this.permissions.checkRule(target) || this.permissions.checkRule('*');
-          if ((tc.name === 'bash' || isMcpAdd) && !savedRule && permission === 'allow') permission = 'ask';
-          if (permission === 'deny' || permission === 'never') {
-            return { tc, outcome: { error: 'Permission denied by user.' } };
+        if (permKey || isMcpAdd) {
+          const arg = this.permissions.permissionArg(tc.name, tc.input || {});
+          let action = this.permissions.resolve(tc.name, arg);
+          // mcp add spawns arbitrary stdio servers with optional env secrets —
+          // always ask unless the user saved a rule for the exact command.
+          if (isMcpAdd && action === 'allow' && !this.permissions.checkRule(arg)) action = 'ask';
+          // External path beyond the working dir? Ask/deny via
+          // permission.external_directory, matched against the absolute path.
+          if (action === 'allow' && (permKey === 'read' || permKey === 'edit' || permKey === 'glob' || permKey === 'grep') && /[/\\]/.test(arg)) {
+            const ext = this.permissions.checkExternal(normPathArg(arg, process.cwd()));
+            if (ext !== 'allow') action = ext;
           }
-          if (permission === 'ask' || permission === 'ask_admin') {
-            if (callbacks.onPermissionRequest) {
-              const label = this.permissions.getDangerLabel(target);
-              const res = await callbacks.onPermissionRequest(tc.name, target, label);
-              // Back-compat: a bare boolean, or { approved, note } from the TUI.
+          if (action === 'deny') {
+            return { tc, outcome: { error: `Permission denied: ${tc.name} (${permKey || 'mcp add'}).` } };
+          }
+          if (action === 'ask') {
+            if (this.permissions.auto) {
+              // Auto mode: only explicit denies are enforced; asks auto-approve.
+            } else if (callbacks.onPermissionRequest) {
+              const label = this.permissions.getDangerLabel(arg);
+              const res = await callbacks.onPermissionRequest(tc.name, arg, label, (tc.input || {}).options);
+              // The ask tool is a QUESTION, not a permission: the popup's
+              // answer comes back in res.note and becomes the tool result so
+              // the model can react to what the user actually said.
+              if (tc.name === 'ask') {
+                const ans = res && typeof res === 'object' ? (res.note || '') : '';
+                if (!ans) return { tc, outcome: { error: 'No answer given.' } };
+                return { tc, outcome: { result: ans } };
+              }
               const approved = res && typeof res === 'object' ? !!res.approved : !!res;
               if (!approved) {
                 const note = res && typeof res === 'object' && res.note ? ' ' + res.note : '';
@@ -642,7 +701,12 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
         // The permission gate above is the interactive check; mark the command
         // as approved so the tool-layer safety filter doesn't double-block
         // commands the user explicitly allowed.
-        const input = tc.name === 'bash' || isMcpAdd ? { ...tc.input, _approved: true } : tc.input;
+        const input = (tc.name === 'bash' || isMcpAdd) ? { ...tc.input, _approved: true } : tc.input;
+        // preToolUse hook: a user-configured command may veto this call.
+        try {
+          const gate = await hooks.runHook('preToolUse', { tool: tc.name, input: tc.input });
+          if (gate.blocked) return { tc, outcome: { error: 'Blocked by preToolUse hook.' + (gate.reason ? ' ' + gate.reason : '') } };
+        } catch {}
         const outcome = await executeTool(tc.name, input, this.mode, {
           parentSession: this,
           signal: this.abortController ? this.abortController.signal : null,
@@ -651,7 +715,14 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
             // delegation panel can stream deltas, tool calls and status.
             try { if (callbacks.onSubagent) callbacks.onSubagent(ev); } catch {}
           },
+          stream: (chunk, kind) => {
+            // Live terminal output (bash tool) — relayed to the TUI so the
+            // chat can stream a growing output block while the command runs.
+            try { if (callbacks.onToolOutput) callbacks.onToolOutput(tc, chunk, kind); } catch {}
+          },
         });
+        // postToolUse hook (informational — never blocks).
+        try { await hooks.runHook('postToolUse', { tool: tc.name, input: tc.input }); } catch {}
         return { tc, outcome };
       }));
 
@@ -665,13 +736,9 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
           // subscribes once and the panel updates without a re-render cycle.
           try { emit('todos:changed', this.todos); } catch {}
         }
-        if (callbacks.onToolResult) callbacks.onToolResult(tc.name, outcome, tc.input);
+        if (callbacks.onToolResult) callbacks.onToolResult(tc.name, outcome, tc.input, tc.id);
       }
-
-      iterations++;
     }
-
-    return { type: 'text', content: '(reached tool limit — I could not finish. Please simplify the request.)' };
   }
 
   async getResponse(callbacks) {
@@ -737,6 +804,18 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
       tools: toolDefs,
       system: this.systemPrompt + (this._skillBlock || '') + (this._agentBlock || ''),
       signal: this.abortController?.signal,
+      // Extended thinking: models tagged 'reasoning' reason BEFORE every
+      // reply — including after each tool result — so complex tasks get
+      // multiple thinking passes (opencode-style), not just the first one.
+      // /think off|low|medium|high overrides: 'off' disables reasoning,
+      // levels set an explicit budget_tokens for providers that take one.
+      reasoning: (() => {
+        if (this.config.thinkLevel === 'off') return false;
+        const { getModelMeta } = require('../providers/index.js');
+        const meta = getModelMeta(this.provider.active?.name, model);
+        return !!(meta && meta.tags && meta.tags.includes('reasoning'));
+      })(),
+      thinkingBudget: ({ low: 2048, medium: 8192, high: 16384 })[this.config.thinkLevel] || undefined,
     };
 
     this.abortController = new AbortController();

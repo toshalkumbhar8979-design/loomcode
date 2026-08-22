@@ -84,9 +84,11 @@ test("normalizeSession: rejects garbage and preserves extras", () => {
   expect(store.normalizeSession({ messages: "not an array" }).messages).toEqual([]);
 });
 
-test("listSessions: enumerates saved sessions newest first", () => {
-  store.saveSession(fakeSession({ conversationId: "one" }));
-  store.saveSession(fakeSession({ conversationId: "two" }));
+test("listSessions: enumerates saved sessions newest first", async () => {
+  store.saveSession(fakeSession({ conversationId: "one", updatedAt: "2024-01-01T00:00:00Z" }));
+  // saveSession stamps updatedAt itself; space the writes so mtimes differ.
+  await new Promise((r) => setTimeout(r, 20));
+  store.saveSession(fakeSession({ conversationId: "two", updatedAt: "2024-01-01T00:00:01Z" }));
   const list = store.listSessions();
   expect(list).toHaveLength(2);
   expect(list.map((s) => s.id)).toEqual(["two", "one"]);

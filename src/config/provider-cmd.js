@@ -1,9 +1,11 @@
 const { loadConfig, saveConfig } = require('./settings');
+const { loadRegistry, envNamesFor } = require('../providers/registry');
 
 function connect(provider, apiKey) {
   const valid = ['anthropic', 'openai', 'nvidia', 'google', 'local'];
-  if (!valid.includes(provider)) {
-    throw new Error(`Unknown provider: ${provider}. Valid: ${valid.join(', ')}`);
+  const reg = loadRegistry() || {};
+  if (!valid.includes(provider) && !reg[provider]) {
+    throw new Error(`Unknown provider: ${provider}. Run /providers to list every supported provider.`);
   }
   const config = loadConfig();
   config.provider = provider;
@@ -28,8 +30,7 @@ function status() {
   return {
     provider: config.provider,
     model: config.model?.[config.provider] || 'default',
-    hasKey: !!(config.apiKeys?.[config.provider] || 
-      process.env[`${config.provider.toUpperCase()}_API_KEY`])
+    hasKey: !!(config.apiKeys?.[config.provider] || (envNamesFor(config.provider) || []).some(n => !!process.env[n]))
   };
 }
 

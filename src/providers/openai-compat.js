@@ -48,13 +48,28 @@ function formatTools(tools) {
 }
 
 function buildRequest(messages, options) {
-  return {
+  const body = {
     model: options.model,
     messages: formatMessages(messages, options),
     tools: formatTools(options.tools),
     max_tokens: options.maxTokens || 8192,
     temperature: options.temperature ?? 0.7,
   };
+  // Reasoning models (o1/o3/o4/gpt-5, tagged 'reasoning' by the session):
+  // push the effort to "high" so the model reasons deeply on every step —
+  // opencode-style multi-pass thinking. Other reasoning families (DeepSeek
+  // R1, Qwen QwQ, Kimi K2) emit reasoning_content on their own and don't
+  // accept the param, so only the OpenAI effort-capable ids get it. OpenAI
+  // effort models also reject a temperature != 1, so drop it.
+  if (options.reasoning && /^(o1|o3|o4|gpt-5)/.test(String(options.model || ''))) {
+    body.reasoning_effort = 'high';
+    // Reasoning models reject max_tokens; the limit moves to
+    // max_completion_tokens unchanged.
+    body.max_completion_tokens = body.max_tokens;
+    delete body.max_tokens;
+    delete body.temperature;
+  }
+  return body;
 }
 
 function normalize(resp) {
@@ -68,8 +83,27 @@ function normalize(resp) {
   };
 }
 
+// Some providers (NVIDIA NIM, Akamai) return an HTML error page for bad model
+// IDs. Strip the tags so the TUI shows a readable line instead of raw markup.
+function sanitizeErrBody(msg) {
+  if (!msg || !/<\/?\w+[^>]*>/.test(msg)) return msg;
+  const stripped = String(msg)
+    .replace(/<title[^>]*>[\s\S]*?<\/title>/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#x27;|&#39;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return stripped || msg;
+}
+
 function wrapErr(err, modelId, envKeyHint, baseURL) {
-  const msg = err.message || 'Unknown error';
+  const raw = err.message || 'Unknown error';
+  const msg = sanitizeErrBody(raw);
   if (!err.status) return new Error(`${envKeyHint || 'API'} error: ${msg}`);
   const status = Number(err.status);
   const hint = String(envKeyHint || 'api').toLowerCase();
@@ -80,8 +114,12 @@ function wrapErr(err, modelId, envKeyHint, baseURL) {
     return new Error(`${envKeyHint || 'API'} 403 Forbidden: the API key is not authorized for ${modelId || 'this model'}. You may need to accept the model's terms on the provider site or use a key with access. Run /connect ${hint} to change the key.`);
   }
   if (status === 402) return new Error(`${envKeyHint || 'API'} quota exceeded (${err.status}). The model may not be available on your billing tier for model ${(modelId || '?')}.`);
-  if (err.error && err.error.message) return new Error(`${envKeyHint || 'API'} error ${status}: ${err.error.message}`);
-  if (err.body && err.body.message) return new Error(`${envKeyHint || 'API'} error ${status}: ${err.body.message}`);
+  if (status === 404) {
+    const modelHint = modelId ? ` ${modelId}` : '';
+    return new Error(`${envKeyHint || 'API'} 404: model${modelHint} does not exist (or was removed) on this provider. Try /models and pick a listed model, or /model ${modelId ? 'to switch' : ''}.`);
+  }
+  if (err.error && err.error.message) return new Error(`${envKeyHint || 'API'} error ${status}: ${sanitizeErrBody(err.error.message)}`);
+  if (err.body && err.body.message) return new Error(`${envKeyHint || 'API'} error ${status}: ${sanitizeErrBody(err.body.message)}`);
   if (!msg || msg.indexOf('no body') >= 0) {
     const modelHint = modelId ? ` (model: ${modelId})` : '';
     return new Error(`${envKeyHint || 'API'} error ${status}${modelHint}. Check model name or URL:\n${baseURL || '(default)'}`);
@@ -136,15 +174,15 @@ function isAbortError(err) {
  */
 
 /**
- * @param {{ getKey: () => string|undefined, providerId: string, envKeyHint: string, clientFactory?: () => any }} config
+ * @param {{ getKey: () => string|undefined, providerId: string, envKeyHint: string, clientFactory?: () => any, defaultBaseUrl?: string }} config
  * @returns {Provider}
  */
-function createOpenAICompatProvider({ getKey, providerId, envKeyHint, clientFactory }) {
+function createOpenAICompatProvider({ getKey, providerId, envKeyHint, clientFactory, defaultBaseUrl }) {
   function getClient() {
     if (clientFactory) return clientFactory();
     const key = getKey();
     if (!key) throw new Error(`${envKeyHint || 'API'} key not set. Use /connect or set the ${envKeyHint || 'API'}_API_KEY env var.`);
-    const baseURL = getBaseUrl(providerId) || getDefaultBaseUrl(providerId);
+    const baseURL = getBaseUrl(providerId) || defaultBaseUrl || getDefaultBaseUrl(providerId);
     return new OpenAI({ apiKey: key, baseURL });
   }
 
@@ -228,4 +266,4 @@ function getDefaultBaseUrl(providerId) {
   return defaults[providerId] || undefined;
 }
 
-module.exports = { createOpenAICompatProvider, wrapErr, buildRequest, formatMessages, formatTools, parseToolCalls, normalize, retryWithBackoff };
+module.exports = { createOpenAICompatProvider, wrapErr, buildRequest, formatMessages, formatTools, parseToolCalls, normalize, retryWithBackoff, sanitizeErrBody };

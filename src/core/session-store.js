@@ -77,22 +77,33 @@ function saveSession(session) {
 
 function listSessions() {
   ensureDir();
-  const files = fs.readdirSync(sessionsDir()).filter((f) => f.endsWith('.json')).sort().reverse();
-  return files.map((f) => {
+  const files = fs.readdirSync(sessionsDir()).filter((f) => f.endsWith('.json'));
+  const list = files.map((f) => {
     const p = path.join(sessionsDir(), f);
     try {
       const data = JSON.parse(fs.readFileSync(p, 'utf8'));
+      let mtime = null;
+      try { mtime = fs.statSync(p).mtime.toISOString(); } catch {}
       return {
         id: data.id || f.replace('.json', ''),
         createdAt: data.createdAt,
+        updatedAt: data.updatedAt,
+        mtime,
         messageCount: (data.messages || []).length,
         provider: data.provider,
         model: data.model,
       };
     } catch {
-      return { id: f.replace('.json', ''), createdAt: null, messageCount: 0 };
+      let mtime = null;
+      try { mtime = fs.statSync(p).mtime.toISOString(); } catch {}
+      return { id: f.replace('.json', ''), createdAt: null, updatedAt: null, mtime, messageCount: 0 };
     }
   });
+  // Newest first by the last write time (updatedAt, else createdAt, else the
+  // file's own mtime). Sorting by file NAME put legacy "share-*" exports on
+  // top forever ("s" > "m"), burying the real, recent conversations.
+  const stamp = (s) => s.updatedAt || s.createdAt || s.mtime || '';
+  return list.filter((s) => isValidSessionId(s.id)).sort((a, b) => (stamp(b) < stamp(a) ? -1 : stamp(b) > stamp(a) ? 1 : 0));
 }
 
 function loadSession(id) {

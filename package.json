@@ -1,7 +1,11 @@
 {
   "name": "loom-code",
   "version": "1.2.0",
-  "description": "Loom Code — AI-powered coding agent for the terminal. Multi-provider support including NVIDIA. OpenTUI interface.",
+  "repository": { "type": "git", "url": "git+https://gitlab.com/toshalkumbhar8979/loom-code.git" },
+  "homepage": "https://gitlab.com/toshalkumbhar8979/loom-code#readme",
+  "bugs": { "url": "https://gitlab.com/toshalkumbhar8979/loom-code/-/issues" },
+  "engines": { "node": ">=18" },
+  "description": "Loom Code â€” AI-powered coding agent for the terminal. Multi-provider support including NVIDIA. OpenTUI interface.",
   "main": "src/index.js",
   "bin": {
     "loom": "bin/loom.js",
@@ -12,8 +16,9 @@
     "dev": "node --watch src/index.js",
     "setup": "node src/setup.js",
     "test": "bun run src/tui/test-interactive.tsx && bun run test:unit && bun run lint:core",
-    "test:unit": "bun test src/core/agents.test.js src/core/session.test.js src/tools/index.test.js src/providers/providers.test.js src/mcp/mcp-client.test.js src/core/session-store.test.js src/skills/skills-manager.test.js src/core/usage.test.js",
+    "test:unit": "bun test src/core/agents.test.js src/core/hooks.test.js src/core/custom-commands.test.js src/core/background-tasks.test.js src/core/memory.test.js src/core/subagent-log.test.js src/core/session.test.js src/tools/index.test.js src/providers/providers.test.js src/providers/caching.test.js src/providers/caching-thinking.test.js src/providers/registry.test.js src/mcp/mcp-client.test.js src/mcp/mcp-manager.test.js src/core/session-store.test.js src/skills/skills-manager.test.js src/core/usage.test.js src/core/permissions.test.js src/core/format.test.js src/acp/acp-server.test.js src/web/web-server.test.js src/tui/keybinds.test.ts",
     "lint:core": "node node_modules/typescript/bin/tsc -p tsconfig.core.json",
+    "smoke:acp": "node scripts/acp-smoke.js",
     "tui": "node bin/loom-tui.js",
     "tui:win": "\"%USERPROFILE%\\..\\bun\\bin\\bun.exe\" run src/tui-open.tsx",
     "prepublishOnly": "npm test",
@@ -21,10 +26,10 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.37.0",
-    "@open-pets/client": "^3.3.0",
     "@opentui/core": "^0.5.1",
     "@opentui/solid": "^0.5.1",
     "@shikijs/themes": "4.4.3",
+    "bonjour-service": "^1.4.4",
     "boxen": "^8.0.0",
     "chalk": "^5.3.0",
     "cli-spinners": "^3.2.0",
@@ -65,9 +70,15 @@
     "!src/test-loop.js",
     "!src/test-tools.js",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     ".env.example",
-    "LOOM.md"
+    "LOOM.md",
+    "docs/acp.md",
+    "scripts/acp-smoke.js",
+    "docs/web.md",
+    "src/web/index.html",
+    "src/web/graph-view.html"
   ],
   "keywords": [
     "ai",

@@ -1,4 +1,4 @@
-// Unit tests for the agent registry + delegation runner (src/core/agents.js).
+﻿// Unit tests for the agent registry + delegation runner (src/core/agents.js).
 // Runs with:  bun test src/core/agents.test.js
 process.env.LOOM_MCP_NO_WARM = "1";
 process.env.LOOM_MEM_AUTO = "0";
@@ -32,17 +32,17 @@ test("registry: built-in primaries and subagents with tool filters", () => {
   expect(all.scout.mode).toBe("subagent");
   // subagent defaults: everything except delegation (no recursion)
   expect(all.general.tools).toContain("!task");
-  expect(all.explore.tools).toEqual(["read", "glob", "grep", "webfetch", "todowrite"]);
+  expect(all.explore.tools).toEqual(["read", "glob", "grep", "webfetch", "websearch", "todowrite"]);
 });
 
 test("tool patterns: last-match-wins with wildcards and denies", () => {
   const { agentToolAllowed } = agents;
-  // ['*','!task'] → everything but task
+  // ['*','!task'] â†’ everything but task
   const general = agents.resolveAgent("general");
   expect(agentToolAllowed(general, "bash")).toBe(true);
   expect(agentToolAllowed(general, "read")).toBe(true);
   expect(agentToolAllowed(general, "task")).toBe(false);
-  // explicit list → only those
+  // explicit list â†’ only those
   const explore = agents.resolveAgent("explore");
   expect(agentToolAllowed(explore, "read")).toBe(true);
   expect(agentToolAllowed(explore, "grep")).toBe(true);
@@ -53,9 +53,9 @@ test("tool patterns: last-match-wins with wildcards and denies", () => {
   const noMcp = { id: "x", mode: "subagent", tools: ["*", "!mcp__*"] };
   expect(agentToolAllowed(noMcp, "mcp__files__read")).toBe(false);
   expect(agentToolAllowed(noMcp, "bash")).toBe(true);
-  // no tools list → everything
+  // no tools list â†’ everything
   expect(agentToolAllowed({ id: "open", mode: "subagent", tools: null }, "bash")).toBe(true);
-  // empty list → also no restriction (same as null; mode gating covers chat)
+  // empty list â†’ also no restriction (same as null; mode gating covers chat)
   expect(agentToolAllowed({ id: "open2", mode: "subagent", tools: [] }, "bash")).toBe(true);
 });
 
@@ -66,7 +66,7 @@ test("filterToolDefs: schema list is filtered per agent", async () => {
   const explore = agents.resolveAgent("explore");
   const filtered = agents.filterToolDefs(explore, all);
   const names = filtered.map((d) => d.name).sort();
-  expect(names).toEqual(["glob", "grep", "read", "todowrite", "webfetch"]);
+  expect(names).toEqual(["glob", "grep", "read", "todowrite", "webfetch", "websearch"]);
   const general = agents.resolveAgent("general");
   const gNames = agents.filterToolDefs(general, all).map((d) => d.name);
   expect(gNames).toContain("bash");
@@ -134,6 +134,7 @@ test("runSubagent: child session runs the delegated prompt with agent gating and
     });
     expect(res.error).toBeUndefined();
     expect(res.content).toBe("subagent answer");
+    expect(typeof res.runId).toBe("string");
     expect(res.tokensIn).toBe(40);
     expect(res.costUsd).toBe(0.002);
     // usage flows into the parent
@@ -146,15 +147,19 @@ test("runSubagent: child session runs the delegated prompt with agent gating and
     expect(captured.agent.mode).toBe("subagent");
     expect(captured.block).toContain("Explore");
     expect(captured.block).toContain("delegated");
-    // progress events: status + streamed deltas + tools
+    // progress events: start (with prompt) + streamed deltas + tools + done
     const types = progress.map((p) => p.type);
-  expect(types).toContain("status");
-  expect(types).toContain("delta");
-  expect(types).toContain("tool");
-  expect(progress[0].type).toBe("status");
-  expect(progress[progress.length - 1].type).toBe("status");
-  // delegation is not recursive: the explore agent cannot call task
-  expect(agents.agentToolAllowed(captured.agent, "task")).toBe(false);
+    expect(types).toContain("start");
+    expect(types).toContain("delta");
+    expect(types).toContain("tool");
+    expect(progress[0].type).toBe("start");
+    expect(progress[0].text).toBe("find the bug");
+    expect(progress[progress.length - 1].type).toBe("done");
+    // every event carries a unique runId so the panel can track this run
+    expect(progress.every((p) => typeof p.runId === "string" && p.runId.length > 0)).toBe(true);
+    expect(new Set(progress.map((p) => p.runId)).size).toBe(1);
+    // delegation is not recursive: the explore agent cannot call task
+    expect(agents.agentToolAllowed(captured.agent, "task")).toBe(false);
   } finally {
     Session.prototype.runTurn = origRunTurn;
   }
@@ -177,11 +182,57 @@ test("session: agent turn (opts.agentId) scopes tools, blocks disallowed calls, 
     onPermissionRequest: async () => { asks++; return true; },
   }, { agentId: "explore" });
   expect(res.content).toBe("explored");
-  // bash is NOT in explore's list → never asked, blocked by the agent gate
+  // bash is NOT in explore's list â†’ never asked, blocked by the agent gate
   expect(asks).toBe(0);
   const toolMsg = s.messages.find((m) => m.role === "tool");
   expect(String(toolMsg.content)).toContain("not available to the Explore agent");
   // agent scope restored after the turn
   expect(s.agent).toBeNull();
   expect(s._agentBlock).toBeNull();
+});
+
+test("runSubagent: cancelSubagent aborts a live child and the run resolves interrupted", async () => {
+  let capturedRunId = null;
+  const origRunTurn = Session.prototype.runTurn;
+  Session.prototype.runTurn = async function (callbacks) {
+    // Simulate a long-running child: park until interrupted, then report it.
+    // interrupt() sets this.interrupted synchronously before any abort wiring.
+    return await new Promise((resolve) => {
+      const check = setInterval(() => {
+        if (this.interrupted) {
+          clearInterval(check);
+          resolve({ type: "text", content: "partial", interrupted: true });
+        }
+      }, 10);
+    });
+  };
+  try {
+    const progress = [];
+    const done = agents.runSubagent({
+      agentId: "general",
+      prompt: "long task",
+      onProgress: (ev) => {
+        progress.push(ev);
+        if (ev.type === "start") capturedRunId = ev.runId;
+      },
+    });
+    // Wait for the start event so the child is registered.
+    for (let i = 0; i < 50 && !capturedRunId; i++) await new Promise(r => setTimeout(r, 10));
+    expect(capturedRunId).toBeTruthy();
+    expect(agents.liveSubagentRunIds()).toContain(capturedRunId);
+    expect(agents.cancelSubagent(capturedRunId)).toBe(true);
+    const res = await done;
+    expect(res.interrupted).toBe(true);
+    expect(res.runId).toBe(capturedRunId);
+    // registry cleaned up after completion
+    expect(agents.liveSubagentRunIds()).not.toContain(capturedRunId);
+    // second cancel is a no-op (already unregistered)
+    expect(agents.cancelSubagent(capturedRunId)).toBe(false);
+    // final progress event marks the interruption via the done event flag
+    const last = progress[progress.length - 1];
+    expect(last.type).toBe("done");
+    expect(last.interrupted).toBe(true);
+  } finally {
+    Session.prototype.runTurn = origRunTurn;
+  }
 });

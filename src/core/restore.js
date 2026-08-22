@@ -24,17 +24,39 @@ function walkFiles(root, depth, out) {
   }
 }
 
-// Snapshot current project: rel path -> content (null = will not exist later
-// after restore; used to detect files created after the point).
+// Per-file content cap: larger files (lockfiles, bundles, big data) are not
+// snapshotted — they are recorded as null and left untouched by a restore.
+const FILE_CAP = 200 * 1024;
+// Total snapshot cap: keeps restore.json small (~MBs, not hundreds of MBs).
+// Once the budget is spent, remaining files are recorded as null.
+const TOTAL_CAP = 2 * 1024 * 1024;
+// Store-wide budget: when the restore file exceeds this, the oldest points
+// are dropped on load (20 x TOTAL_CAP would otherwise mean 40MB on disk).
+const FILE_BUDGET = 8 * 1024 * 1024;
+
+// Snapshot current project: rel path -> content.
+//   - string  = file was captured (small, text); restore overwrites it.
+//   - null    = file existed but was NOT captured (too big / unreadable /
+//               budget exhausted); restore must leave it alone.
+//   - absent  = file did not exist at the point; restore deletes it if it
+//               appeared later.
 function snapshotProject(base) {
   const list = [];
   walkFiles(base, 0, list);
   const files = {};
+  let budget = TOTAL_CAP;
   for (const abs of list) {
     const rel = path.relative(base, abs).replace(/\\/g, '/');
     let content = null;
     try {
-      if (fs.statSync(abs).size <= 1024 * 1024) content = fs.readFileSync(abs, 'utf8');
+      const st = fs.statSync(abs);
+      if (st.size <= FILE_CAP && st.size <= budget) {
+        const raw = fs.readFileSync(abs, 'utf8');
+        if (!raw.includes('\u0000')) {
+          content = raw;
+          budget -= st.size;
+        }
+      }
     } catch {}
     files[rel] = content;
   }
@@ -42,7 +64,48 @@ function snapshotProject(base) {
 }
 
 function loadPoints() {
-  try { return JSON.parse(fs.readFileSync(RESTORE_FILE, 'utf8')); } catch { return []; }
+  let points;
+  try { points = JSON.parse(fs.readFileSync(RESTORE_FILE, 'utf8')); } catch { return []; }
+  if (!Array.isArray(points)) return [];
+  // Self-heal: older points could snapshot whole trees (huge files, hundreds
+  // of MB). Compacting here keeps the file small forever after the first load.
+  let size = 0;
+  let needsCompact = points.length > MAX_POINTS;
+  for (const p of points) {
+    if (!p || typeof p.files !== 'object') continue;
+    for (const c of Object.values(p.files)) {
+      if (typeof c === 'string') {
+        size += c.length;
+        if (c.length > FILE_CAP) needsCompact = true;
+      }
+    }
+  }
+  // File-level budget: drop the oldest points until the whole store fits.
+  // MAX_POINTS caps count; this caps bytes (20 x 2MB snapshots would be 40MB).
+  if (size > FILE_BUDGET) {
+    needsCompact = true;
+    while (points.length > 1 && size > FILE_BUDGET) {
+      const oldest = points.shift();
+      if (oldest && typeof oldest.files === 'object') {
+        for (const c of Object.values(oldest.files)) {
+          if (typeof c === 'string') size -= c.length;
+        }
+      }
+    }
+  }
+  if (needsCompact) {
+    points = points.slice(-MAX_POINTS).map(p => {
+      if (!p || typeof p.files !== 'object') return p;
+      const files = {};
+      for (const [rel, c] of Object.entries(p.files)) {
+        if (typeof c === 'string' && c.length > FILE_CAP) files[rel] = null;
+        else files[rel] = c;
+      }
+      return Object.assign({}, p, { files });
+    });
+    savePoints(points);
+  }
+  return points;
 }
 
 function savePoints(points) {
@@ -83,8 +146,9 @@ export function getRestorePoint(id) {
   return loadPoints().find(p => p.id === id) || null;
 }
 
-// Restore the project to the state captured at `id`: overwrite changed files,
-// re-create deleted ones, and remove files that were created after the point.
+// Restore the project to the state captured at `id`: overwrite captured files,
+// re-create ones that were deleted since, and remove files that were created
+// after the point. Files recorded as null (too big to snapshot) are left alone.
 // Returns a summary of what changed.
 export function restoreTo(id, base) {
   base = base || cwd;
@@ -95,17 +159,15 @@ export function restoreTo(id, base) {
   const deleted = [];
   const errors = [];
 
-  // 1. Overwrite / re-create every file as it was at the point.
+  // 1. Overwrite / re-create captured files; skip the ones recorded as null
+  //    (they existed but were not snapshotted — never touch them).
   for (const [rel, content] of Object.entries(point.files)) {
+    if (content === null) continue;
     const abs = path.join(base, rel);
     try {
-      if (content === null) {
-        if (fs.existsSync(abs)) { fs.rmSync(abs); deleted.push(rel); }
-      } else {
-        fs.mkdirSync(path.dirname(abs), { recursive: true });
-        fs.writeFileSync(abs, content, 'utf8');
-        restored.push(rel);
-      }
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, content, 'utf8');
+      restored.push(rel);
     } catch (e) {
       errors.push(rel + ': ' + String(e.message || e).slice(0, 80));
     }

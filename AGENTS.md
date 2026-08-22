@@ -15,13 +15,14 @@
 
 Exactly: `bun run test` — must exit 0. It runs three stages:
 
-1. `bun run src/tui/test-interactive.tsx` — 51 keyboard-interaction tests of
+1. `bun run src/tui/test-interactive.tsx` — 64 keyboard-interaction tests of
    the OpenTUI interface (splash, slash popup, paste, busy-submit hold, caret
    editing, markdown rendering, permission popup, /budget, /skills, /mcp,
-   /connectors …).
-2. `bun run test:unit` — `bun test` over the 7 core test files
-   (87 pass / 2 skip). When you add a test file under `src/`, register it in
-   the `test:unit` script in `package.json` or it will NOT run in CI.
+   /connectors, keybind rebinds, welcome tips …).
+2. `bun run test:unit` — `bun test` over the core test files
+   (176 pass / 2 skip across 15 files). When you add a test file under `src/`,
+   register it in the `test:unit` script in `package.json` or it will NOT run
+   in CI.
 3. `bun run lint:core` — `tsc -p tsconfig.core.json`: strict typecheck of the
    core JSDoc layer ONLY (`src/core`, `src/providers`, `src/mcp`, `src/skills`,
    `src/tools`, `src/config`). New exports there need `@typedef` JSDoc types

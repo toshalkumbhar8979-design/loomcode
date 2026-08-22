@@ -1,4 +1,4 @@
-// Top breadcrumb bar — OpenCode style: project path, session info, model.
+// Top breadcrumb bar — project path, session info, model.
 import { palette } from "../theme.ts";
 import { providerName, modelName, sessionId, cwdShort, username, inputMode } from "../store.ts";
 
@@ -14,18 +14,15 @@ export function BreadcrumbBar() {
       alignItems="center"
       paddingX={1}
       backgroundColor={ui.bgPanel}
-      borderStyle="single"
-      borderColor={ui.border}
-      borderBottom
     >
       <box flexDirection="row">
-        <text fg={ui.primary} bold>{"loom"}</text>
+        <text fg={ui.primary}>{"loom"}</text>
         <text fg={ui.fgMuted}>{" / "}</text>
         <text fg={ui.fg}>{cwdShort() || "~"}</text>
         <text fg={ui.fgMuted}>{"  ·  "}</text>
         <text fg={ui.fgDim}>{sessionId().slice(0, 8)}</text>
         <text fg={ui.fgMuted}>{"  ·  "}</text>
-        <text fg={modeColors[inputMode()] || ui.primary} bold>{"[" + (MODE_LABELS[inputMode()] || "B") + "]"}</text>
+        <text fg={modeColors[inputMode()] || ui.primary}>{"[" + (MODE_LABELS[inputMode()] || "B") + "]"}</text>
       </box>
       <box flexDirection="row">
         <text fg={ui.secondary}>{providerName()}</text>

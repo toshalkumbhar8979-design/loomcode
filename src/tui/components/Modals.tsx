@@ -1,66 +1,78 @@
-// Modals -- provider picker, model picker, key input, base URL, settings, companion chooser, palette.
-import { createSignal } from "solid-js";
+// Modals -- provider picker, model picker, key input, base URL, settings, palette.
+import { createSignal, onMount } from "solid-js";
 import { useKeyboard, usePaste } from "@opentui/solid";
 import { palette } from "../theme.ts";
+import * as kbs from "../keybinds.ts";
 import {
   openModal, closeModal, modal, PROVIDERS, PROVIDER_ORDER, PROVIDER_LABELS,
   refreshProviderState, appendMessage, showToast, getSession, allModelOptions,
-  companion, setCompanion, COMPANIONS, SLASH_LIST, windowFor,
+  SLASH_LIST, windowFor,
   sidebarVisible, setSidebarVisible, showToolDetails, setShowToolDetails,
-  showThinking, setShowThinking, persistUi, openPetsSync, setOpenPetsSync,
+  showThinking, setShowThinking, persistUi,
 } from "../store.ts";
 import { loadConfig, saveConfig, getBaseUrl, setBaseUrl } from "../../config/settings.js";
 import { MCP_PRESETS, CONNECTOR_PRESETS } from "../mcp-presets.ts";
+const plugin = require("../../core/plugin-cmd.js");
 
 const ui = palette("loom");
+
+// Dialog nav labels from the resolved keybinds (shown in modal footers).
+function kbNav() {
+  return {
+    prev: kbs.label("dialog_select_prev").toUpperCase(),
+    next: kbs.label("dialog_select_next").toUpperCase(),
+    submit: kbs.label("dialog_select_submit").toUpperCase(),
+    cancel: kbs.label("modal_cancel").toUpperCase(),
+  };
+}
 
 function wheelStep(e: any, delta: number) {
   const dir = e?.scroll?.direction;
   return dir === "up" ? -delta : delta;
 }
 
-function ModalFrame(props: { title: string; subtitle?: string; children: any; footer?: string }) {
+export function ModalFrame(props: { title: string; subtitle?: string; children: any; footer?: string }) {
+  // Floating panel: centered over the terminal but NOT a full-screen takeover —
+  // no backdrop fill, so the chat and any running agent stay visible behind it
+  // ("same window, hovering"). Keys still belong to the modal while open.
   return (
     <box position="absolute" top={0} left={0} right={0} bottom={0}
-      alignItems="center" justifyContent="center" flexDirection="column" backgroundColor={ui.bg}>
+      alignItems="center" justifyContent="center" flexDirection="column">
       <box border borderStyle="rounded" borderColor={ui.primary} backgroundColor={ui.bgPanel}
         paddingX={3} paddingY={2} flexDirection="column" minWidth={52} maxWidth={72}>
-        <text fg={ui.primary} bold>{props.title}</text>
-        {props.subtitle ? <text fg={ui.fgMuted} dim marginTop={0}>{props.subtitle}</text> : null}
+        <text fg={ui.primary}>{props.title}</text>
+        {props.subtitle ? <text fg={ui.fgMuted} marginTop={0}>{props.subtitle}</text> : null}
         <box flexDirection="column" marginTop={1}>{props.children}</box>
-        {props.footer ? <text fg={ui.fgMuted} dim marginTop={1}>{props.footer}</text> : null}
+        {props.footer ? <text fg={ui.fgMuted} marginTop={1}>{props.footer}</text> : null}
       </box>
     </box>
   );
 }
 
 export function ProviderPicker() {
-  const opts = PROVIDER_ORDER.map(p => ({ label: PROVIDER_LABELS[p] || p, value: p }));
-  const [idx, setIdx] = createSignal(0);
-  let winStart = 0;
-  const win = () => { const s = windowFor(idx(), opts.length, 8, winStart); winStart = s; return { start: s, items: opts.slice(s, s + 8) }; };
-
-  useKeyboard(key => {
-    if (key.name === "escape") { closeModal(); return; }
-    if (key.name === "up") { setIdx(i => Math.max(0, i - 1)); return; }
-    if (key.name === "down") { setIdx(i => Math.min(opts.length - 1, i + 1)); return; }
-    if (key.name === "return") {
-      const p = opts[idx()]?.value; if (!p) return;
-      const sess = getSession();
-      const cfg = loadConfig();
-      const modelId = cfg.model?.[p] || (PROVIDERS[p]?.models?.[0]?.id);
-      if (modelId) sess.setModel(p, modelId);
-      else { cfg.provider = p; saveConfig(cfg); }
-      closeModal(); refreshProviderState();
-      showToast("Provider: " + (PROVIDER_LABELS[p] || p), "ok");
-      setTimeout(() => openKeyModal(p), 100);
-    }
+  // opencode-scale provider list: make sure the models.dev registry is cached
+  // (fetched once, ~/.loom/models-dev.json). When a fetch lands mid-session
+  // the picker re-opens with the full provider list. When the cache is already
+  // fresh the picker must NOT re-open itself — that would loop forever and
+  // clobber every other modal.
+  onMount(() => {
+    const { ensureRegistry } = require("../../providers/index.js");
+    const hadCache = require("../../providers/registry.js").isRegistryFresh();
+    ensureRegistry().then((count) => {
+      if (modal()?.type !== "provider") return;
+      if (hadCache || !count) return;
+      closeModal();
+      setTimeout(() => openModal({ type: "provider" }), 50);
+    });
   });
 
-  const scrollBy = (e: any) => { setIdx(i => Math.max(0, Math.min(opts.length - 1, i + wheelStep(e, 1)))); };
-  const clickRow = (i: number) => {
-    if (i !== idx()) return;
-    const p = opts[i]?.value; if (!p) return;
+  const opts = PROVIDER_ORDER.map(p => ({
+    label: PROVIDER_LABELS[p] || p,
+    value: p,
+    sub: PROVIDERS[p]?.models?.length ? String(PROVIDERS[p].models.length) + " models" : undefined,
+  }));
+  const pick = (val: any) => {
+    const p = String(val);
     const sess = getSession();
     const cfg = loadConfig();
     const modelId = cfg.model?.[p] || (PROVIDERS[p]?.models?.[0]?.id);
@@ -70,27 +82,13 @@ export function ProviderPicker() {
     showToast("Provider: " + (PROVIDER_LABELS[p] || p), "ok");
     setTimeout(() => openKeyModal(p), 100);
   };
-
   return (
-    <ModalFrame title="Connect Provider" footer="UP/DOWN navigate  |  Enter select  |  wheel scroll  |  Esc cancel">
-      <box onMouseScroll={scrollBy}>
-        {win().items.map((o, i) => {
-          const abs = win().start + i;
-          return (
-            <box
-              key={o.value} flexDirection="row" paddingY={0}
-              onMouseDown={() => setIdx(abs)}
-              onMouseUp={() => clickRow(abs)}
-            >
-              <text fg={abs === idx() ? ui.primary : ui.fgDim} bold={abs === idx()}>
-                {(abs === idx() ? " > " : "   ")}{o.label}
-                {(PROVIDERS[o.value]?.models?.length ? "  (" + PROVIDERS[o.value].models.length + " models)" : "")}
-              </text>
-            </box>
-          );
-        })}
-      </box>
-    </ModalFrame>
+    <SelectModal
+      title="Connect Provider"
+      options={opts}
+      searchable={true}
+      onPick={pick}
+    />
   );
 }
 
@@ -136,66 +134,6 @@ export function openBaseUrlEditor(provider: string) {
       showToast("Base URL: " + val.trim());
     },
   });
-}
-
-export function openCompanionPicker() {
-  openModal({ type: "companion" });
-}
-
-export function CompanionModal() {
-  const entries = Object.entries(COMPANIONS);
-  const [sel, setSel] = createSignal(0);
-  let winStart = 0;
-  const win = () => { const s = windowFor(sel(), entries.length, 6, winStart); winStart = s; return { start: s, items: entries.slice(s, s + 6) }; };
-
-    useKeyboard(key => {
-      if (key.name === "escape") { closeModal(); return; }
-      if (key.name === "up") { setSel(i => Math.max(0, i - 1)); return; }
-      if (key.name === "down") { setSel(i => Math.min(entries.length - 1, i + 1)); return; }
-      if (key.name === "return") {
-        const [petKey, c] = entries[sel()];
-        setCompanion(petKey as any);
-        persistUi();
-        showToast(c.name + " is now your companion!", "ok");
-        closeModal();
-      }
-    });
-
-  const scrollBy = (e: any) => { setSel(i => Math.max(0, Math.min(entries.length - 1, i + wheelStep(e, 1)))); };
-  const clickRow = (i: number) => {
-    if (i !== sel()) return;
-    const [petKey, c] = entries[i];
-    setCompanion(petKey as any);
-    persistUi();
-    showToast(c.name + " is now your companion!", "ok");
-    closeModal();
-  };
-
-  return (
-    <ModalFrame title="Companion" footer="UP/DOWN choose  |  Enter confirm  |  wheel scroll  |  Esc close">
-      <box onMouseScroll={scrollBy}>
-        {win().items.map(([key, c], i) => {
-          const abs = win().start + i;
-          return (
-            <box
-              key={key} flexDirection="row" paddingLeft={abs === sel() ? 0 : 1} marginBottom={1}
-              onMouseDown={() => setSel(abs)}
-              onMouseUp={() => clickRow(abs)}
-            >
-              <text fg={abs === sel() ? ui.primary : ui.fgMuted}>{abs === sel() ? " > " : "   "}</text>
-              <box flexDirection="column" marginRight={2}>
-                {c.icon.map((line, li) => <text key={li} fg={abs === sel() ? ui.primary : ui.fgMuted}>{line}</text>)}
-              </box>
-              <box flexDirection="column">
-                <text fg={abs === sel() ? ui.primary : ui.fg} bold={abs === sel()}>{c.name}</text>
-                <text fg={ui.fgMuted} dim>{c.description}</text>
-              </box>
-            </box>
-          );
-        })}
-      </box>
-    </ModalFrame>
-  );
 }
 
 export function SelectModal(props: {
@@ -248,25 +186,51 @@ export function SelectModal(props: {
     if (j < 0 || j >= list.length) return i;
     return j;
   };
+  // Page jumps step over a full window (12 rows), skipping section headers.
+  const pageJump = (i: number, dir: number) => {
+    const list = filtered();
+    if (!list.length) return i;
+    let j = i;
+    for (let n = 0; n < 12; n++) {
+      const next = stepSelectable(j, dir);
+      if (next === j) return j;
+      j = next;
+    }
+    return j;
+  };
+  const lastSelectable = () => {
+    const list = filtered();
+    for (let j = list.length - 1; j >= 0; j--) if (list[j] && !list[j].isHeader) return j;
+    return 0;
+  };
   // Start on the first real row (not a header).
   setIndex(firstSelectable());
 
+  const nav = kbNav();
+
   useKeyboard(key => {
-    if (key.name === "escape") { closeModal(); if (props.onCancel) props.onCancel(); return; }
-    if (key.name === "up") { setIndex(i => stepSelectable(i, -1)); firePreview(); return; }
-    if (key.name === "down") { setIndex(i => stepSelectable(i, 1)); firePreview(); return; }
-    if (key.name === "return") {
+    const ks = kbs.keyString(key);
+    if (kbs.is("modal_cancel", ks)) { closeModal(); if (props.onCancel) props.onCancel(); return; }
+    if (kbs.dialogIs("dialog_select_prev", ks)) { setIndex(i => stepSelectable(i, -1)); firePreview(); return; }
+    if (kbs.dialogIs("dialog_select_next", ks)) { setIndex(i => stepSelectable(i, 1)); firePreview(); return; }
+    if (kbs.dialogIs("dialog_select_page_up", ks)) { setIndex(i => pageJump(i, -1)); firePreview(); return; }
+    if (kbs.dialogIs("dialog_select_page_down", ks)) { setIndex(i => pageJump(i, 1)); firePreview(); return; }
+    if (kbs.dialogIs("dialog_select_home", ks)) { setIndex(firstSelectable()); firePreview(); return; }
+    if (kbs.dialogIs("dialog_select_end", ks)) { setIndex(lastSelectable()); firePreview(); return; }
+    if (kbs.dialogIs("dialog_select_submit", ks)) {
       const opt = filtered()[index()];
       if (!opt || opt.isHeader) return;
       props.onPick(opt.value, opt);
       return;
     }
     if (props.searchable) {
-      if (key.name === "backspace") { setQ(v => v.slice(0, -1)); setIndex(firstSelectable()); firePreview(); return; }
+      // Reset to 0, not firstSelectable(): setQ is batched, so firstSelectable()
+      // would read the STALE list and land past its end (dead arrows/blank row).
+      if (key.name === "backspace") { setQ(v => v.slice(0, -1)); setIndex(0); firePreview(); return; }
       const s = key.sequence;
       if (!key.ctrl && !key.meta && s && s.length <= 10 && s !== "\r" && s !== "\n") {
         setQ(v => v + s);
-        setIndex(firstSelectable());
+        setIndex(0);
         firePreview();
         return;
       }
@@ -306,19 +270,22 @@ export function SelectModal(props: {
   };
 
   return (
-    <ModalFrame title={props.title} subtitle={(props.searchable ? "search: " + (q() || "_") + rangeSub() : rangeSub())} footer={"UP/DOWN navigate  |  Enter select  |  wheel scroll  |  Esc cancel" + (props.searchable ? "  |  type to search" : "")}>
+    <ModalFrame title={props.title} subtitle={(props.searchable ? "search: " + (q() || "_") + rangeSub() : rangeSub())} footer={nav.prev + "/" + nav.next + " navigate  |  " + nav.submit + " select  |  wheel scroll  |  " + nav.cancel + " cancel" + (props.searchable ? "  |  type to search" : "")}>
       <box onMouseScroll={scrollBy}>
         {win().items.map((opt, i) => {
           const abs = win().start + i;
           if (opt.isHeader) return (
-            <text key={"h" + i} fg={ui.secondary} bold marginTop={i === 0 ? 0 : 1}>
+            <text fg={ui.secondary} marginTop={i === 0 ? 0 : 1}>
               {opt.header + ":"}
             </text>
           );
           const active = abs === index();
           return (
             <box
-              key={String(opt.value)} flexDirection="row" paddingLeft={2}
+ flexDirection="row" paddingLeft={2}
+              // Hover moves the selection (live theme preview via onPreview);
+              // a click on the hovered row still selects+submits.
+              onMouseOver={() => { if (abs !== index()) { setIndex(abs); firePreview(); } }}
               onMouseDown={() => setIndex(abs)}
               onMouseUp={() => clickRow(abs)}
             >
@@ -340,30 +307,54 @@ export function InputModal(props: {
   placeholder: string;
   onPick: (value: string) => void;
   isKey?: boolean;
+  value?: string;
+  caretStart?: number;
   onCancel?: () => void;
 }) {
-  const [val, setVal] = createSignal("");
+  const [val, setVal] = createSignal(props.value || "");
+  const [caret, setCaret] = createSignal(
+    typeof props.caretStart === "number" ? props.caretStart : (props.value || "").length
+  );
   const masked = () => props.isKey ? "x".repeat(Math.max(0, val().length)) : val();
+  // Caret insertion: shown = left part + block cursor + right part.
+  const shown = () => {
+    const d = masked();
+    const c = Math.min(caret(), d.length);
+    return d.slice(0, c) + "\u258c" + d.slice(c);
+  };
 
   useKeyboard(key => {
-    if (key.name === "escape") { closeModal(); if (props.onCancel) props.onCancel(); return; }
-    if (key.name === "return") { props.onPick(val()); return; }
-    if (key.name === "backspace") { setVal(v => v.slice(0, -1)); return; }
+    const ks = kbs.keyString(key);
+    if (kbs.is("modal_cancel", ks)) { closeModal(); if (props.onCancel) props.onCancel(); return; }
+    if (kbs.dialogIs("dialog_select_submit", ks)) { props.onPick(val()); return; }
+    if (key.name === "backspace") {
+      setVal(v => { const c = Math.min(caret(), v.length); return v.slice(0, Math.max(0, c - 1)) + v.slice(c); });
+      setCaret(c => Math.max(0, c - 1));
+      return;
+    }
+    if (key.name === "left") { setCaret(c => Math.max(0, c - 1)); return; }
+    if (key.name === "right") { setCaret(c => Math.min(val().length, c + 1)); return; }
+    if (key.name === "home") { setCaret(0); return; }
+    if (key.name === "end") { setCaret(val().length); return; }
     const s = key.sequence;
     if (!key.ctrl && !key.meta && s && s.length <= 10 && s !== "\r" && s !== "\n") {
-      setVal(v => v + s);
+      setVal(v => { const c = Math.min(caret(), v.length); return v.slice(0, c) + s + v.slice(c); });
+      setCaret(c => Math.min(val().length, c) + s.length);
     }
   });
 
   usePaste(event => {
     const txt = new TextDecoder().decode((event as any).bytes || "").replace(/[\r\n]+/g, "");
-    if (txt) setVal(v => v + txt);
+    if (txt) {
+      setVal(v => { const c = Math.min(caret(), v.length); return v.slice(0, c) + txt + v.slice(c); });
+      setCaret(c => Math.min(val().length, c) + txt.length);
+    }
   });
 
   return (
-    <ModalFrame title={props.title} subtitle={props.placeholder} footer="Enter confirm  |  Ctrl+V paste  |  Esc cancel">
+    <ModalFrame title={props.title} subtitle={props.placeholder} footer={kbNav().submit + " confirm  |  \u2190\u2192 move  |  Ctrl+V paste  |  " + kbNav().cancel + " cancel"}>
       <box border borderStyle="rounded" borderColor={ui.border} paddingX={1} marginTop={1}>
-        <text fg={ui.fg}>{masked() || " "}</text>
+        <text fg={ui.fg}>{shown()}</text>
       </box>
     </ModalFrame>
   );
@@ -371,19 +362,18 @@ export function InputModal(props: {
 
 export function SettingsModal() {
   useKeyboard(key => {
-    if (key.name === "escape") { closeModal(); }
+    const ks = kbs.keyString(key);
+    if (kbs.is("modal_cancel", ks)) { closeModal(); }
     if (key.name === "d" || key.name === "D") { setShowToolDetails(v => !v); persistUi(); }
     if (key.name === "t" || key.name === "T") { setShowThinking(v => !v); persistUi(); }
     if (key.name === "b" || key.name === "B") { setSidebarVisible(v => !v); persistUi(); }
-    if (key.name === "e" || key.name === "E") { setOpenPetsSync(v => !v); persistUi(); }
   });
 
   return (
-    <ModalFrame title="Settings" footer="d/t/b/e toggle  |  Esc close">
+    <ModalFrame title="Settings" footer={"d/t/b toggle  |  " + kbNav().cancel + " close"}>
       <text fg={ui.fg}>{"[d] Tool details:   " + (showToolDetails() ? "on" : "off") + "  show tool output"}</text>
       <text fg={ui.fg}>{"[t] Thinking:       " + (showThinking() ? "on" : "off") + "  show think time"}</text>
-      <text fg={ui.fg}>{"[b] Sidebar:        " + (sidebarVisible() ? "on" : "off") + "  companion + todos"}</text>
-      <text fg={ui.fg}>{"[e] OpenPets:       " + (openPetsSync() ? "on" : "off") + "  desktop pet sync"}</text>
+      <text fg={ui.fg}>{"[b] Sidebar:        " + (sidebarVisible() ? "on" : "off") + "  todos + files"}</text>
     </ModalFrame>
   );
 }
@@ -391,7 +381,9 @@ export function SettingsModal() {
 export function showHelpText() {
   const lines = ["Loom Code -- Slash Commands", ""];
   for (const c of SLASH_LIST) lines.push("  /" + c.cmd.padEnd(14) + "  " + c.desc + (c.args ? " (" + c.args + ")" : ""));
-  lines.push("", "esc=interrupt  ctrl+c=exit  ctrl+b=sidebar  ctrl+p=palette  ctrl+x=leader");
+  lines.push("", "  " + kbs.label("session_interrupt") + "=interrupt  " + kbs.label("app_exit") + "=exit  " + kbs.label("sidebar_toggle") + "=sidebar  " + kbs.label("command_list") + "=palette" +
+    (kbs.leaderKey() ? "  " + kbs.leaderKey() + "=leader" : ""));
+  lines.push("  Customize in ~/.loom/tui.json \u2014 edit that file directly, then relaunch.");
   appendMessage({ role: "system", content: lines.join("\n") });
 }
 
@@ -408,7 +400,7 @@ export function showProvidersText() {
 // ── Agents (OpenCode-style primaries + subagents) ──
 export function showAgentsText() {
   const { loadAgents } = require("../../core/agents.js");
-  const agents = loadAgents();
+  const agents = loadAgents() as Record<string, any>;
   const lines = ["AGENTS", ""];
   for (const a of Object.values(agents)) {
     const mode = a.mode === "primary" ? "primary" : "subagent";
@@ -438,13 +430,114 @@ function mcpFit(s: string, n = MCP_FIT) {
   return flat.length <= n ? flat : flat.slice(0, Math.max(1, n - 1)) + "\u2026";
 }
 
-// The preset add flow: pick a preset (or Custom), fill the single form below
-// (name / command / args / env — preset fields are pre-filled), then save.
+// Build a claude/opencode-style one-liner for a preset, with -e KEY=VALUE
+// entries (empty values = placeholders the user fills inline in the one-line
+// editor). $KEY args resolve at add time from the -e env.
+function presetAddLine(p: any, envValues?: Record<string, string>): string {
+  const parts: string[] = [];
+  for (const k of Object.keys(p.env || {})) parts.push("-e", k + "=" + (envValues ? (envValues[k] || "") : ""));
+  parts.push(p.id, "--");
+  if (p.command) parts.push(p.command, ...(p.args || []));
+  else parts.push("npx", "-y", p.package, ...(p.args || []));
+  return parts.join(" ");
+}
+
+// The add flow: pick a preset (or Custom). Presets that need secrets walk a
+// guided key-entry dialog (one masked field per prompt, pasted/typed, then the
+// one-liner is built automatically); everything else opens the one-line
+// editor in claude/opencode syntax — `[-e KEY=V] <name> [--] <command> [args...]`.
 function openPresetPicker(presets: any[], kind: "mcp" | "connector") {
   const addLabel = kind === "connector" ? "Add connector" : "Add MCP server";
   const backType = kind === "connector" ? "connectors" : "mcp";
 
-  closeModal();
+  // Build the server from collected env + optional args and land it; reopen
+  // the browser on success, toast the error otherwise.
+  const submitLine = (line: string, reopenOnError: boolean) => {
+    const msg = plugin.mcpAddLineCmd(line);
+    if (msg.startsWith("Added")) {
+      showToast(msg, "ok");
+      closeModal();
+      setTimeout(function() { openModal({ type: backType as any }); }, 10);
+    } else {
+      showToast(String(msg).slice(0, 80), "error");
+      if (reopenOnError) {
+        closeModal();
+        setTimeout(function() { openModal({ type: backType as any }); }, 10);
+      }
+    }
+  };
+
+  const guidedAdd = (preset: any) => {
+    const prompts: any[] = preset.prompts || [];
+    const env: Record<string, string> = {};
+    const askPrompt = (i: number) => {
+      if (i >= prompts.length) {
+        const oap = preset.optionalArgsPrompt;
+        if (!oap) { submitLine(presetAddLine(preset, env), true); return; }
+        // Optional extra arg (e.g. --project-ref): Enter alone skips it.
+        openModal({
+          type: "input",
+          title: addLabel + " \u00B7 " + preset.label,
+          placeholder: oap.label,
+          onCancel: function() { submitLine(presetAddLine(preset, env), true); },
+          onPick: function(v: string) {
+            const t = String(v || "").trim();
+            const line = presetAddLine(preset, env) + (t ? " " + (oap.flag ? oap.flag + " " : "") + t : "");
+            submitLine(line, true);
+          },
+        });
+        return;
+      }
+      const pr = prompts[i];
+      openModal({
+        type: "input",
+        title: addLabel + " \u00B7 " + preset.label + "  (" + (i + 1) + "/" + prompts.length + ")",
+        placeholder: pr.label,
+        isKey: pr.mask !== false,
+        onCancel: function() { closeModal(); setTimeout(function() { openModal({ type: backType as any }); }, 10); },
+        onPick: function(val: string) {
+          const t = String(val || "").trim();
+          if (!t) { showToast(pr.key + " is required", "error"); askPrompt(i); return; }
+          // A value with whitespace would break the generated `-e KEY=value`
+          // token in the one-liner — reject it and re-prompt (covers every
+          // credential prompt in the loop, including multi-credential presets).
+          if (/\s/.test(t)) { showToast(pr.key + " must not contain spaces", "error"); askPrompt(i); return; }
+          env[pr.key] = t;
+          askPrompt(i + 1);
+        },
+      });
+    };
+
+    closeModal();
+    if (!prompts.length) {
+      openLine(presetAddLine(preset));
+      return;
+    }
+    askPrompt(0);
+  };
+const openLine = function(line: string) {
+    openModal({
+      type: "input",
+      title: addLabel + "  \u00B7  one line",
+      placeholder: "e.g. -e KEY=V " + (kind === "connector" ? "railway" : "stm32") + " -- <command> <args>",
+      value: line,
+      // Caret starts right after the last "=" so a preset's first -e KEY=
+      // placeholder is one keystroke away; otherwise at the end.
+      caretStart: line ? line.lastIndexOf("=") + 1 : 0,
+      onCancel: function() { closeModal(); setTimeout(function() { openModal({ type: backType as any }); }, 10); },
+      onPick: function(line2: string) {
+        const msg = plugin.mcpAddLineCmd(line2);
+        if (msg.startsWith("Added")) {
+          showToast(msg, "ok");
+          closeModal();
+          setTimeout(function() { openModal({ type: backType as any }); }, 10);
+        } else {
+          showToast(String(msg).slice(0, 80), "error");
+          openLine(line2); // keep the text so the user can fix it
+        }
+      },
+    });
+  };
   const picker = presets.map(p => ({
     label: p.label,
     sub: p.prompts.length ? "needs a token" : "no key needed",
@@ -455,205 +548,13 @@ function openPresetPicker(presets: any[], kind: "mcp" | "connector") {
     searchable: false,
     options: picker,
     onPick: function(val: any) {
+      const preset = val === "__custom__" ? undefined : presets.find((p: any) => p.id === val);
+      if (!preset) { closeModal(); openLine(""); return; }
+      if ((preset.prompts || []).length) { guidedAdd(preset); return; }
       closeModal();
-      const backTo = function() { closeModal(); setTimeout(function() { openModal({ type: backType as any }); }, 10); };
-      openModal({
-        type: "addserver",
-        kind, backType,
-        presetId: val === "__custom__" ? undefined : String(val),
-        onCancel: backTo,
-        onSaved: backTo,
-      });
+      openLine(presetAddLine(preset));
     },
   });
-}
-
-// Mask env values but keep key names visible: "FIGMA_API_KEY=••••••" so the
-// user can verify which keys they've filled without secrets on screen.
-function maskPairs(v: string): string {
-  return v.split(/(\s+)/).map(part => {
-    if (!part.trim()) return part;
-    const eq = part.indexOf("=");
-    if (eq < 0) return part;
-    const k = part.slice(0, eq), val = part.slice(eq + 1);
-    return k + "=" + (val ? "•".repeat(Math.min(val.length, 16)) : "");
-  }).join("");
-}
-
-// Field-shaped input row — one line of the form in AddServerModal.
-function FormField(props: {
-  label: string; desc: string; active: boolean; value: string; placeholder: string;
-  onInput: (v: string) => void; showCursor?: boolean; isKey?: boolean;
-}) {
-  const caret = props.showCursor ? "▌" : "";
-  const display = props.isKey && props.value ? maskPairs(props.value) : props.value;
-  const shown = display + caret || (props.value ? caret : props.placeholder);
-  return (
-    <box flexDirection="row" paddingX={1} paddingY={0} alignItems="center"
-      border borderStyle="rounded"
-      borderColor={props.active ? ui.primary : ui.border}
-      backgroundColor={props.active ? ui.bgPanel : "transparent"}>
-      <text fg={props.active ? ui.primary : ui.fgMuted} bold={props.active}>{props.label.padEnd(9) + "  "}</text>
-      <text fg={props.active || props.value ? ui.fg : ui.fgMuted} dim={!props.active && !props.value}>
-        {shown}
-      </text>
-      <text fg={ui.fgMuted} dim marginLeft={2} flexGrow={1}>{props.desc}</text>
-    </box>
-  );
-}
-
-// Form for adding an MCP server or connector. One modal — fields stacked
-// vertically. Up/Down + Tab move between fields, Enter on last field saves
-// (or validates and toasts), Esc cancels back to the browser.
-export function AddServerModal(props: {
-  kind: "mcp" | "connector";
-  backType: string;
-  presetId?: string;
-  onSaved?: (name: string) => void;
-}) {
-  const kindIsConn = props.kind === "connector";
-  const title = kindIsConn ? "Add Connector" : "Add MCP server";
-  const toastOk = kindIsConn ? "Connector added" : "MCP added";
-  const preset = props.presetId
-    ? (props.kind === "connector" ? CONNECTOR_PRESETS : MCP_PRESETS).find(p => p.id === props.presetId)
-    : undefined;
-
-  const isWin = process.platform === "win32";
-
-  const [focusIdx, setFocusIdx] = createSignal(preset && preset.prompts.length ? 3 : 0);
-  const [fields, setFields] = createSignal<Record<string, string>>({
-    name: preset ? preset.id : "",
-    // Preset command: docker show as-is; npx shows the package in args so the
-    // user sees what runs. Tokens stay as $KEY — resolved from env on save.
-    command: preset ? (preset.command || "npx") : "",
-    // npx preload: "-y <package> <args>" via npxRun's shape, minus the wrapper.
-    args: preset
-      ? (preset.command
-          ? (preset.args || []).join(" ")
-          : (["-y", preset.package].concat(preset.args || [])).join(" "))
-      : "",
-    // Presets prefill "KEY=" as a header prompt.
-    env: preset ? preset.prompts.map(pr => pr.key + "=").join(" ") : "",
-  });
-
-  const fieldDef = [
-    { key: "name",    label: "Name",    desc: "short id — letters/digits/-/_ only", required: true,  isKey: false },
-    { key: "command", label: "Command", desc: "npx | docker | cmd | full path", required: true,  isKey: false },
-    { key: "args",    label: "Args",    desc: "space-separated — e.g. -y @upstash/context7-mcp", required: false, isKey: false },
-    { key: "env",     label: "Env vars", desc: "KEY=VALUE pairs, space/comma separated", required: false, isKey: true },
-  ];
-
-  function parseEnv(raw: string): Record<string, string> | null {
-    const out: Record<string, string> = {};
-    for (const p of raw.split(/[\s,]+/).filter(Boolean)) {
-      const eq = p.indexOf("=");
-      if (eq < 1) return null;
-      const k = p.slice(0, eq).trim().toUpperCase();
-      const v = p.slice(eq + 1).trim();
-      if (!/^[A-Z_][A-Z0-9_]*$/.test(k)) return null;
-      out[k] = v;
-    }
-    return out;
-  }
-
-  function validate(f: Record<string, string>): string | null {
-    if (!f.name.trim()) return "Name is required.";
-    if (!/^[A-Za-z0-9_-]+$/.test(f.name.trim())) return "Letters, digits, - and _ only.";
-    if (f.name.trim().includes("__")) return "No '__' in names (breaks tool naming).";
-    if (!f.command.trim()) return "Command is required.";
-    if (f.env.trim() && parseEnv(f.env) === null) return "Env vars: KEY=VALUE pairs — e.g. FIGMA_API_KEY=fgd_… or LINEAR_API_KEY=lin_…";
-    return null;
-  }
-
-  function save() {
-    const f = fields();
-    const err = validate(f);
-    if (err) { showToast(err, "error"); return; }
-    const { addServer } = require("../../mcp/mcp-manager.js");
-    let cmd = f.command.trim();
-    let args = f.args.trim() ? f.args.trim().split(/\s+/) : [];
-    const env = f.env.trim() ? parseEnv(f.env) : undefined;
-    // Resolve "$KEY" placeholders in args from the collected env — the value
-    // never lands on the command line.
-    if (env) {
-      const envMap: Record<string, string> = env;
-      args = args.map(a => {
-        if (typeof a === "string" && a.startsWith("$")) {
-          const key = a.slice(1);
-          return envMap[key] !== undefined ? envMap[key] : a;
-        }
-        return a;
-      });
-    }
-    if (isWin && cmd === "npx") { cmd = "cmd"; args = ["/c", "npx"].concat(args); }
-    const res = addServer(f.name.trim(), cmd, args, env ? { env } : undefined);
-    if (res && !res.error) {
-      showToast(toastOk + ": " + f.name.trim(), "ok");
-      closeModal();
-      if (props.onSaved) props.onSaved(f.name.trim());
-      setTimeout(function() { openModal({ type: props.backType as any }); }, 10);
-    } else {
-      showToast(String(res && res.error ? res.error : "Failed to add.").slice(0, 80), "error");
-    }
-  }
-
-  useKeyboard(key => {
-    const k = key.name;
-    if (k === "escape") { closeModal(); setTimeout(function() { openModal({ type: props.backType as any }); }, 10); return; }
-    if (k === "up") { setFocusIdx(i => Math.max(0, i - 1)); return; }
-    if (k === "down" || k === "tab") { setFocusIdx(i => Math.min(fieldDef.length - 1, i + 1)); return; }
-    if (k === "shift+tab") { setFocusIdx(i => Math.max(0, i - 1)); return; }
-    if (k === "return") {
-      if (focusIdx() < fieldDef.length - 1) setFocusIdx(i => i + 1);
-      else save();
-      return;
-    }
-    if (k === "backspace" || k === "delete") {
-      const fx = fields(); fx[fieldDef[focusIdx()].key] = fx[fieldDef[focusIdx()].key].slice(0, -1); setFields({ ...fx }); return;
-    }
-    const s = key.sequence;
-    if (!key.ctrl && !key.meta && s && s.length <= 10 && s !== "\r" && s !== "\n" && s !== "\t") {
-      const fx = fields(); fx[fieldDef[focusIdx()].key] += s; setFields({ ...fx });
-    }
-  });
-
-  // Paste: drop multi-word / multi-line into the focused field.
-  usePaste((ev: any) => {
-    const txt = new TextDecoder().decode(ev.bytes || "").trim();
-    if (!txt) return;
-    const fx = fields();
-    fx[fieldDef[focusIdx()].key] = (fx[fieldDef[focusIdx()].key] + " " + txt).trim();
-    setFields({ ...fx });
-  });
-
-  const f = fields();
-  const ready = !validate(f) ? "— all good, press Enter on the last field to save" : "";
-  const presetTitle = preset ? preset.label + (preset.prompts.length ? "  ·  fill env below" : "  ·  no keys needed") : "Custom";
-  return (
-    <ModalFrame
-      title={title + "  ·  " + presetTitle}
-      subtitle={"Fill the fields, then press Enter on Env vars to save."}
-      footer={"Up/Down/Tab move · Enter next/save · Esc cancel"}
-    >
-      <box flexDirection="column" marginTop={1}>
-        {fieldDef.map((fd, i) => (
-          <FormField
-            key={fd.key} label={fd.label} desc={fd.desc}
-            active={focusIdx() === i} value={f[fd.key]}
-            showCursor={focusIdx() === i} isKey={fd.isKey}
-            placeholder={fd.key === "env" && preset ? "KEY=VALUE  KEY=VALUE — Enter = save" : fd.desc}
-            onInput={(v: string) => { const fx = fields(); fx[fd.key] = v; setFields({ ...fx }); }}
-          />
-        ))}
-      </box>
-      <box paddingX={1} marginTop={1}>
-        <text fg={ready ? ui.success : ui.fgMuted} dim={!ready}>
-          {ready || "Name and Command required; Args and Env optional."}
-        </text>
-        <text fg={ui.fgMuted} dim>{"Stored in ~/.loom/mcp.json — secrets masked on screen."}</text>
-      </box>
-    </ModalFrame>
-  );
 }
 
 function ServerBrowser(props: { kind: "mcp" | "connector" }) {
@@ -667,11 +568,12 @@ function ServerBrowser(props: { kind: "mcp" | "connector" }) {
   const refresh = () => setServers(listServers());
 
   useKeyboard(key => {
-    if (key.name === "escape") { closeModal(); return; }
-    if (key.name === "up") { setSel(i => Math.max(0, i - 1)); return; }
-    if (key.name === "down") { setSel(i => Math.min(servers().length - 1, i + 1)); return; }
+    const ks = kbs.keyString(key);
+    if (kbs.is("modal_cancel", ks)) { closeModal(); return; }
+    if (kbs.dialogIs("dialog_select_prev", ks)) { setSel(i => Math.max(0, i - 1)); return; }
+    if (kbs.dialogIs("dialog_select_next", ks)) { setSel(i => Math.min(servers().length - 1, i + 1)); return; }
     if (key.name === "a" || key.name === "A") { openPresetPicker(presets, kind); return; }
-    if (key.name === "return") {
+    if (kbs.dialogIs("dialog_select_submit", ks)) {
       const s = servers()[sel()];
       if (!s) return;
       const res = toggleServer(s.name);
@@ -693,22 +595,29 @@ function ServerBrowser(props: { kind: "mcp" | "connector" }) {
     const w = win();
     return w.total > 12 ? "  showing " + (w.start + 1) + "-" + Math.min(w.start + 12, w.total) + " of " + w.total : "";
   };
+  // Name column width = longest name + "  [on] "/"  [off] " prefix (7-8 chars),
+  // capped so the command column keeps ~28 chars. Without an explicit width the
+  // name text yoga-shrinks to zero width when the command is long.
+  const nameW = () => Math.min(30, Math.max(18, ...servers().map(s => String(s.name).length + 9)));
+  // Command column budget: modal inner ~64 chars minus name column minus the
+  // "→  " arrow — any longer and the text pixel-punches past the right border.
+  const cmdW = () => Math.max(24, 62 - nameW());
 
   return (
-    <ModalFrame title={title} subtitle={"Enter toggles a server on/off" + rangeSub()} footer={"Enter toggle  |  A add " + (kind === "connector" ? "connector" : "server") + "  |  wheel scroll  |  Esc close"}>
-      <box onMouseScroll={scrollBy}>
+    <ModalFrame title={title} subtitle={"Enter toggles a server on/off" + rangeSub()} footer={kbNav().submit + " toggle  |  A add " + (kind === "connector" ? "connector" : "server") + "  |  wheel scroll  |  " + kbNav().cancel + " close"}>
+      <box onMouseScroll={scrollBy} flexDirection="column" flexShrink={0}>
         {win().items.map((s, i) => {
           const abs = win().start + i;
           return (
             <box
-              key={s.name} flexDirection="row" paddingY={0}
+ flexDirection="row" paddingY={0} height={1} flexShrink={0}
               onMouseDown={() => setSel(abs)}
               onMouseUp={() => { if (abs === sel()) { const r = toggleServer(s.name); if (!r || !r.error) refresh(); } }}
             >
-              <text fg={abs === sel() ? ui.primary : ui.fgDim} bold={abs === sel()}>
+              <text fg={abs === sel() ? ui.primary : ui.fgDim} width={nameW()} height={1} flexShrink={0}>
                 {"  " + (s.enabled ? "[on] " : "[off] ") + s.name}
               </text>
-              <text fg={ui.fgMuted} dim>{"   \u2192  " + mcpFit(s.command + " " + (s.args || []).join(" "))}</text>
+              <text fg={ui.fgMuted} height={1} flexGrow={1}>{"\u2192  " + mcpFit(s.command + " " + (s.args || []).join(" "), cmdW())}</text>
             </box>
           );
         })}
@@ -738,11 +647,12 @@ export function PaletteModal(props: { onPick: (cmd: string) => void }) {
 
   useKeyboard(key => {
     const k = key.name;
-    if (k === "escape") { closeModal(); return; }
-    if (k === "backspace") { setQ(v => v.slice(0, -1)); setSel(0); return; }
-    if (k === "up") { setSel(i => Math.max(0, i - 1)); return; }
-    if (k === "down") { setSel(i => Math.min(filtered().length - 1, i + 1)); return; }
-    if (k === "return") {
+    const ks = kbs.keyString(key);
+    if (kbs.is("modal_cancel", ks)) { closeModal(); return; }
+    if (key.name === "backspace") { setQ(v => v.slice(0, -1)); setSel(0); return; }
+    if (kbs.dialogIs("dialog_select_prev", ks)) { setSel(i => Math.max(0, i - 1)); return; }
+    if (kbs.dialogIs("dialog_select_next", ks)) { setSel(i => Math.min(filtered().length - 1, i + 1)); return; }
+    if (kbs.dialogIs("dialog_select_submit", ks)) {
       const f = filtered();
       const i = sel();
       if (f.length > i) {
@@ -781,11 +691,11 @@ export function PaletteModal(props: { onPick: (cmd: string) => void }) {
           const abs = win().start + i;
           return (
             <box
-              key={it.value} flexDirection="row" paddingY={0}
+ flexDirection="row" paddingY={0}
               onMouseDown={() => setSel(abs)}
               onMouseUp={() => clickRow(abs)}
             >
-              <text fg={abs === sel() ? ui.primary : ui.fgDim} bold={abs === sel()}>
+              <text fg={abs === sel() ? ui.primary : ui.fgDim}>
                 {abs === sel() ? "> " : "   "}{it.label.split("/")[1] || it.label}
               </text>
             </box>
@@ -808,4 +718,134 @@ export function openCustomModelId() {
       showToast("Model: " + pv + " -> " + val.trim(), "ok");
     },
   });
+}
+
+/**
+ * Graph Modal — full-screen view of the memory graph.
+ * The graph data is built synchronously by openGraphModal() (straight from
+ * LOOM.md + .loom/graph/nodes/*.md) and passed in as props — no async
+ * loading inside the modal. Renders the ## / ### hierarchy as an ASCII
+ * tree; select a node (↑/↓) and peek at its body (Enter). ESC closes.
+ * NOTE: glyphs are ASCII-only (|, +-, >) — Windows legacy consoles
+ * (CP437) can't render box-drawing or Unicode arrows.
+ */
+export function GraphModal(props: { graph: any; err: string | null }) {
+  const [sel, setSel] = createSignal(0);
+  const [open, setOpen] = createSignal<number | null>(null);
+
+  // Flatten the node graph into tree-walk order: top-level nodes (no
+  // 'child' parent) followed by their ### children, recursively.
+  const buildFlat = (g: any): any[] => {
+    const nodes = g.nodes || [];
+    const edges = g.edges || [];
+    const byId = new Map<string, any>();
+    for (const n of nodes) byId.set(n.id, n);
+    const childMap = new Map<string, string[]>();
+    const hasParent = new Set<string>();
+    for (const e of edges) {
+      if (e.type !== 'child') continue;
+      if (!childMap.has(e.source)) childMap.set(e.source, []);
+      childMap.get(e.source)!.push(e.target);
+      hasParent.add(e.target);
+    }
+    const flat: any[] = [];
+    const seen = new Set<string>();
+    const walk = (id: string, depth: number) => {
+      if (seen.has(id)) return;
+      seen.add(id);
+      const n = byId.get(id);
+      if (!n) return;
+      flat.push({ node: n, depth });
+      for (const k of childMap.get(id) || []) walk(k, depth + 1);
+    };
+    for (const n of nodes) if (!hasParent.has(n.id)) walk(n.id, 0);
+    for (const n of nodes) if (!seen.has(n.id)) walk(n.id, 0); // orphans
+    return flat;
+  };
+
+  // Build the view; tracks the line of the selected node for viewport follow.
+  let selLine = 0;
+  const content = () => {
+    if (props.err) return 'Error: ' + props.err;
+    const g = props.graph;
+    if (!g) return 'No memory graph found - is there a LOOM.md?';
+    const nodes = g.nodes || [];
+    const edges = g.edges || [];
+    const refs = edges.filter((e: any) => e.type !== 'child');
+    const flat = buildFlat(g);
+    const lines: string[] = [];
+    lines.push('LOOM Memory Graph - ' + nodes.length + ' nodes | ' + edges.length + ' links (from LOOM.md)');
+    lines.push('');
+    let idx = 0;
+    for (const { node, depth } of flat) {
+      const cur = idx === sel();
+      if (cur) selLine = lines.length;
+      const marker = cur ? '>' : ' ';
+      const indent = depth === 0 ? '  ' : '    ' + '  '.repeat(depth - 1) + '+- ';
+      const tag = node.tags && node.tags.length ? '  #' + node.tags.join(' #') : '';
+      lines.push(marker + indent + node.title + tag);
+      if (cur && open() === idx && node.body) {
+        const bl = String(node.body).split('\n').slice(0, 4);
+        for (const l of bl) lines.push('      ' + l);
+      }
+      idx++;
+    }
+    if (refs.length) {
+      lines.push('');
+      lines.push('  Links:');
+      for (const e of refs) lines.push('    ' + e.source + ' -> ' + e.target);
+    }
+    lines.push('');
+    lines.push('  up/down select | Enter toggle body | PgUp/PgDn | ESC close');
+    return lines.join('\n');
+  };
+
+  const count = () => {
+    const g = props.graph;
+    return g && g.nodes ? g.nodes.length : 1;
+  };
+  useKeyboard(key => {
+    const ks = kbs.keyString(key);
+    if (kbs.is("modal_cancel", ks)) { closeModal(); return; }
+    if (kbs.dialogIs("dialog_select_prev", ks)) { setSel(s => Math.max(0, s - 1)); return; }
+    if (kbs.dialogIs("dialog_select_next", ks)) { setSel(s => Math.min(count() - 1, s + 1)); return; }
+    if (kbs.dialogIs("dialog_select_submit", ks)) { setOpen(o => (o === sel() ? null : sel())); return; }
+    if (kbs.dialogIs("dialog_select_page_up", ks)) { setSel(s => Math.max(0, s - 10)); return; }
+    if (kbs.dialogIs("dialog_select_page_down", ks)) { setSel(s => Math.min(count() - 1, s + 10)); return; }
+    if (kbs.dialogIs("dialog_select_home", ks)) { setSel(0); return; }
+    if (kbs.dialogIs("dialog_select_end", ks)) { setSel(count() - 1); return; }
+  });
+
+  // Reactive chain: content() reads sel()/open() and stamps selLine while
+  // computing, so navigation must recompute the view inside accessors (a
+  // one-time const would freeze the tree at creation). lines() is evaluated
+  // before selLine is read so the stamped value is fresh.
+  const lines = () => content().split('\n');
+  const visible = 34;
+  const start = () => Math.max(0, Math.min(lines().length - visible, selLine - 2));
+  const view = () => lines().slice(start(), start() + visible).join('\n');
+
+  return (
+    <ModalFrame title="Memory Graph" subtitle={"up/down select | Enter details | ESC close"} footer={""}>
+      <box flexDirection="column" paddingX={2} paddingY={1}>
+        <text fg={ui.fg}>{view()}</text>
+      </box>
+    </ModalFrame>
+  );
+}
+
+/**
+ * Opens the graph modal. Builds the graph synchronously from LOOM.md so the
+ * modal renders immediately (no async load, no file picking).
+ */
+export function openGraphModal() {
+  let graph: any = null;
+  let err: string | null = null;
+  try {
+    const { buildGraph } = require("../../core/graph.js");
+    graph = buildGraph(process.cwd());
+  } catch (e) {
+    err = String((e as any)?.message || e);
+  }
+  openModal({ type: "graph", graph, graphError: err });
 }

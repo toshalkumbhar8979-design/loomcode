@@ -20,7 +20,7 @@ const MODES = ['build', 'plan', 'chat'];
 // Tools that never mutate the filesystem/state — safe to expose in plan mode.
 // task delegates to a read-only-or-not subagent, so from the CALLER's side it
 // is safe in plan mode (the subagent's own tool list gates what it may do).
-const READ_ONLY_TOOLS = ['read', 'glob', 'grep', 'webfetch', 'todowrite', 'task'];
+const READ_ONLY_TOOLS = ['read', 'glob', 'grep', 'webfetch', 'websearch', 'todowrite', 'task'];
 
 // Optional path sandbox: when config.sandbox.paths is set, filesystem tools
 // only operate inside those roots (defense in depth on top of permissions).
@@ -78,7 +78,9 @@ const TOOLS = {
       const dir = path.dirname(dest);
       if (!fsSync.existsSync(dir)) fsSync.mkdirSync(dir, { recursive: true });
       await fs.writeFile(dest, params.content, 'utf8');
-      return `File written: ${dest}`;
+      let extra = '';
+      try { extra = await require('../core/format').formatAfterWrite(dest); } catch {}
+      return `File written: ${dest}${extra}`;
     }
   },
   edit: {
@@ -101,14 +103,16 @@ const TOOLS = {
       if (params.replaceAll) {
         content = content.split(params.oldString).join(params.newString);
       } else {
-        content = content.replace(params.oldString, params.newString);
+        content = content.replace(params.oldString, params.newString.replace(/\$/g, '$$$$'));
       }
       if (params.dryRun) {
         const changed = params.replaceAll ? `replaced ${count} occurrences` : 'replaced 1 occurrence';
         return `Dry run — would edit ${filePath}: ${changed} (file not modified).\n${content.slice(0, 4000)}`;
       }
       await fs.writeFile(filePath, content, 'utf8');
-      return `Edited ${filePath}: ${params.replaceAll ? `replaced ${count} occurrences` : 'replaced 1 occurrence'}`;
+      let extra = '';
+      try { extra = await require('../core/format').formatAfterWrite(filePath); } catch {}
+      return `Edited ${filePath}: ${params.replaceAll ? `replaced ${count} occurrences` : 'replaced 1 occurrence'}${extra}`;
     }
   },
   bash: {
@@ -117,8 +121,19 @@ const TOOLS = {
     parameters: {
       command: { type: 'string', required: true, description: 'The command to execute' },
       workdir: { type: 'string', required: false, description: 'Working directory' },
+      background: { type: 'boolean', required: false, description: 'Run without waiting (dev servers, long builds). Returns a task id immediately; check with the /tasks panel.' },
     },
-    async execute(params) {
+    async execute(params, ctx) {
+      // Background mode: fire-and-forget via the task registry.
+      if (params.background) {
+        const bt = require('../core/background-tasks');
+        if (!pathAllowed(params.workdir || cwd)) return { error: sandboxDenied('bash', params.workdir || cwd) };
+        const risk = params._approved ? null : commandRiskLabel(params.command);
+        if (risk) return { error: `Blocked by safety filter: ${risk}. Approve it via the permission prompt to run it anyway.` };
+        const res = /** @type {{id:string}|{error:string}} */ (bt.startBackgroundTask(params.command));
+        if ('error' in res) return { error: res.error };
+        return `Started background task ${res.id}. Keep working; check output with /tasks (or bash background:false re-run).`;
+      }
       return new Promise((resolve) => {
         const dir = params.workdir || cwd;
         if (!pathAllowed(dir)) { resolve({ error: sandboxDenied('bash', dir) }); return; }
@@ -129,7 +144,7 @@ const TOOLS = {
         }
         try {
           if (!params.command.trim()) { resolve('command completed (empty)'); return; }
-          const opts = { cwd: dir, timeout: 60000, maxBuffer: 10 * 1024 * 1024, windowsHide: true };
+          const opts = { cwd: dir, windowsHide: true };
           const isWin = process.platform === 'win32';
           const child = isWin
             ? spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', '[Console]::OutputEncoding=[Text.Encoding]::UTF8;' + params.command], opts)
@@ -143,13 +158,35 @@ const TOOLS = {
           child.on('close', () => clearTimeout(killTimer));
           let stdout = '';
           let stderr = '';
-          child.stdout.on('data', d => stdout += d.toString());
-          child.stderr.on('data', d => stderr += d.toString());
+          let truncated = false;
+          const MAX_OUT = 10 * 1024 * 1024;
+          // Live terminal output: every chunk is relayed to the UI (the TUI
+          // streams it in a collapsible block) while the command runs, and the
+          // final accumulated output still lands in the tool result. The
+          // accumulated copy is capped at 10 MB; the live stream keeps going.
+          const stream = ctx && typeof ctx.stream === 'function' ? ctx.stream : null;
+          child.stdout.on('data', d => {
+            const t = d.toString();
+            if (!truncated) {
+              if (stdout.length + t.length > MAX_OUT) { stdout = stdout.slice(0, MAX_OUT); truncated = true; }
+              else stdout += t;
+            }
+            if (stream) { try { stream(t, 'out'); } catch {} }
+          });
+          child.stderr.on('data', d => {
+            const t = d.toString();
+            if (!truncated) {
+              if (stderr.length + t.length > MAX_OUT) { stderr = stderr.slice(0, MAX_OUT); truncated = true; }
+              else stderr += t;
+            }
+            if (stream) { try { stream(t, 'err'); } catch {} }
+          });
           child.on('close', (code) => {
             let result = '';
             if (stdout) result += stdout;
             if (stderr) result += `\n[stderr]\n${stderr}`;
             if (code !== 0) result += `\n[exit code: ${code}]`;
+            if (truncated) result += '\n[output truncated at 10 MB]';
             resolve(result || 'command completed');
           });
           child.on('error', (err) => resolve({ error: `Error executing command: ${err.message}` }));
@@ -223,6 +260,53 @@ const TOOLS = {
       }
     }
   },
+  websearch: {
+    name: 'websearch',
+    description: 'Web search. Uses Brave (BRAVE_API_KEY) or Tavily (TAVILY_API_KEY) when configured, else the DuckDuckGo HTML endpoint (no key). Returns top results with titles, URLs and snippets.',
+    parameters: {
+      query: { type: 'string', required: true, description: 'Search query' },
+      count: { type: 'number', required: false, description: 'Max results 1-10 (default 6)' },
+    },
+    async execute(params) {
+      const q = String(params.query || '').trim();
+      if (!q) return { error: 'websearch needs a non-empty query.' };
+      const n = Math.max(1, Math.min(10, Number(params.count) || 6));
+      const decode = (s) => String(s || '').replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#x27;|&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim();
+      try {
+        // 1) Brave
+        if (process.env.BRAVE_API_KEY) {
+          const r = await fetch('https://api.search.brave.com/res/v1/web/search?q=' + encodeURIComponent(q) + '&count=' + n, { headers: { 'X-Subscription-Token': process.env.BRAVE_API_KEY, Accept: 'application/json' }, signal: AbortSignal.timeout(15000) });
+          const j = /** @type {{web?: {results?: any[]}}} */ (await r.json());
+          const rows = (j.web && j.web.results || []).slice(0, n).map((x, i) => `${i + 1}. ${decode(x.title)}\n   ${x.url}\n   ${decode(x.description).slice(0, 220)}`);
+          return rows.length ? rows.join('\n') : 'No results for "' + q + '".';
+        }
+        // 2) Tavily
+        if (process.env.TAVILY_API_KEY) {
+          const r = await fetch('https://api.tavily.com/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ api_key: process.env.TAVILY_API_KEY, query: q, max_results: n }), signal: AbortSignal.timeout(15000) });
+          const j = /** @type {{results?: any[]}} */ (await r.json());
+          const rows = (j.results || []).slice(0, n).map((x, i) => `${i + 1}. ${decode(x.title)}\n   ${x.url}\n   ${decode(x.content).slice(0, 220)}`);
+          return rows.length ? rows.join('\n') : 'No results for "' + q + '".';
+        }
+        // 3) DuckDuckGo HTML fallback (no key)
+        const resp = await fetch('https://html.duckduckgo.com/html/?q=' + encodeURIComponent(q), { signal: AbortSignal.timeout(15000), headers: { 'User-Agent': 'Mozilla/5.0' } });
+        const html = await resp.text();
+        const rows = [];
+        const re = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
+        let m;
+        while ((m = re.exec(html)) && rows.length < n) {
+          let url = m[1];
+          const u = url.match(/[?&]uddg=([^&]+)/);
+          if (u) url = decodeURIComponent(u[1]);
+          rows.push(`${rows.length + 1}. ${decode(m[2])}\n   ${url}`);
+        }
+        const snips = [...html.matchAll(/class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g)].map(x => decode(x[1]));
+        const out = rows.map((r2, i) => snips[i] ? r2 + '\n   ' + snips[i].slice(0, 220) : r2);
+        return out.length ? out.join('\n') : 'No results for "' + q + '" (DDG returned nothing — set BRAVE_API_KEY or TAVILY_API_KEY for reliable search).';
+      } catch (e) {
+        return { error: 'websearch failed: ' + e.message };
+      }
+    }
+  },
   todowrite: {
     name: 'todowrite',
     description: 'Create and maintain a structured task list for the current session. Tracks progress for multi-step work. Use when the task requires 3+ distinct steps or the user requests a todo list.',
@@ -244,6 +328,19 @@ const TOOLS = {
       lines.push('');
       lines.push(`Summary: ${statuses.completed} done, ${statuses.in_progress} in-progress, ${statuses.pending} pending, ${statuses.cancelled} cancelled`);
       return lines.join('\n');
+    }
+  },
+  ask: {
+    name: 'ask',
+    description: 'Ask the user a question when you genuinely need their input (missing info, a decision between approaches, or confirmation of intent). Provide up to 3 concise options when the answer is likely one of a few choices — the user can pick one OR type their own answer. Use sparingly: prefer deciding and acting yourself; never ask what you can determine from the codebase.',
+    parameters: {
+      question: { type: 'string', required: true, description: 'The question for the user, one or two sentences' },
+      options: { type: 'array', required: false, description: 'Up to 3 short answer options the user can click', items: { type: 'string' } },
+    },
+    async execute(params) {
+      // Handled entirely by the session's permission gate (the popup answer
+      // becomes the tool result); this executor is a safety fallback.
+      return String(params.question || '');
     }
   },
   task: {
@@ -333,6 +430,24 @@ const TOOLS = {
       }
       return { error: 'Unknown action "' + action + '". Use list, add, remove, enable, or disable.' };
     },
+  },
+  lsp: {
+    name: 'lsp',
+    description: 'Run a Language Server Protocol diagnostic check on a file and return any errors/warnings. Use this to get language-server feedback (syntax, types, lint) after writing or editing code. Configure which servers run via config.json "lsp": true.',
+    parameters: {
+      filePath: { type: 'string', required: true, description: 'Absolute path to the file to check' },
+    },
+    async execute(params) {
+      const lsp = require('../core/lsp');
+      const res = await lsp.checkFile(path.resolve(params.filePath));
+      if (!res.ok) return { error: res.error };
+      if (!res.diagnostics.length) return `LSP (${res.id}): no diagnostics for ${params.filePath}`;
+      const errors = res.diagnostics.filter((d) => d.severity === 'error');
+      const warnings = res.diagnostics.filter((d) => d.severity === 'warning');
+      const lines = res.diagnostics.map((d) =>
+        `${d.severity === 'error' ? 'E' : d.severity === 'warning' ? 'W' : 'I'} ${d.line + 1}:${d.character + 1} [${d.source || res.id}] ${d.message}`);
+      return `LSP (${res.id}) — ${errors.length} error(s), ${warnings.length} warning(s):\n` + lines.join('\n');
+    }
   },
 };
 
