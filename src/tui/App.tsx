@@ -2,6 +2,7 @@
 // useKeyboard handles ALL text input char-by-char.
 import { onMount, onCleanup, createMemo, Show } from "solid-js";
 import { useKeyboard, usePaste, useRenderer, useSelectionHandler } from "@opentui/solid";
+import { engine, createTimeline } from "@opentui/core";
 import path from "path";
 import fs from "fs";
 import os from "os";
@@ -1475,6 +1476,16 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
   let _skillToastOff: (() => void) | null = null;
   let _skillDoneOff: (() => void) | null = null;
   onMount(function() {
+    // Keep the renderer's frame pump alive indefinitely.
+    // Without a running timeline, the engine drops the live renderer
+    // after the first frame, freezing the UI (stdoutBytes flatlines).
+    const keepAlive = createTimeline({
+      duration: Infinity,
+      autoplay: true,
+      onUpdate: () => {},
+    });
+    onCleanup(() => { keepAlive.pause(); engine.unregister(keepAlive); });
+
     refreshProviderState();
     refreshUsage();
     wireTodoEvents();

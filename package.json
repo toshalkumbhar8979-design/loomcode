@@ -1,6 +1,6 @@
 {
   "name": "loom-agent",
-  "version": "1.2.10-rc",
+  "version": "1.2.10",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/toshalkumbhar8979-design/loomcode.git"
@@ -66,7 +66,8 @@
   "files": [
     "bunfig.toml",
     "tsconfig.json",
-    "bin/loom-bun.js","bin/loom.js",
+    "bin/loom-bun.js",
+    "bin/loom.js",
     "bin/loom-tui.js",
     "src/**/*.js",
     "src/**/*.tsx",
