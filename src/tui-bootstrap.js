@@ -14,6 +14,22 @@ if (process.env.LOOM_START_CWD) {
   try { process.chdir(process.env.LOOM_START_CWD); } catch {}
 }
 
+// Windows consoles default to a legacy codepage where the box-drawing /
+// block glyphs used across the TUI render as "?" garbage, and VT input
+// sequences (arrows, ctrl combos, bracketed paste) may never arrive. Switch
+// both console CPs to UTF-8 before anything renders or reads stdin.
+if (process.platform === "win32") {
+  try {
+    const { dlopen } = require("bun:ffi");
+    const k32 = dlopen("kernel32.dll", {
+      SetConsoleOutputCP: { args: ["uint"], returns: "int" },
+      SetConsoleCP: { args: ["uint"], returns: "int" },
+    });
+    k32.symbols.SetConsoleOutputCP(65001);
+    k32.symbols.SetConsoleCP(65001);
+  } catch {}
+}
+
 // Crash black-box: OpenTUI swallows post-render errors, leaving users stuck
 // on the splash with no clue why. Persist every uncaught failure to disk so
 // a frozen TUI can be diagnosed after the fact.

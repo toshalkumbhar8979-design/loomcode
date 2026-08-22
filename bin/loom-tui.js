@@ -32,6 +32,7 @@ const entry = path.join(__dirname, '..', 'src', 'tui-bootstrap.js');
 // is restored by the bootstrap shim before app code runs.
 const pkgRoot = path.join(__dirname, '..');
 process.env.LOOM_START_CWD = process.cwd();
+process.env.LOOM_BIN_NAME = "loom";
 const bun = findBun();
 
 if (bun) {

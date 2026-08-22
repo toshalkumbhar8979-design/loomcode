@@ -565,6 +565,7 @@ if (args.includes('--help') || args.includes('-h')) {
         // LOOM_START_CWD restores the user's project dir in tui-bootstrap.js.
         const pkgRoot = path.join(__dirname, '..', '..');
         process.env.LOOM_START_CWD = process.cwd();
+        process.env.LOOM_BIN_NAME = "loom";
         const tuiArgs = [tuiEntry];
         if (sessionId) tuiArgs.push('-s', sessionId);
         if (autoMode) tuiArgs.push('--auto');

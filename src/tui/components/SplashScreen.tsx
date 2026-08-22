@@ -7,9 +7,6 @@ export function SplashScreen() {
   const ui = palette("loom");
 
   return (
-    // Centered like opencode: the whole block (logo + status + chatbox)
-    // floats mid-screen and grows symmetrically around its center as the
-    // chatbox lines up.
     <box flexDirection="column" flexGrow={1} alignItems="center" justifyContent="center" backgroundColor={ui.bg}>
       <box flexGrow={1} />
 

@@ -7,6 +7,21 @@ import { defaultMcpInstall } from "./core/plugin-cmd.js";
 
 const args = process.argv.slice(2);
 
+// Windows: switch both console codepages to UTF-8 so the box-drawing logo
+// and VT input sequences work even when launched without the bootstrap
+// shim (bun run src/tui-open.tsx). No-op elsewhere / if FFI is unavailable.
+if (process.platform === "win32") {
+  try {
+    const { dlopen } = require("bun:ffi");
+    const k32 = dlopen("kernel32.dll", {
+      SetConsoleOutputCP: { args: ["uint"], returns: "int" },
+      SetConsoleCP: { args: ["uint"], returns: "int" },
+    });
+    k32.symbols.SetConsoleOutputCP(65001);
+    k32.symbols.SetConsoleCP(65001);
+  } catch {}
+}
+
 if (args.includes("--version") || args.includes("-v")) {
   console.log(`loom-code v${import.meta.require("../package.json").version}`);
   process.exit(0);

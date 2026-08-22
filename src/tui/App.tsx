@@ -87,7 +87,8 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
     setTimeout(function() {
       console.log("");
       console.log(LOOM_LOGO.join("\n"));
-      console.log("   resume: loomcode -s " + sessionId);
+      const binName = process.env.LOOM_BIN_NAME || "loom";
+      console.log("   resume: " + binName + " -s " + sessionId);
       console.log("");
       process.exit(code);
     }, 150);
