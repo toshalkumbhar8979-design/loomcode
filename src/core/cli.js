@@ -560,7 +560,11 @@ if (args.includes('--help') || args.includes('-h')) {
       const tuiEntry = path.join(__dirname, '..', 'tui-open.tsx');
       if (bunPath && fs.existsSync(tuiEntry)) {
         const { spawnSync } = require('child_process');
-        const tuiArgs = [tuiEntry];
+        // Global installs run from arbitrary cwds — point bun at our bunfig
+        // explicitly so the Solid JSX preloader loads (see bin/loom-tui.js).
+        const pkgBunfig = path.join(__dirname, '..', '..', 'bunfig.toml');
+        const tuiArgs = fs.existsSync(pkgBunfig) ? ['--config', pkgBunfig] : [];
+        tuiArgs.push(tuiEntry);
         if (sessionId) tuiArgs.push('-s', sessionId);
         if (autoMode) tuiArgs.push('--auto');
         const prompt = promptArgs.join(' ');

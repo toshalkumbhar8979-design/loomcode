@@ -27,10 +27,14 @@ function findBun() {
 }
 
 const entry = path.join(__dirname, '..', 'src', 'tui-open.tsx');
+// Global installs run from arbitrary cwds where bun cannot discover our
+// bunfig.toml (Solid JSX preloader) — pass it explicitly.
+const bunfig = path.join(__dirname, '..', 'bunfig.toml');
 const bun = findBun();
 
 if (bun) {
-  const result = spawnSync(bun, ['run', entry, ...process.argv.slice(2)], {
+  const args = fs.existsSync(bunfig) ? ['--config', bunfig] : [];
+  const result = spawnSync(bun, [...args, 'run', entry, ...process.argv.slice(2)], {
     stdio: 'inherit',
     cwd: process.cwd(),
     env: process.env,
