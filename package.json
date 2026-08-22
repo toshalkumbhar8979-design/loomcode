@@ -1,9 +1,14 @@
 {
   "name": "loom-agent",
-  "version": "1.2.0",
-  "repository": { "type": "git", "url": "git+https://github.com/toshalkumbhar8979-design/loomcode.git" },
+  "version": "1.2.1",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/toshalkumbhar8979-design/loomcode.git"
+  },
   "homepage": "https://github.com/toshalkumbhar8979-design/loomcode#readme",
-  "bugs": { "url": "https://github.com/toshalkumbhar8979-design/loomcode/issues" },
+  "bugs": {
+    "url": "https://github.com/toshalkumbhar8979-design/loomcode/issues"
+  },
   "description": "Loom Code â€” AI-powered coding agent for the terminal. Multi-provider support including NVIDIA. OpenTUI interface.",
   "main": "src/index.js",
   "bin": {
@@ -59,6 +64,8 @@
     "typescript": "^5.7.3"
   },
   "files": [
+    "bunfig.toml",
+    "tsconfig.json",
     "bin/loom.js",
     "bin/loom-tui.js",
     "src/**/*.js",
