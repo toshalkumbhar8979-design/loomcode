@@ -30,7 +30,11 @@ const sessionId = sIdx !== -1 ? args[sIdx + 1] : null;
 const autoMode = args.includes("--auto") || args.includes("-a");
 const initialPrompt = args.filter((a, i) => !a.startsWith("-") && (sIdx === -1 || i !== sIdx + 1)).join(" ");
 
-defaultMcpInstall();
+try {
+  defaultMcpInstall();
+} catch (e) {
+  globalThis.__loomTrace?.("mcp-install-failed", e);
+}
 
 if (printMode) {
   const { Session } = require("./core/session.js");
@@ -43,9 +47,11 @@ if (printMode) {
   process.exit(resp.type === "error" ? 1 : 0);
 }
 
+globalThis.__loomTrace?.("render-start");
 render(() => <App initialPrompt={initialPrompt} resumeSession={sessionId} autoMode={autoMode} />, {
   targetFps: 60,
   useMouse: true,
   autoFocus: true,
   exitOnCtrlC: false,
 });
+globalThis.__loomTrace?.("render-returned");

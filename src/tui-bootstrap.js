@@ -6,7 +6,35 @@
 // those files ship) and hand the real project directory through
 // LOOM_START_CWD. This file must stay import-free so the chdir happens
 // before any Loom module (which may read cwd at import time) executes.
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+
 if (process.env.LOOM_START_CWD) {
   try { process.chdir(process.env.LOOM_START_CWD); } catch {}
 }
+
+// Crash black-box: OpenTUI swallows post-render errors, leaving users stuck
+// on the splash with no clue why. Persist every uncaught failure to disk so
+// a frozen TUI can be diagnosed after the fact.
+const crashPath = () => path.join(os.homedir(), ".loom", "tui-crash.log");
+function record(kind, err) {
+  try {
+    fs.mkdirSync(path.dirname(crashPath()), { recursive: true });
+    fs.appendFileSync(
+      crashPath(),
+      `[${new Date().toISOString()}] ${kind}: ${(err && (err.stack || err.message)) || String(err)}\n`
+    );
+  } catch {}
+}
+process.on("uncaughtException", (e) => { record("uncaughtException", e); });
+process.on("unhandledRejection", (r) => { record("unhandledRejection", r); });
+
+record("boot", new Error(
+  `argv=${JSON.stringify(process.argv.slice(1))} cwd=${process.cwd()} ` +
+  `startCwd=${process.env.LOOM_START_CWD || "-"} bun=${process.version} ` +
+  `node=${process.versions.node || "-"} platform=${process.platform}`
+));
+if (process.env.LOOM_TUI_TRACE) globalThis.__loomTrace = record;
+
 await import("./tui-open.tsx");
