@@ -345,9 +345,8 @@ export function InputBar() {
         </box>
       </box>
 
-      <box paddingX={1} flexDirection="row" justifyContent="space-between">
-        <text fg={ui.fgMuted}>{statusLine().cwd}</text>
-        <text fg={ui.fgMuted}>{statusLine().right}</text>
+      <box paddingX={1} flexDirection="row">
+        <text fg={ui.fgMuted}>{statusLine().cwd + "  " + statusLine().right}</text>
       </box>
     </box>
   );

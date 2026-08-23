@@ -100,9 +100,12 @@ class Session {
     this.todos = [];
     this.compactCount = 0;
     this.lastCompact = null;
-    // Start MCP tool discovery in the background so the first turn doesn't
-    // stall on server startup (npx downloads, etc.).
-    try { require('../mcp/mcp-client').warm(); } catch {}
+    // Let the TUI render before starting MCP discovery. The first warm-up can
+    // launch npx and download packages, so starting it in the constructor can
+    // make startup appear frozen before the renderer gets its first frame.
+    setTimeout(() => {
+      try { require('../mcp/mcp-client').warm(); } catch {}
+    }, 0);
   }
 
   setMode(mode) {

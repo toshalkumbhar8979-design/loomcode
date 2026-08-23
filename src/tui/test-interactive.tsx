@@ -783,6 +783,7 @@ try {
   frame = await waitForFrame(f => f.includes("mock reasoning"), "second click to reopen the streaming body", 2500);
   const thinkingLabel = (f: string) => f.includes("Thinking") || f.includes(" Thought");
   await waitFor(() => thinking() === false, "live turn to settle");
+  await sleep(200); // allow collapse animation to complete
   frame = strip(setup.captureCharFrame());
   console.assert(frame.includes(" Thought"), "FAIL: after the turn the reasoning header should collapse to '+ Thought \u00B7 Ns'");
   console.assert(!frame.includes("mock reasoning"), "FAIL: the reasoning body should collapse once the turn is done");

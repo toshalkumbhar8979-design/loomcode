@@ -559,7 +559,8 @@ if (args.includes('--help') || args.includes('-h')) {
     const underBun = typeof Bun !== 'undefined' && !!process.versions.bun;
     if (underBun && canRaw) {
       try {
-        await import('../tui-open.tsx');
+        const tuiModule = '../tui-open.tsx';
+        await import(tuiModule);
         return;
       } catch (err) {
         console.error('[loom] TUI failed: ' + (err && err.message ? err.message : err));

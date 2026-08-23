@@ -4,6 +4,7 @@ import { palette } from "../theme.ts";
 import {
   showThinking, userExpandedIdx, setUserExpandedIdx, sidebarVisible,
   thoughtExpanded, setThoughtExpanded, thoughtClosed, setThoughtClosed,
+  thinking,
 } from "../store.ts";
 import { toolDisplay } from "../tool-display.ts";
 import { formatDiffCount } from "../../core/file-diffs.js";
@@ -321,9 +322,9 @@ function PartList(props: { m: any; idx: number }) {
       {parts().map((p: any, i: number) => {
         if (p.type === "reasoning") {
           if (!showThinking()) return null;
-          const live = !!m.thinking && i === lastReasonIdx();
-          const open = live ? !thoughtClosed().has(props.idx) : (thoughtExpanded().get(props.idx)?.has(i) ?? false);
-          blockPrev = open;
+          const live = () => !!m.thinking && thinking() && i === lastReasonIdx();
+          const open = () => live() ? !thoughtClosed().has(props.idx) : (thoughtExpanded().get(props.idx)?.has(i) ?? false);
+          blockPrev = open();
           return <ThoughtPart p={p} i={i} idx={props.idx} live={live} open={open} />;
         }
         if (p.type === "tool") {
@@ -370,9 +371,9 @@ function deriveParts(m: any): any[] {
 // below (click collapses it mid-turn); once the model moves on (a tool or text
 // part arrives, or the turn ends) it settles to a clickable "+ Thought · Ns"
 // line — opencode's minimal mode. Clicking toggles the body in either state.
-function ThoughtPart(props: { p: any; i: number; idx: number; live: boolean; open: boolean }) {
+function ThoughtPart(props: { p: any; i: number; idx: number; live: () => boolean; open: () => boolean }) {
   const toggle = () => {
-    if (props.live) {
+    if (props.live()) {
       const closed = new Set(thoughtClosed());
       if (closed.has(props.idx)) closed.delete(props.idx); else closed.add(props.idx);
       setThoughtClosed(closed);
@@ -392,9 +393,9 @@ function ThoughtPart(props: { p: any; i: number; idx: number; live: boolean; ope
         onMouseUp={() => toggle()}
         onKeyDown={(e: any) => { if (e.name === "return" || e.name === "space") toggle(); }}
       >
-        {props.live ? <ThinkingLabel /> : (props.open ? "- " : "+ ") + "Thought" + (ms() ? " \u00B7 " + ms() : "")}
+        {props.live() ? <ThinkingLabel /> : (props.open() ? "- " : "+ ") + "Thought" + (ms() ? " \u00B7 " + ms() : "")}
       </text>
-      <Show when={props.open}>
+      <Show when={props.open()}>
         <box paddingLeft={2}>
           <MdText md={String(props.p.text || "").slice(0, 20000)} />
         </box>

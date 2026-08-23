@@ -463,10 +463,10 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
       if (resp.interrupted) {
         // Keep the partial text in the bubble; the session already stored it,
         // so the user can type "continue" to resume the task.
-        patchMessageAt(idx, { thinking: false, interrupted: true, thinkTime: Date.now() - t0, isError: false });
+        patchMessageAt(idx, { thinking: false, interrupted: true, thinkTime: Date.now() - t0, isError: false, parts: snapshotParts() });
         appendMessage({ role: "system", content: "Interrupted \u2014 partial response kept. Type \"continue\" to resume the task." });
       } else {
-        patchMessageAt(idx, { content: resp.content || "(no response)", thinking: false, thinkTime: Date.now() - t0, isError: isErr });
+        patchMessageAt(idx, { content: resp.content || "(no response)", thinking: false, thinkTime: Date.now() - t0, isError: isErr, parts: snapshotParts() });
       }
       if (!isErr && sess.mode === "plan") {
         appendMessage({ role: "system", content: "Plan complete \u2014 press Tab to switch to Build, then send \"go\" to execute." });
@@ -476,15 +476,20 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
       ensureTextPart("Error: " + String(e?.message || e).slice(0, 500));
       flushStream();
       var err = e || {};
-      patchMessageAt(idx, { content: "Error: " + String(err.message || err).slice(0, 500), thinking: false, isError: true, thinkTime: Date.now() - t0 });
+      patchMessageAt(idx, { content: "Error: " + String(err.message || err).slice(0, 500), thinking: false, isError: true, thinkTime: Date.now() - t0, parts: snapshotParts() });
     }).finally(function() {
       clearInterval(speedTimer);
       if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
       if (offTodos) { offTodos(); offTodos = null; }
       // Freeze the subagent panel at its final state ("finished").
       if (subAcc.agent) patchMessageAt(idx, { subagent: { agent: subAcc.agent, text: subAcc.text, log: subAcc.log, status: subAcc.status, done: true } });
-      setThinking(false); setThinkStart(null); recomputeTodos(); refreshUsage();
-      flushQueueSoon();
+      // Let the settled assistant message render before the global turn state
+      // changes; otherwise the test renderer can sample the old frame after
+      // thinking() becomes false.
+      setTimeout(function() {
+        setThinking(false); setThinkStart(null); recomputeTodos(); refreshUsage();
+        flushQueueSoon();
+      }, 0);
     });
     } catch (e: any) {
       // A provider that throws synchronously (bad key, malformed config) must
@@ -495,8 +500,10 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
       clearInterval(speedTimer);
       if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
       if (offTodos) { offTodos(); offTodos = null; }
-      setThinking(false); setThinkStart(null); recomputeTodos(); refreshUsage();
-      flushQueueSoon();
+      setTimeout(function() {
+        setThinking(false); setThinkStart(null); recomputeTodos(); refreshUsage();
+        flushQueueSoon();
+      }, 0);
     }
   }
 
