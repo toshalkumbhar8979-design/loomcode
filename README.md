@@ -1,6 +1,6 @@
 # Loom Code
 
-[![npm version](https://img.shields.io/npm/v/loom-code?style=flat&color=blue)](https://www.npmjs.com/package/loom-agent)
+[![npm version](https://img.shields.io/npm/v/loom-agent?style=flat&color=blue)](https://www.npmjs.com/package/loom-agent)
 [![License: MIT](https://img.shields.io/npm/l/loom-code?style=flat&color=green)](LICENSE)
 [![Platform: Win/Mac/Linux](https://img.shields.io/badge/terminal-Win%20%7C%20Mac%20%7C%20Linux-orange)](#)
 
