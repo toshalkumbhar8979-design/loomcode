@@ -75,9 +75,11 @@ if (process.platform === "win32") {
   } catch {}
 }
 
-if (process.env.LOOM_START_CWD) {
-  try { process.chdir(process.env.LOOM_START_CWD); } catch {}
-}
+// NOTE: LOOM_START_CWD is deliberately NOT applied here. Changing the working
+// directory before the app's module graph loads breaks how Bun resolves the
+// Solid JSX transform (proven: identical entry paints 19KB from repo cwd,
+// 0 bytes from a foreign cwd). The restore happens in tui-open.tsx instead —
+// as a module-body statement, i.e. AFTER every import has finished loading.
 
 const crashPath = () => path.join(os.homedir(), ".loom", "tui-crash.log");
 const MAX_LOG_BYTES = 1024 * 1024; // 1 MB cap, then rotate to .old

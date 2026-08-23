@@ -8,6 +8,16 @@ import { defaultMcpInstall } from "./core/plugin-cmd.js";
 globalThis.__loomTrace?.("entry", new Error("module imports evaluated"));
 const args = process.argv.slice(2);
 
+// Restore the user's project directory as the very first module-body
+// statement — i.e. AFTER the entire import graph above has finished
+// evaluating under Bun's original working directory (where bunfig.toml /
+// tsconfig.json were discovered). Doing this any earlier breaks Solid's
+// JSX transform; doing it here means every lazy process.cwd() call in app
+// code still sees the project the user launched from.
+if (process.env.LOOM_START_CWD) {
+  try { process.chdir(process.env.LOOM_START_CWD); } catch {}
+}
+
 // Windows: switch both console codepages to UTF-8 so the box-drawing logo
 // and VT input sequences work even when launched without the bootstrap
 // shim (bun run src/tui-open.tsx). No-op elsewhere / if FFI is unavailable.
