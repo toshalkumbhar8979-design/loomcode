@@ -21,17 +21,11 @@ if (process.platform === "win32") {
   } catch {}
 }
 
-// Windows VT-mode re-enable. When the TUI is launched through the node
-// middleman (bin/loom-tui.js or src/core/cli.js -> spawnSync(bun, ...,
-// { stdio: 'inherit' })), the child bun process inherits the console handle
-// but its console MODE flags are reset to the cooked defaults: no
-// ENABLE_VIRTUAL_TERMINAL_PROCESSING on output and no
-// ENABLE_VIRTUAL_TERMINAL_INPUT on input. The first frame OpenTUI paints
-// (written before the reset takes effect) shows, but every subsequent
-// repaint relies on ANSI cursor/clear sequences that the console then
-// ignores -> frozen splash while keys still parse. Re-assert the VT flags
-// here, inside the bun process, so repaints and input both work.
-if (process.platform === "win32") {
+// Windows VT-mode re-enable — OPT-IN via LOOM_FORCE_VT=1.
+// Off by default: OpenTUI manages its own console modes, and forcing flags
+// underneath it can desync its input parsing. Only enable when debugging
+// console-mode issues on a specific terminal.
+if (process.platform === "win32" && process.env.LOOM_FORCE_VT === "1") {
   try {
     const { dlopen } = require("bun:ffi");
     const k32 = dlopen("kernel32.dll", {

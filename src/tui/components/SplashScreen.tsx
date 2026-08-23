@@ -1,4 +1,6 @@
 // Splash screen -- logo + embedded InputBar when no messages yet. Signal reads in JSX.
+import fs from "fs";
+import path from "path";
 import { palette, LOOM_LOGO } from "../theme.ts";
 import { providerName, modelName, providerKeyOk } from "../store.ts";
 import { InputBar } from "./InputBar.tsx";
@@ -7,9 +9,10 @@ import { InputBar } from "./InputBar.tsx";
 // never a hardcoded label that drifts out of sync with releases.
 const LOOM_VERSION = (() => {
   try {
-    return "v" + import.meta.require("../../package.json").version;
+    const pkg = fs.readFileSync(path.join(import.meta.dir, "..", "..", "package.json"), "utf8");
+    return "v" + pkg.match(/"version":\s*"([^"]+)"/)[1];
   } catch {
-    return "v1.1.0";
+    return "";
   }
 })();
 
