@@ -4,20 +4,23 @@
 const path = require("path");
 const { spawnSync } = require("child_process");
 
-// Node-shim path: bun is required for plugins/JSX, so hand off ONCE.
-// We deliberately do NOT respawn when already under bun — respawning hands
-// the console to a child and OpenTUI's terminal-capability handshake
-// (DA1/OSC/DECRQM queries) then gets echoed instead of consumed, leaving a
-// frozen splash. Instead we register the Solid JSX plugin programmatically
-// below, which is exactly what the bunfig preload would have done.
-if (!(typeof Bun !== "undefined" && process.versions.bun)) {
+// Bun discovers bunfig.toml ONLY from its starting cwd, and the Solid JSX
+// plugin ONLY works when loaded through that bunfig preload phase — runtime
+// registration from another cwd silently no-ops (proven). So unless bun is
+// ALREADY sitting in the package root, respawn it there once. The user's
+// real directory rides along in LOOM_START_CWD and is restored by
+// tui-open.tsx after its imports finish loading.
+const pkgRoot = path.join(__dirname, "..");
+const underBun = typeof Bun !== "undefined" && !!process.versions.bun;
+const inPkgRoot = path.resolve(process.cwd()) === path.resolve(pkgRoot);
+if (!underBun || !inPkgRoot) {
   const result = spawnSync(
     process.platform === "win32" ? "bun.exe" : "bun",
     [__filename, ...process.argv.slice(2)],
     {
       stdio: "inherit",
-      cwd: process.cwd(),
-      env: process.env,
+      cwd: pkgRoot,
+      env: { ...process.env, LOOM_START_CWD: process.env.LOOM_START_CWD || process.cwd() },
       windowsHide: false,
     }
   );
@@ -27,20 +30,6 @@ if (!(typeof Bun !== "undefined" && process.versions.bun)) {
   }
   process.exit(result.status == null ? 1 : result.status);
 }
-
-// Running under bun at the USER's cwd. bunfig.toml was therefore NOT loaded
-// (bun only discovers it from its starting cwd), so register its preload
-// chain manually, in the same order, before any app module loads:
-//   1. our crash black-box / console fixes
-//   2. @opentui/solid/preload — the Solid JSX transform plugin
-require(path.join(__dirname, "..", "src", "tui-preload.js"));
-require("@opentui/solid/preload");
-
-// Restore the user's project directory before app modules evaluate.
-if (process.env.LOOM_START_CWD) {
-  try { process.chdir(process.env.LOOM_START_CWD); } catch {}
-}
-
 process.title = "loom-code";
 (async () => {
   try {
