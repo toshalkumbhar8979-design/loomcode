@@ -4,21 +4,20 @@
 const path = require("path");
 const { spawnSync } = require("child_process");
 
-// Bun discovers bunfig.toml ONLY from its starting cwd. npm's cmd-shim runs
-// this file under bun directly with the USER's cwd, so unless we are already
-// sitting in the package root we must respawn from there — otherwise the
-// Solid JSX preload never loads and the TUI dies on react/jsx-dev-runtime.
-const pkgRoot = path.join(__dirname, "..");
-const underBun = typeof Bun !== "undefined" && !!process.versions.bun;
-const inPkgRoot = path.resolve(process.cwd()) === path.resolve(pkgRoot);
-if (!underBun || !inPkgRoot) {
+// Node-shim path: bun is required for plugins/JSX, so hand off ONCE.
+// We deliberately do NOT respawn when already under bun — respawning hands
+// the console to a child and OpenTUI's terminal-capability handshake
+// (DA1/OSC/DECRQM queries) then gets echoed instead of consumed, leaving a
+// frozen splash. Instead we register the Solid JSX plugin programmatically
+// below, which is exactly what the bunfig preload would have done.
+if (!(typeof Bun !== "undefined" && process.versions.bun)) {
   const result = spawnSync(
     process.platform === "win32" ? "bun.exe" : "bun",
     [__filename, ...process.argv.slice(2)],
     {
       stdio: "inherit",
-      cwd: pkgRoot,
-      env: { ...process.env, LOOM_START_CWD: process.env.LOOM_START_CWD || process.cwd() },
+      cwd: process.cwd(),
+      env: process.env,
       windowsHide: false,
     }
   );
@@ -28,6 +27,20 @@ if (!underBun || !inPkgRoot) {
   }
   process.exit(result.status == null ? 1 : result.status);
 }
+
+// Running under bun at the USER's cwd. bunfig.toml was therefore NOT loaded
+// (bun only discovers it from its starting cwd), so register its preload
+// chain manually, in the same order, before any app module loads:
+//   1. our crash black-box / console fixes
+//   2. @opentui/solid/preload — the Solid JSX transform plugin
+require(path.join(__dirname, "..", "src", "tui-preload.js"));
+require("@opentui/solid/preload");
+
+// Restore the user's project directory before app modules evaluate.
+if (process.env.LOOM_START_CWD) {
+  try { process.chdir(process.env.LOOM_START_CWD); } catch {}
+}
+
 process.title = "loom-code";
 (async () => {
   try {

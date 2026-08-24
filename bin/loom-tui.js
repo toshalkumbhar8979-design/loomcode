@@ -4,18 +4,17 @@
 const path = require("path");
 const { spawnSync } = require("child_process");
 
-// Bun discovers bunfig.toml ONLY from its starting cwd (see bin/loom-bun.js).
-const pkgRoot = path.join(__dirname, "..");
-const underBun = typeof Bun !== "undefined" && !!process.versions.bun;
-const inPkgRoot = path.resolve(process.cwd()) === path.resolve(pkgRoot);
-if (!underBun || !inPkgRoot) {
+// Node-shim path only — never respawn when already under bun (see
+// bin/loom-bun.js for why: the console handoff breaks OpenTUI's terminal
+// capability handshake and freezes the splash).
+if (!(typeof Bun !== "undefined" && process.versions.bun)) {
 	const result = spawnSync(
 		process.platform === "win32" ? "bun.exe" : "bun",
 		[__filename, ...process.argv.slice(2)],
 		{
 			stdio: "inherit",
-			cwd: pkgRoot,
-			env: { ...process.env, LOOM_START_CWD: process.env.LOOM_START_CWD || process.cwd() },
+			cwd: process.cwd(),
+			env: process.env,
 			windowsHide: false,
 		}
 	);
@@ -26,5 +25,13 @@ if (!underBun || !inPkgRoot) {
 	process.exit(result.status == null ? 1 : result.status);
 }
 
-require("../src/tui-preload.js");
+// Under bun at the user's cwd — bunfig.toml wasn't discovered, so register
+// the preload chain manually (same order as bunfig.toml).
+require(path.join(__dirname, "..", "src", "tui-preload.js"));
+require("@opentui/solid/preload");
+
+if (process.env.LOOM_START_CWD) {
+	try { process.chdir(process.env.LOOM_START_CWD); } catch {}
+}
+
 (async () => { await import("../src/tui-open.tsx"); })();
