@@ -582,7 +582,7 @@ if (args.includes('--help') || args.includes('-h')) {
         // --conditions=browser pins Solid to its client build (see
         // bin/loom-tui.js) — without it the SSR build loads and the TUI
         // renders one static frame then never updates.
-        const tuiArgs = [tuiEntry];
+        const tuiArgs = ["--conditions=browser", tuiEntry];
         if (sessionId) tuiArgs.push('-s', sessionId);
         if (autoMode) tuiArgs.push('--auto');
         const prompt = promptArgs.join(' ');

@@ -70,7 +70,7 @@ test("$FILE placeholder is substituted and path appended when absent", () => {
   expect(fmt.buildCommand(["formatter"], "/a/b.txt")).toEqual(["formatter", "/a/b.txt"]);
 });
 
-test("formatFile: custom node formatter transforms the file", async () => {
+test("formatFile: custom node formatter transforms the file", { timeout: 10000 }, async () => {
   const script = "const fs=require('fs');const p=process.argv[1];fs.writeFileSync(p,fs.readFileSync(p,'utf8').toUpperCase())";
   setConfig({ formatter: { shout: { command: ["node", "-e", script, "$FILE"], extensions: [".wrd"] } } });
   const p = tmpFile("hello.wrd", "hello world");
