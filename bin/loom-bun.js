@@ -14,7 +14,7 @@ const inPkgRoot = path.resolve(process.cwd()) === path.resolve(pkgRoot);
 if (!underBun || !inPkgRoot) {
   const result = spawnSync(
     process.platform === "win32" ? "bun.exe" : "bun",
-    ["--conditions=browser", __filename, ...process.argv.slice(2)],
+    [__filename, ...process.argv.slice(2)],
     {
       stdio: "inherit",
       cwd: pkgRoot,

@@ -579,10 +579,7 @@ if (args.includes('--help') || args.includes('-h')) {
         process.env.LOOM_START_CWD = process.cwd();
         process.env.LOOM_BIN_NAME = "loom";
         process.env.BUN_CONFIG = path.join(pkgRoot, "bunfig.toml");
-        // --conditions=browser pins Solid to its client build (see
-        // bin/loom-tui.js) — without it the SSR build loads and the TUI
-        // renders one static frame then never updates.
-        const tuiArgs = ["--conditions=browser", tuiEntry];
+        const tuiArgs = [tuiEntry];
         if (sessionId) tuiArgs.push('-s', sessionId);
         if (autoMode) tuiArgs.push('--auto');
         const prompt = promptArgs.join(' ');
