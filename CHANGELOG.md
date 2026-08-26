@@ -4,6 +4,18 @@ All notable changes to **Loom Code** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.36] — fix `loom web` / `loom acp` / `loom attach`
+
+### Fixed
+- **`loom web` launched the TUI instead of the browser server.** Since 1.2.34
+  the npm shims prefer `bin/loom-bun.js`, whose non-TUI branch routed every
+  subcommand into `src/core/cli.js`'s interactive `main()` — which has no
+  handler for `web`/`acp`/`attach`, so control fell through to the full-screen
+  app (reproduced: splash painted, no HTTP listener). `bin/loom-bun.js` now
+  routes those three subcommands directly to their own entry points, exactly
+  like `bin/loom.js` always did. Verified end-to-end on a global install:
+  `/api/health` → 200, UI served, banner prints.
+
 ## [1.2.35] — security hardening
 
 ### Fixed
