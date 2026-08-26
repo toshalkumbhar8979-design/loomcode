@@ -11,6 +11,8 @@
 [![License: MIT](https://img.shields.io/npm/l/loom-agent?style=flat&color=green)](LICENSE)
 [![Platform: Win/Mac/Linux](https://img.shields.io/badge/platform-Win--Mac--Linux-orange)](#)
 
+![Loom Code splash — connected to NVIDIA](docs/screenshot.png)
+
 An AI-powered coding agent for the terminal with multi-provider support and a full terminal UI.
 
 ## Features
