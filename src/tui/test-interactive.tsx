@@ -1108,6 +1108,41 @@ await sleep(150);
 console.assert(modal() === null, "FAIL: Esc should close the model picker");
 ok("model picker search");
 
+header("29b: model picker scroll keeps the modal stable (jitter regression)");
+// The modal frame is vertically centered, so any height change re-centers it.
+// The list used to render section headers with an extra margin row, so the
+// frame height flipped between 12/13/14 rows while scrolling a header-heavy
+// list (the model picker) and the whole modal visibly bounced. The window is
+// now a fixed 12 rows: the title row must NEVER move while scrolling.
+setup.mockInput.typeText("/models");
+await sleep(150);
+setup.mockInput.pressEnter();
+await sleep(300);
+console.assert(modal()?.type === "select", "FAIL: /models should open the select modal");
+const titleY = (f: string) => f.split("\n").findIndex(l => l.includes("Select Model"));
+const hint = (f: string) => (f.match(/showing \d+-\d+ of \d+/) || [""])[0];
+const fMod0 = await waitForFrame(f => titleY(f) > 0 && hint(f) !== "", "model picker open with range hint");
+const y0 = titleY(fMod0);
+const h0 = hint(fMod0);
+console.assert(y0 > 0, "FAIL: Select Model title not found");
+// Wheel until the visible window actually pages (windowFor keeps the
+// selection inside a 12-row window first, so the exact scroll count varies):
+// the frame must stay put the whole time while the window advances.
+let fMod1 = fMod0;
+for (let n = 0; n < 30 && hint(fMod1) === h0; n++) { await setup.mockMouse.scroll(50, 15, "down"); await sleep(45); }
+fMod1 = strip(setup.captureCharFrame());
+console.assert(hint(fMod1) !== h0, "FAIL: list window did not advance after 30 wheel scrolls");
+console.assert(titleY(fMod1) === y0, "FAIL: modal title moved while wheel-scrolling (height jitter): " + y0 + " -> " + titleY(fMod1));
+// Arrow-key navigation must be frame-stable too.
+for (let n = 0; n < 6; n++) { setup.mockInput.pressArrow("down"); await sleep(40); }
+await sleep(250);
+const fMod2 = strip(setup.captureCharFrame());
+console.assert(titleY(fMod2) === y0, "FAIL: modal title moved during arrow-key scroll: " + y0 + " -> " + titleY(fMod2));
+setup.mockInput.pressEscape();
+await sleep(150);
+console.assert(modal() === null, "FAIL: Esc should close the model picker after scrolling");
+ok("model picker scroll stability");
+
 header("30: model management â€” recents, quota detection, auto-switch");
 const mmTmp = path.join(process.cwd(), ".tmp-modelmgmt");
 fs_rmSync(mmTmp, { recursive: true, force: true });

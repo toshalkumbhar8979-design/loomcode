@@ -4,6 +4,31 @@ All notable changes to **Loom Code** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.33] — fix frozen splash on global installs + stable model picker
+
+### Fixed
+- **Global npm installs froze on the splash screen** ("Build … no key", no
+  keyboard input) while repo checkouts worked. Root cause: the launch chain
+  started Bun at the package root and later ran `process.chdir()` back to the
+  user's project inside `tui-open.tsx`. That mid-flight chdir killed OpenTUI's
+  repaint/input pipeline after the first frame — signals kept updating and
+  Solid effects kept firing (verified with runtime instrumentation), but no
+  frame ever reached the terminal again.
+- The launcher now registers the Solid JSX preloader with **absolute
+  `--preload` paths** and starts Bun **directly in the user's project
+  directory**, so no chdir ever happens: `bin/loom-bun.js`, `bin/loom-tui.js`,
+  the postinstall-rewritten shims, and the core-CLI TUI spawn
+  (`src/core/cli.js`) were all switched to that scheme.
+- **Model picker jitter** — scrolling `/models` (and every `SelectModal`:
+  `/connect`, theme pickers, MCP preset picker) bounced the whole modal.
+  Section headers added an extra margin row, so the centered frame's height
+  flipped between 12/13/14 rows on every page of a header-heavy list. The
+  list window is now a fixed 12 rows (headers are plain one-row entries), the
+  window is computed once per change instead of mutating during render, and
+  mouse-hover no longer yanks the selection while a keyboard/wheel scroll is
+  settling. Regression test added (29b: modal title row must never move while
+  scrolling).
+
 ## [Unreleased]
 
 ### Added

@@ -1,6 +1,6 @@
 {
   "name": "loom-agent",
-  "version": "1.2.19",
+  "version": "1.2.33",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/toshalkumbhar8979-design/loomcode.git"
@@ -9,7 +9,7 @@
   "bugs": {
     "url": "https://github.com/toshalkumbhar8979-design/loomcode/issues"
   },
-  "description": "Loom Code Ã¢â‚¬â€ AI-powered coding agent for the terminal. Multi-provider support including NVIDIA. OpenTUI interface.",
+  "description": "Loom Code ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â AI-powered coding agent for the terminal. Multi-provider support including NVIDIA. OpenTUI interface.",
   "main": "src/index.js",
   "publishConfig": {
     "access": "public",
@@ -30,12 +30,13 @@
     "tui": "bun bin/loom-tui.js",
     "tui:win": "\"%USERPROFILE%\\..\\bun\\bin\\bun.exe\" run src/tui-open.tsx",
     "prepublishOnly": "npm test",
+    "postinstall": "node scripts/postinstall.js",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.120.0",
-    "@opentui/core": "^0.5.1",
-    "@opentui/solid": "^0.5.1",
+    "@opentui/core": "0.5.3",
+    "@opentui/solid": "0.5.3",
     "@shikijs/themes": "4.4.3",
     "bonjour-service": "^1.4.4",
     "boxen": "^8.0.0",
@@ -57,11 +58,11 @@
     "wrap-ansi": "^9.0.0"
   },
   "optionalDependencies": {
-    "@opentui/core-darwin-arm64": "^0.5.1",
-    "@opentui/core-darwin-x64": "^0.5.1",
-    "@opentui/core-linux-arm64": "^0.5.1",
-    "@opentui/core-linux-x64": "^0.5.1",
-    "@opentui/core-win32-x64": "^0.5.1"
+    "@opentui/core-darwin-arm64": "0.5.3",
+    "@opentui/core-darwin-x64": "0.5.3",
+    "@opentui/core-linux-arm64": "0.5.3",
+    "@opentui/core-linux-x64": "0.5.3",
+    "@opentui/core-win32-x64": "0.5.3"
   },
   "overrides": {
     "glob": "^13.0.6"
@@ -90,6 +91,7 @@
     "LOOM.md",
     "docs/acp.md",
     "scripts/acp-smoke.js",
+    "scripts/postinstall.js",
     "docs/web.md",
     "src/web/index.html",
     "src/web/graph-view.html"
@@ -108,5 +110,11 @@
   "engines": {
     "node": ">=18.0.0",
     "bun": ">=1.0.0"
-  }
+  },
+  "directories": {
+    "doc": "docs"
+  },
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs"
 }

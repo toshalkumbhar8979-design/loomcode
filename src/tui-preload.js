@@ -21,54 +21,6 @@ if (process.platform === "win32") {
   } catch {}
 }
 
-// Windows VT-mode re-enable — OPT-IN via LOOM_FORCE_VT=1.
-// Off by default: OpenTUI manages its own console modes, and forcing flags
-// underneath it can desync its input parsing. Only enable when debugging
-// console-mode issues on a specific terminal.
-if (process.platform === "win32" && process.env.LOOM_FORCE_VT === "1") {
-  try {
-    const { dlopen } = require("bun:ffi");
-    const k32 = dlopen("kernel32.dll", {
-      GetStdHandle: { args: ["int"], returns: "ptr" },
-      GetConsoleMode: { args: ["ptr", "ptr"], returns: "int" },
-      SetConsoleMode: { args: ["ptr", "uint"], returns: "int" },
-    });
-    const STD_INPUT_HANDLE = -10;
-    const STD_OUTPUT_HANDLE = -11;
-
-    // Output: processed + wrap-at-EOL + VT processing (so ANSI repaints work).
-    const ENABLE_PROCESSED_OUTPUT = 0x0001;
-    const ENABLE_WRAP_AT_EOL_OUTPUT = 0x0002;
-    const ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004;
-    // Input: raw-ish mode for OpenTUI — VT input + processed + mouse + window,
-    // with line/echo/quick-edit cleared so keys stream and don't echo.
-    const ENABLE_PROCESSED_INPUT = 0x0001;
-    const ENABLE_MOUSE_INPUT = 0x0010;
-    const ENABLE_WINDOW_INPUT = 0x0008;
-    const ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200;
-    const ENABLE_QUICK_EDIT_MODE = 0x0040;
-    const ENABLE_LINE_INPUT = 0x0002;
-    const ENABLE_ECHO_INPUT = 0x0004;
-
-    const outH = k32.symbols.GetStdHandle(STD_OUTPUT_HANDLE);
-    const inH = k32.symbols.GetStdHandle(STD_INPUT_HANDLE);
-    const modeBuf = new Uint32Array(1);
-    const modePtr = Bun.ptr(modeBuf);
-
-    if (outH && !outH.isNull && k32.symbols.GetConsoleMode(outH, modePtr)) {
-      const cur = modeBuf[0];
-      const next = cur | ENABLE_PROCESSED_OUTPUT | ENABLE_WRAP_AT_EOL_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
-      if (next !== cur) k32.symbols.SetConsoleMode(outH, next);
-    }
-    if (inH && !inH.isNull && k32.symbols.GetConsoleMode(inH, modePtr)) {
-      const cur = modeBuf[0];
-      const next = (cur | ENABLE_PROCESSED_INPUT | ENABLE_MOUSE_INPUT | ENABLE_WINDOW_INPUT | ENABLE_VIRTUAL_TERMINAL_INPUT)
-        & ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_QUICK_EDIT_MODE);
-      if (next !== cur) k32.symbols.SetConsoleMode(inH, next);
-    }
-  } catch {}
-}
-
 // NOTE: LOOM_START_CWD is deliberately NOT applied here. Changing the working
 // directory before the app's module graph loads breaks how Bun resolves the
 // Solid JSX transform (proven: identical entry paints 19KB from repo cwd,
@@ -98,6 +50,61 @@ function record(kind, err) {
 globalThis.__loomTrace = record;
 process.on("uncaughtException", (e) => record("uncaughtException", e));
 process.on("unhandledRejection", (r) => record("unhandledRejection", r));
+
+// Global npm installs live INSIDE node_modules, and @opentui/solid's loader
+// filter deliberately skips every node_modules path — so for installs the
+// app's own TSX would fall through to Bun's default React JSX transform and
+// crash at startup ("Cannot find module 'react/jsx-dev-runtime'").
+//
+// This preload is THE single registration point for the TUI launch chain
+// (shims and respawns pass ONLY this file via --preload, with an absolute
+// path), so it registers both plugins itself:
+//   1. The Solid JSX plugin — via the bare "@opentui/solid/bun-plugin"
+//      specifier, which resolves by walking up from this file and therefore
+//      works whether the dependency is nested inside the package or hoisted
+//      to the install root. Idempotent (symbol-guarded upstream).
+//   2. A supplemental loader scoped to THIS package's src directory only —
+//      real dependencies are never touched. It is a no-op in repo checkouts,
+//      where the solid plugin (non-node_modules paths) already handles these
+//      files first.
+if (typeof Bun !== "undefined" && Bun.plugin) {
+  try {
+    require("@opentui/solid/bun-plugin").ensureSolidTransformPlugin();
+  } catch {}
+  if (!globalThis.__loomAppTsxPlugin) {
+    try {
+      globalThis.__loomAppTsxPlugin = true;
+      const pkgSrc = __dirname; // tui-preload.js lives in src/
+      const pkgRoot = path.join(pkgSrc, "..");
+      const esc = pkgSrc.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      // Layout-proof transform lookup: nested (npm i -g default observed)
+      // and hoisted (top-level install node_modules) candidates.
+      const candidates = [
+        path.join(pkgRoot, "node_modules", "@opentui", "solid", "scripts", "solid-transform.js"),
+        path.join(pkgRoot, "..", "..", "@opentui", "solid", "scripts", "solid-transform.js"),
+      ];
+      let transformSolidSource = null;
+      for (const c of candidates) {
+        try { transformSolidSource = require(c).transformSolidSource; break; } catch {}
+      }
+      if (transformSolidSource) {
+        Bun.plugin({
+          name: "loom-app-solid-tsx",
+          setup(build) {
+            build.onLoad({ filter: new RegExp("^" + esc + "[\\\\/].+\\.tsx$") }, async (args) => {
+              const code = await Bun.file(args.path).text();
+              const contents = await transformSolidSource(code, {
+                filename: args.path,
+                moduleName: "@opentui/solid",
+              });
+              return { contents, loader: "js" };
+            });
+          },
+        });
+      }
+    } catch {}
+  }
+}
 
 // stdout byte-counter: frames flowing = counter climbs. This splits the two
 // remaining frozen-splash suspects with certainty — if the counter climbs but

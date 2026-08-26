@@ -9,7 +9,12 @@ Thumbs.db
 .loom/tui.json
 .loom/sessions/
 dist/
-*.tsbuildinfo*.tgz
+*.tsbuildinfo
+*.tgz
+*.exe
+tu.txt
+.loom/graph/
+.vscode/
 fix1.txt
 tui-out*.txt
 cap.txt

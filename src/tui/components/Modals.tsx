@@ -1,5 +1,5 @@
 // Modals -- provider picker, model picker, key input, base URL, settings, palette.
-import { createSignal, onMount } from "solid-js";
+import { createSignal, createMemo, onMount } from "solid-js";
 import { useKeyboard, usePaste } from "@opentui/solid";
 import { palette } from "../theme.ts";
 import * as kbs from "../keybinds.ts";
@@ -206,17 +206,25 @@ export function SelectModal(props: {
   // Start on the first real row (not a header).
   setIndex(firstSelectable());
 
+  // Hover must not fight scrolling: any keyboard/wheel/search index change
+  // locks hover-selection briefly, so the list sliding under a stationary
+  // cursor cannot yank the selection back (this feedback loop read as
+  // "jitter" while scrolling the model picker).
+  let hoverLockUntil = 0;
+  const lockHover = () => { hoverLockUntil = Date.now() + 250; };
+  const setIndexByKey = (fn: (i: number) => number) => { setIndex(fn); lockHover(); };
+
   const nav = kbNav();
 
   useKeyboard(key => {
     const ks = kbs.keyString(key);
     if (kbs.is("modal_cancel", ks)) { closeModal(); if (props.onCancel) props.onCancel(); return; }
-    if (kbs.dialogIs("dialog_select_prev", ks)) { setIndex(i => stepSelectable(i, -1)); firePreview(); return; }
-    if (kbs.dialogIs("dialog_select_next", ks)) { setIndex(i => stepSelectable(i, 1)); firePreview(); return; }
-    if (kbs.dialogIs("dialog_select_page_up", ks)) { setIndex(i => pageJump(i, -1)); firePreview(); return; }
-    if (kbs.dialogIs("dialog_select_page_down", ks)) { setIndex(i => pageJump(i, 1)); firePreview(); return; }
-    if (kbs.dialogIs("dialog_select_home", ks)) { setIndex(firstSelectable()); firePreview(); return; }
-    if (kbs.dialogIs("dialog_select_end", ks)) { setIndex(lastSelectable()); firePreview(); return; }
+    if (kbs.dialogIs("dialog_select_prev", ks)) { setIndexByKey(i => stepSelectable(i, -1)); firePreview(); return; }
+    if (kbs.dialogIs("dialog_select_next", ks)) { setIndexByKey(i => stepSelectable(i, 1)); firePreview(); return; }
+    if (kbs.dialogIs("dialog_select_page_up", ks)) { setIndexByKey(i => pageJump(i, -1)); firePreview(); return; }
+    if (kbs.dialogIs("dialog_select_page_down", ks)) { setIndexByKey(i => pageJump(i, 1)); firePreview(); return; }
+    if (kbs.dialogIs("dialog_select_home", ks)) { setIndexByKey(firstSelectable); firePreview(); return; }
+    if (kbs.dialogIs("dialog_select_end", ks)) { setIndexByKey(lastSelectable); firePreview(); return; }
     if (kbs.dialogIs("dialog_select_submit", ks)) {
       const opt = filtered()[index()];
       if (!opt || opt.isHeader) return;
@@ -226,11 +234,11 @@ export function SelectModal(props: {
     if (props.searchable) {
       // Reset to 0, not firstSelectable(): setQ is batched, so firstSelectable()
       // would read the STALE list and land past its end (dead arrows/blank row).
-      if (key.name === "backspace") { setQ(v => v.slice(0, -1)); setIndex(0); firePreview(); return; }
+      if (key.name === "backspace") { setQ(v => v.slice(0, -1)); setIndexByKey(() => 0); firePreview(); return; }
       const s = key.sequence;
       if (!key.ctrl && !key.meta && s && s.length <= 10 && s !== "\r" && s !== "\n") {
         setQ(v => v + s);
-        setIndex(0);
+        setIndexByKey(() => 0);
         firePreview();
         return;
       }
@@ -246,7 +254,7 @@ export function SelectModal(props: {
       if (j === i) break;
       i = j;
     }
-    setIndex(i);
+    setIndexByKey(() => i);
   };
   const clickRow = (i: number) => {
     if (i !== index()) {
@@ -257,12 +265,14 @@ export function SelectModal(props: {
     if (o?.isHeader) return;
     props.onPick(o?.value, o);
   };
-  let winStart = 0;
-  const win = () => {
+  // Window of 12 rows, computed ONCE per reactive change (the old version
+  // mutated `winStart` from inside the JSX — called three times per render).
+  let lastStart = 0;
+  const win = createMemo(() => {
     const total = filtered().length;
-    winStart = windowFor(index(), total, 12, winStart);
-    return { total, start: winStart, items: filtered().slice(winStart, winStart + 12) };
-  };
+    lastStart = windowFor(index(), total, 12, lastStart);
+    return { total, start: lastStart, items: filtered().slice(lastStart, lastStart + 12) };
+  });
   const rangeSub = () => {
     const w = win();
     if (w.total <= 12) return "";
@@ -271,21 +281,27 @@ export function SelectModal(props: {
 
   return (
     <ModalFrame title={props.title} subtitle={(props.searchable ? "search: " + (q() || "_") + rangeSub() : rangeSub())} footer={nav.prev + "/" + nav.next + " navigate  |  " + nav.submit + " select  |  wheel scroll  |  " + nav.cancel + " cancel" + (props.searchable ? "  |  type to search" : "")}>
-      <box onMouseScroll={scrollBy}>
+      {/* Fixed height: the modal frame must not resize while scrolling.
+          Headers used to add an extra margin row, so the centered modal
+          bounced between 12/13/14 rows on every page of a header-heavy list
+          (the model picker) — the "jitter". Every item is now exactly one
+          row and the window is always 12 rows tall. */}
+      <box onMouseScroll={scrollBy} height={12} flexShrink={0}>
         {win().items.map((opt, i) => {
           const abs = win().start + i;
           if (opt.isHeader) return (
-            <text fg={ui.secondary} marginTop={i === 0 ? 0 : 1}>
+            <text fg={ui.secondary}>
               {opt.header + ":"}
             </text>
           );
           const active = abs === index();
           return (
             <box
- flexDirection="row" paddingLeft={2}
-              // Hover moves the selection (live theme preview via onPreview);
-              // a click on the hovered row still selects+submits.
-              onMouseOver={() => { if (abs !== index()) { setIndex(abs); firePreview(); } }}
+              flexDirection="row" paddingLeft={2}
+              // Hover moves the selection (live theme preview via onPreview) —
+              // but only for genuine pointer movement, never while a
+              // keyboard/wheel scroll is settling (see hoverLockUntil).
+              onMouseOver={() => { if (Date.now() >= hoverLockUntil && abs !== index()) { setIndex(abs); firePreview(); } }}
               onMouseDown={() => setIndex(abs)}
               onMouseUp={() => clickRow(abs)}
             >

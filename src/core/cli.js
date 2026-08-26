@@ -18,14 +18,8 @@ const LOOM_BASE = `
  ╚══════╝ ╚═════╝  ╚═════╝ ╚═╝     ╚═╝      ╚═════╝╚═════╝ ╚═════╝ ╚══════╝`;
 
 class LoomCLI {
-  /** @type {import('readline').Interface} */
-  rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    prompt: '\x1b[36m> \x1b[0m',
-    completer: (line) => this.completer(line),
-    terminal: true,
-  });
+  /** @type {import('readline').Interface | null} */
+  rl = null;
   /** @type {import('./session').Session} */
   session = new Session();
   constructor() {
@@ -36,8 +30,15 @@ class LoomCLI {
   }
 
   async start() {
+    this.rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      prompt: '\x1b[36m> \x1b[0m',
+      completer: (line) => this.completer(line),
+      terminal: true,
+    });
     console.log(LOOM_BASE);
-    console.log(`\n  Loom Code v1.0.0 — AI Coding Agent for the terminal`);
+    console.log(`\n  Loom Code v1.2.28 — AI Coding Agent for the terminal`);
     console.log(`  Press Ctrl+C or ESC to interrupt | /help for commands\n`);
 
     process.stdin.on('keypress', (str, key) => {
@@ -56,7 +57,8 @@ class LoomCLI {
     if (this.initialPrompt) {
       const prompt = this.initialPrompt;
       this.initialPrompt = null;
-      setImmediate(() => this.rl.emit('line', prompt));
+      const rl = this.rl;
+      setImmediate(() => rl?.emit('line', prompt));
     }
     return this.runLoop();
   }
@@ -72,7 +74,8 @@ class LoomCLI {
   }
 
   async runLoop() {
-    return new Promise((resolve) => {
+    return new Promise((resolve /** @type {() => void} */) => {
+      if (!this.rl) return resolve(undefined);
       this.rl.on('line', async (line) => {
         try {
           const trimmed = line.trim();
@@ -572,19 +575,22 @@ if (args.includes('--help') || args.includes('-h')) {
       const tuiEntry = path.join(__dirname, '..', 'tui-open.tsx');
       if (bunPath && fs.existsSync(tuiEntry)) {
         const { spawnSync } = require('child_process');
-        // Start bun from the package root so it discovers bunfig.toml /
-        // tsconfig.json (Solid JSX preloader) even for global installs;
-        // LOOM_START_CWD restores the user's project dir in tui-bootstrap.js.
+        // The Solid JSX preloader is registered inside src/tui-preload.js
+        // (passed as an ABSOLUTE --preload path), so bun starts directly in
+        // the user's project directory. The old "start at the package root,
+        // chdir to the project inside tui-open" dance froze the TUI after
+        // the first frame (no repaints, no keyboard input) — see
+        // bin/loom-bun.js.
         const pkgRoot = path.join(__dirname, '..', '..');
+        const tuiPreload = path.join(pkgRoot, 'src', 'tui-preload.js');
         process.env.LOOM_START_CWD = process.cwd();
         process.env.LOOM_BIN_NAME = "loom";
-        process.env.BUN_CONFIG = path.join(pkgRoot, "bunfig.toml");
-        const tuiArgs = [tuiEntry];
+        const tuiArgs = ['--preload', tuiPreload, tuiEntry];
         if (sessionId) tuiArgs.push('-s', sessionId);
         if (autoMode) tuiArgs.push('--auto');
         const prompt = promptArgs.join(' ');
         if (prompt) tuiArgs.push(...prompt.split(/\s+/));
-        process.exit(spawnSync(bunPath, tuiArgs, { stdio: 'inherit', cwd: pkgRoot, env: process.env }).status ?? 0);
+        process.exit(spawnSync(bunPath, tuiArgs, { stdio: 'inherit', cwd: process.cwd(), env: process.env }).status ?? 0);
       }
       console.error('[loom] bun not found — full TUI requires bun (https://bun.sh/). Falling back to line-mode REPL.');
       console.error('[loom] Use --basic to skip this warning.\n');

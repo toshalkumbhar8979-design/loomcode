@@ -4,27 +4,35 @@
 const path = require("path");
 const { spawnSync } = require("child_process");
 
-// Respawn from the package root so bunfig.toml's preload chain (Solid JSX
-// transform) loads natively — see bin/loom-bun.js.
+// Preloads are ABSOLUTE paths so Bun starts directly in the user's project
+// directory — see bin/loom-bun.js for why the package-root + chdir dance is
+// gone (it froze the TUI after the first frame).
 const pkgRoot = path.join(__dirname, "..");
 const underBun = typeof Bun !== "undefined" && !!process.versions.bun;
-const inPkgRoot = path.resolve(process.cwd()) === path.resolve(pkgRoot);
-if (!underBun || !inPkgRoot) {
-	const result = spawnSync(
-		process.platform === "win32" ? "bun.exe" : "bun",
-		[__filename, ...process.argv.slice(2)],
-		{
-			stdio: "inherit",
-			cwd: pkgRoot,
-			env: { ...process.env, LOOM_START_CWD: process.env.LOOM_START_CWD || process.cwd() },
-			windowsHide: false,
-		}
-	);
-	if (result.error) {
-		console.error("[loom] Bun is required for the TUI. Install it from https://bun.sh/");
-		process.exit(1);
-	}
-	process.exit(result.status == null ? 1 : result.status);
+if (!underBun) {
+  const result = spawnSync(
+    process.platform === "win32" ? "bun.exe" : "bun",
+    [
+      "--preload", path.join(pkgRoot, "src", "tui-preload.js"),
+      __filename,
+      ...process.argv.slice(2),
+    ],
+    {
+      stdio: "inherit",
+      cwd: process.env.LOOM_START_CWD || process.cwd(),
+      env: { ...process.env, LOOM_START_CWD: process.env.LOOM_START_CWD || process.cwd() },
+      windowsHide: false,
+    }
+  );
+  if (result.error) {
+    console.error("[loom] Bun is required for the TUI. Install it from https://bun.sh/");
+    process.exit(1);
+  }
+  process.exit(result.status == null ? 1 : result.status);
 }
 
-(async () => { await import("../src/tui-open.tsx"); })();
+(async () => {
+  await import("../src/tui-preload.js");
+  await import("@opentui/solid/preload");
+  await import("../src/tui-open.tsx");
+})();

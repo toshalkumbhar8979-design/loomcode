@@ -2,24 +2,31 @@
 // npm invokes bin targets through Node on Windows, so re-launch under Bun
 // when this file was not started by Bun itself.
 const path = require("path");
+const fs = require("fs");
 const { spawnSync } = require("child_process");
 
-// Bun discovers bunfig.toml ONLY from its starting cwd, and the Solid JSX
-// plugin ONLY works when loaded through that bunfig preload phase — runtime
-// registration from another cwd silently no-ops (proven). So unless bun is
-// ALREADY sitting in the package root, respawn it there once. The user's
-// real directory rides along in LOOM_START_CWD and is restored by
-// tui-open.tsx after its imports finish loading.
+// The Solid JSX transform must register in Bun's preload phase, so the
+// preloads are passed as ABSOLUTE paths. That lets Bun start directly in the
+// user's project directory — the old "spawn at the package root, then chdir
+// to the project inside tui-open.tsx" dance froze the TUI after the first
+// frame (splash paints once, then no repaints and no keyboard input; proven
+// by A/B-launching the identical entry with and without the mid-flight
+// process.chdir). No chdir ever happens now: LOOM_START_CWD always equals
+// the starting directory, so the restore in tui-open.tsx is a no-op kept
+// only as a safety net.
 const pkgRoot = path.join(__dirname, "..");
 const underBun = typeof Bun !== "undefined" && !!process.versions.bun;
-const inPkgRoot = path.resolve(process.cwd()) === path.resolve(pkgRoot);
-if (!underBun || !inPkgRoot) {
+if (!underBun) {
   const result = spawnSync(
     process.platform === "win32" ? "bun.exe" : "bun",
-    [__filename, ...process.argv.slice(2)],
+    [
+      "--preload", path.join(pkgRoot, "src", "tui-preload.js"),
+      __filename,
+      ...process.argv.slice(2),
+    ],
     {
       stdio: "inherit",
-      cwd: pkgRoot,
+      cwd: process.env.LOOM_START_CWD || process.cwd(),
       env: { ...process.env, LOOM_START_CWD: process.env.LOOM_START_CWD || process.cwd() },
       windowsHide: false,
     }
@@ -33,6 +40,25 @@ if (!underBun || !inPkgRoot) {
 process.title = "loom-code";
 (async () => {
   try {
+    // The npm bin entry bypasses src/index.js, so load dotenv here for both
+    // the package environment and the project from which `loom` was run.
+    const dotenv = require("dotenv");
+    dotenv.config({ path: path.join(__dirname, "..", ".env") });
+    const startCwd = process.env.LOOM_START_CWD || process.cwd();
+    const projectEnv = path.join(startCwd, ".env");
+    if (fs.existsSync(projectEnv)) dotenv.config({ path: projectEnv, override: false });
+    // The npm global shim can start Bun outside the package directory, so do
+    // not depend on bunfig.toml discovery for Windows console setup.
+    await import("../src/tui-preload.js");
+    const args = process.argv.slice(2);
+    const coreMode = args.includes("--basic") || args.includes("-p") || args.includes("--print")
+      || args.includes("--help") || args.includes("-h") || args.includes("--version") || args.includes("-v")
+      || ["acp", "web", "attach", "graph"].includes(args[0]);
+    if (!coreMode) {
+      await import("@opentui/solid/preload");
+      await import("../src/tui-open.tsx");
+      return;
+    }
     const { main } = require("../src/core/cli.js");
     await main();
   } catch (err) {
