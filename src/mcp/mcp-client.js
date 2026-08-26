@@ -1,4 +1,34 @@
 const { spawn } = require('child_process');
+// Minimal OS/runtime baseline handed to every spawned MCP server (see note in
+// connectToJson). Explicit cfg.env keys are layered on top per server.
+const MCP_ENV_KEYS = [
+  'PATH', 'PATHEXT', 'COMSPEC', 'SystemRoot', 'windir', 'SystemDrive',
+  'TEMP', 'TMP', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA',
+  'PROGRAMFILES', 'PROGRAMDATA', 'ALLUSERSPROFILE', 'COMMONPROGRAMFILES',
+  'PROCESSOR_ARCHITECTURE', 'NUMBER_OF_PROCESSORS', 'OS',
+  'COMPUTERNAME', 'USERNAME', 'LANG', 'TZ', 'TERM', 'SHELL',
+  'XDG_CONFIG_HOME', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY',
+];
+/** @returns {Record<string,string>} filtered copy of process.env */
+function buildMcpBaseEnv() {
+  const out = /** @type {Record<string,string>} */ ({});
+  for (const k of MCP_ENV_KEYS) {
+    const v = process.env[k];
+    if (v !== undefined) out[k] = v;
+  }
+  return out;
+}
+const MCP_BASE_ENV = buildMcpBaseEnv();
+
+/**
+ * Compose the environment for one MCP server process: the filtered baseline
+ * plus whatever that server's config explicitly declares (cfg.env wins).
+ * @param {{env?: Record<string,string|undefined>|null}} cfg
+ * @returns {Record<string,string>}
+ */
+function mcpSpawnEnv(cfg) {
+  return Object.assign({}, MCP_BASE_ENV, cfg.env || {});
+}
 const { loadServers } = require('./mcp-manager');
 
 let toolCachePromise = null;
@@ -22,9 +52,19 @@ function killTree(child) {
 
 function connectToJson(cfg, timeoutMs) {
   return new Promise((resolve, reject) => {
+    // MCP servers are third-party processes. Inheriting the parent's FULL
+    // environment would hand every provider API key / cloud token / cookie in
+    // the user's shell to whatever npm package a config spawns. Instead pass a
+    // minimal OS/runtime baseline plus only what cfg.env explicitly declares —
+    // per-server secrets belong in the server's own env config, not leaked by
+    // inheritance. (network proxies forwarded; they carry routing, not auth.)
+    // Per-server environment via allowlist + explicit cfg.env only — see
+    // buildMcpBaseEnv/mcpSpawnEnv above; inheriting all of process.env would
+    // leak provider keys to every third-party server.
+    const env = mcpSpawnEnv(cfg);
     const child = spawn(cfg.command, cfg.args || [], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: Object.assign({}, process.env, cfg.env || {}),
+      env,
       // No console window for stdio MCP servers: on Windows spawn() would
       // otherwise pop a flashing console up and down while chats happen.
       windowsHide: true,
@@ -198,4 +238,4 @@ function getCachedTools() {
   return warm();
 }
 
-module.exports = { getTools, getCachedTools, clearCache, buildToolName, callTool, warm, callRpc, killTree };
+module.exports = { getTools, getCachedTools, clearCache, buildToolName, callTool, warm, callRpc, killTree, buildMcpBaseEnv, mcpSpawnEnv };

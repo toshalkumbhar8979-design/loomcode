@@ -1,6 +1,6 @@
 {
   "name": "loom-agent",
-  "version": "1.2.34",
+  "version": "1.2.35",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/toshalkumbhar8979-design/loomcode.git"
@@ -24,7 +24,7 @@
     "dev": "node --watch src/index.js",
     "setup": "node src/setup.js",
     "test": "bun run src/tui/test-interactive.tsx && bun run test:unit && bun run lint:core",
-    "test:unit": "bun test src/core/agents.test.js src/core/hooks.test.js src/core/custom-commands.test.js src/core/background-tasks.test.js src/core/memory.test.js src/core/subagent-log.test.js src/core/session.test.js src/tools/index.test.js src/providers/providers.test.js src/providers/caching.test.js src/providers/caching-thinking.test.js src/providers/registry.test.js src/mcp/mcp-client.test.js src/mcp/mcp-manager.test.js src/core/session-store.test.js src/skills/skills-manager.test.js src/core/usage.test.js src/core/permissions.test.js src/core/format.test.js src/acp/acp-server.test.js src/web/web-server.test.js src/tui/keybinds.test.ts",
+    "test:unit": "bun test src/core/agents.test.js src/core/hooks.test.js src/core/custom-commands.test.js src/core/background-tasks.test.js src/core/memory.test.js src/core/subagent-log.test.js src/core/session.test.js src/tools/index.test.js src/tools/security.test.js src/providers/providers.test.js src/providers/caching.test.js src/providers/caching-thinking.test.js src/providers/registry.test.js src/mcp/mcp-client.test.js src/mcp/mcp-manager.test.js src/core/session-store.test.js src/skills/skills-manager.test.js src/core/usage.test.js src/core/permissions.test.js src/core/format.test.js src/acp/acp-server.test.js src/web/web-server.test.js src/tui/keybinds.test.ts",
     "lint:core": "node node_modules/typescript/bin/tsc -p tsconfig.core.json",
     "smoke:acp": "node scripts/acp-smoke.js",
     "tui": "bun bin/loom-tui.js",

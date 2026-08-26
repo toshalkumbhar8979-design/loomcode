@@ -111,22 +111,47 @@ function readBody(req, limit = 1_048_576) {
 
 function sendJson(res, status, obj) {
   const body = JSON.stringify(obj);
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
+  res.writeHead(status, Object.assign(securityHeaders(), {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body),
+  }));
   res.end(body);
 }
 
 function sendText(res, status, text, extra) {
-  const headers = Object.assign({ 'Content-Type': 'text/plain; charset=utf-8', 'Content-Length': Buffer.byteLength(text) }, extra || {});
+  const headers = Object.assign(securityHeaders(), {
+    'Content-Type': 'text/plain; charset=utf-8',
+    'Content-Length': Buffer.byteLength(text),
+  }, extra || {});
   res.writeHead(status, headers);
   res.end(text);
+}
+
+// Baseline hardening on every response: stops MIME sniffing, clickjacking
+// and referrer leakage. The API is JSON-only and index.html is a single
+// self-contained page (one inline script, no external assets), so this
+// cannot break the UI.
+const SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'no-referrer',
+};
+const HTML_SECURITY_HEADERS = Object.assign({}, SECURITY_HEADERS, {
+  'Content-Security-Policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'",
+});
+/** @returns {Record<string,string>} fresh copy so callers can extend safely */
+function securityHeaders() {
+  return Object.assign({}, SECURITY_HEADERS);
 }
 
 // ── The web server ──────────────────────────────────────────────────────
 
 function createWebServer(opts) {
-  const tokens = new Map(); // token -> true (in-memory auth, server-lifetime)
+  const tokens = new Map(); // token -> issued-at ms (auth is server-lifetime, per-token TTL)
   const password = process.env.LOOM_SERVER_PASSWORD || '';
   const username = process.env.LOOM_SERVER_USERNAME || DEFAULT_USERNAME;
+  const tokenTtlMs =
+    Number((opts && opts.tokenTtlMs) || process.env.LOOM_SERVER_TOKEN_TTL_MS) || 12 * 60 * 60 * 1000;
   const hub = new Map(); // sessionId -> { session, active }
   const stats = { requests: 0, sessionsCreated: 0, messagesRun: 0 };
   const authFails = new Map(); // ip -> { count, lockedUntil }
@@ -173,10 +198,27 @@ function createWebServer(opts) {
 
   function authOk(req) {
     if (!password) return true;
+    sweepTokens();
     const cookieHeader = req.headers.cookie || '';
     const token = /(?:^|;\s*)loom_token=([^;\s]+)/.exec(cookieHeader)?.[1]
       || new URL(req.url, 'http://x').searchParams.get('token');
-    return !!(token && tokens.has(token));
+    return !!(token && tokenIsLive(token));
+  }
+
+  // Tokens are stamped at issue time and expire after tokenTtlMs (default 12h,
+  // env LOOM_SERVER_TOKEN_TTL_MS). Sweep runs opportunistically on each auth
+  // check — the map holds only this server's logins, so it stays tiny.
+  function tokenIsLive(token) {
+    const issuedAt = tokens.get(token);
+    if (typeof issuedAt !== 'number') return false;
+    return Date.now() - issuedAt <= tokenTtlMs && Date.now() >= issuedAt - 60_000;
+  }
+  function sweepTokens() {
+    if (!tokens.size) return;
+    const now = Date.now();
+    for (const [tok, issuedAt] of tokens) {
+      if (typeof issuedAt === 'number' && now - issuedAt > tokenTtlMs) tokens.delete(tok);
+    }
   }
 
   function requireAuth(req, res) {
@@ -266,8 +308,8 @@ function createWebServer(opts) {
           if (body.username === username && passwordMatches(body.password, password)) {
             authFails.delete(ip);
             const token = crypto.randomBytes(24).toString('hex');
-            tokens.set(token, true);
-            res.setHeader('Set-Cookie', 'loom_token=' + token + '; Path=/; HttpOnly; SameSite=Strict');
+            tokens.set(token, Date.now());
+            res.setHeader('Set-Cookie', 'loom_token=' + token + '; Path=/; HttpOnly; SameSite=Strict; Max-Age=' + Math.floor(tokenTtlMs / 1000));
             return sendJson(res, 200, { ok: true, username });
           }
           authAttemptFailed(ip);
@@ -275,6 +317,16 @@ function createWebServer(opts) {
         })();
       }
       return sendJson(res, 200, { required: !password ? false : true, username: password ? username : null });
+    }
+
+    // POST /api/auth/logout — revoke the presented session token immediately.
+    if (seg[0] === 'api' && seg.length === 3 && seg[1] === 'auth' && seg[2] === 'logout') {
+      if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' });
+      const cookieHeader = req.headers.cookie || '';
+      const token = /(?:^|;\s*)loom_token=([^;\s]+)/.exec(cookieHeader)?.[1];
+      if (token) tokens.delete(token);
+      res.setHeader('Set-Cookie', 'loom_token=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0');
+      return sendJson(res, 200, { ok: true });
     }
 
     if (seg[0] === 'api' && seg[1] === 'health') return sendJson(res, 200, { ok: true });
@@ -371,7 +423,10 @@ function createWebServer(opts) {
     if (p === '/' || p === '/index.html') {
       fs.readFile(INDEX_FILE, 'utf8', (err, html) => {
         if (err) return sendText(res, 500, 'index.html missing: ' + err.message);
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': Buffer.byteLength(html) });
+        res.writeHead(200, Object.assign(HTML_SECURITY_HEADERS, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Content-Length': Buffer.byteLength(html),
+        }));
         res.end(html);
       });
       return;
@@ -445,6 +500,16 @@ async function main() {
 
   console.log('Loom Web — version ' + require('../../package.json').version);
   if (o.password) console.log('Authentication required — user: ' + o.username + ' (LOOM_SERVER_USERNAME)');
+  const exposedToLan = o.hostname === '0.0.0.0' || o.hostname === '::';
+  if (exposedToLan) {
+    console.log('! NETWORK EXPOSURE WARNING !');
+    if (!o.password) {
+      console.log('! Binding ' + o.hostname + ' WITHOUT a password: anyone on your LAN can run an AI agent ');
+      console.log('! on this machine and reach its tools/files. Set LOOM_SERVER_PASSWORD before exposing.');
+    } else {
+      console.log('! Bound to ' + o.hostname + ' — protected by login, but keep the port firewalled where possible.');
+    }
+  }
   for (const a of addresses) console.log('  ' + a.label + ':      ' + a.url);
   if (o.mdns) {
     const m = advertiseMdns(o, port, (msg) => console.error('[loom web] ' + msg));

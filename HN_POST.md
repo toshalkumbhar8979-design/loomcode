@@ -110,6 +110,23 @@ Early and rough — feedback welcome, especially on the agent loop UX.
 
 ---
 
+## Q&A prep: "What's new or different compared to existing products?"
+
+> **Short version: Loom doesn't lock you into anyone's cloud, doesn't need a setup ritual, and treats your terminal like an app platform instead of a log file.**
+>
+> **1. Any model, out of the box.** Claude Code only speaks to Anthropic, Codex only to OpenAI, Gemini CLI only to Google. Loom takes *any* OpenAI- or Anthropic-compatible endpoint — paste a base URL + key into `/connectors` and it works. That includes NVIDIA NIM's free tier, OpenRouter, vLLM, Ollama, whatever your team already runs. Switching models mid-session is one keystroke.
+>
+> **2. Genuinely zero-setup install.** `npm i -g loom-agent` works even on machines without Bun installed, because Loom ships the Bun runtime *inside* the npm package (platform-specific `@oven/*` binaries as optional dependencies — no `curl | bash`, no postinstall download, works behind corporate registries). Three-tier fallback: bundled binary → PATH bun → plain Node REPL, so the command never dies.
+>
+> **3. It's a real terminal application, not a REPL.** Built on OpenTUI (our own renderer) with SolidJS reactivity underneath: mouse support, hover previews, scrollable modals, live-streaming diffs and tool output at 60fps. Most CLI agents print text; this behaves like software.
+>
+> **4. Guardrails you can actually inspect.** Every tool call hits a permission popup (allow once / always / deny), spending is capped with visible budget accounting, and remote skills are **commit-pinned**: approving a skill approves one exact git commit — if its content ever changes, it demands re-approval before it runs again.
+>
+> **5. Three ways to drive it.** Interactive TUI, `loom web` (HTTP API + browser client), and ACP support so editors can embed it.
+>
+> Honest framing: same category as Claude Code/Aider, but the ownership model is inverted — **your keys, your provider bills, your `~/.loom` data directory, MIT-licensed source.**
+
+---
 ## Posting checklist (HN-specific)
 
 - [ ] Post Tuesday–Thursday, 7–10 AM US Eastern (highest-traffic window).

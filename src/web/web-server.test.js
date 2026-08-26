@@ -182,3 +182,69 @@ test("advertiseMdns returns null or an instance handle (does not throw)", () => 
   if (handle) { try { handle.instance.destroy(); } catch {} }
   expect(handle === null || handle && handle.svc).toBeTruthy();
 });
+
+// ── round-2 hardening: security headers, token TTL, logout ──
+test("security headers present on JSON API responses", async () => {
+  const { port } = await start();
+  const r = await fetch(base(port, "/api/health"));
+  expect(r.headers.get("x-content-type-options")).toBe("nosniff");
+  expect(r.headers.get("x-frame-options")).toBe("DENY");
+  expect(r.headers.get("referrer-policy")).toBe("no-referrer");
+});
+
+test("index.html served with strict CSP", async () => {
+  const { port } = await start();
+  const r = await fetch(base(port, "/"));
+  expect(r.status).toBe(200);
+  const csp = r.headers.get("content-security-policy") || "";
+  expect(csp).toContain("default-src 'none'");
+  expect(csp).toContain("connect-src 'self'");
+});
+
+test("session tokens expire after tokenTtlMs and are then rejected", async () => {
+  process.env.LOOM_SERVER_PASSWORD = "ttlpw";
+  const { port } = await start({ tokenTtlMs: 60 });
+  const login = await fetch(base(port, "/api/auth"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: "loom", password: "ttlpw" }),
+  });
+  expect(login.status).toBe(200);
+  const cookie = String(login.headers.get("set-cookie") || "").split(";")[0];
+  expect(cookie.startsWith("loom_token=")).toBe(true);
+  // fresh token works
+  const okRes = await fetch(base(port, "/api/sessions"), { headers: { Cookie: cookie } });
+  expect(okRes.status).toBe(200);
+  // after the TTL elapses the same token must be dead
+  await new Promise((r2) => setTimeout(r2, 120));
+  const expiredRes = await fetch(base(port, "/api/sessions"), { headers: { Cookie: cookie } });
+  expect(expiredRes.status).toBe(401);
+}, 10000);
+
+test("login cookie carries Max-Age matching the TTL", async () => {
+  process.env.LOOM_SERVER_PASSWORD = "maxagew";
+  const { port } = await start({ tokenTtlMs: 5000 });
+  const login = await fetch(base(port, "/api/auth"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: "loom", password: "maxagew" }),
+  });
+  const setCookie = String(login.headers.get("set-cookie") || "");
+  expect(setCookie).toContain("HttpOnly");
+  expect(setCookie).toContain("SameSite=Strict");
+  expect(setCookie).toContain("Max-Age=5");
+});
+
+test("POST /api/auth/logout revokes the presented token immediately", async () => {
+  process.env.LOOM_SERVER_PASSWORD = "logoutpw";
+  const { port } = await start();
+  const login = await fetch(base(port, "/api/auth"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: "loom", password: "logoutpw" }),
+  });
+  const cookie = String(login.headers.get("set-cookie") || "").split(";")[0];
+  expect((await fetch(base(port, "/api/sessions"), { headers: { Cookie: cookie } })).status).toBe(200);
+  await fetch(base(port, "/api/auth/logout"), { method: "POST", headers: { Cookie: cookie } });
+  expect((await fetch(base(port, "/api/sessions"), { headers: { Cookie: cookie } })).status).toBe(401);
+});

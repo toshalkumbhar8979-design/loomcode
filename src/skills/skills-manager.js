@@ -11,6 +11,19 @@ function validateUrl(url) {
   } catch { return false; }
 }
 
+/**
+ * Reduce an install target to a single safe folder name under ~/.loom/skills.
+ * Strict allowlist (alnum/_/./-, ≤64 chars): drives, separators and '..'
+ * segments are rejected outright, never silently collapsed, so remote-provided
+ * names can't rename unexpectedly or point outside the skills directory.
+ * @param {unknown} name
+ * @returns {string|null} cleaned single-segment name, or null when unusable
+ */
+function safeSkillName(name) {
+  const s = typeof name === 'string' ? name.trim() : '';
+  return /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(s) ? s : null;
+}
+
 const LOOM_DIR = path.join(os.homedir(), '.loom');
 
 function globalSkillsDir() {
@@ -111,8 +124,17 @@ function installFrom(srcDir, targetName) {
   if (!fs.existsSync(path.join(src, 'SKILL.md'))) {
     return { error: `No SKILL.md in ${src}` };
   }
-  const name = targetName || path.basename(src);
-  const dest = path.join(globalSkillsDir(), name);
+  const name = safeSkillName(targetName != null ? targetName : path.basename(src));
+  if (!name) {
+    return { error: `Invalid skill name: ${JSON.stringify(targetName)} — use letters/digits/-/_ only` };
+  }
+  const destRoot = globalSkillsDir();
+  const dest = path.join(destRoot, name);
+  // Paranoia check: `name` is already a sanitized single segment, so this can
+  // not trip short of path.join behavior changing underneath us.
+  if (path.resolve(dest) !== path.join(path.resolve(destRoot), name)) {
+    return { error: 'Invalid install location' };
+  }
   if (fs.existsSync(dest)) {
     fs.rmSync(dest, { recursive: true, force: true });
   }
@@ -210,4 +232,5 @@ module.exports = {
   globalSkillsDir,
   agentsSkillsDir,
   projectSkillsDir,
+  safeSkillName,
 };

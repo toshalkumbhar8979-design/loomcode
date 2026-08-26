@@ -4,6 +4,45 @@ All notable changes to **Loom Code** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.35] — security hardening
+
+### Fixed
+- **webfetch SSRF guard (`src/tools/index.js`).** The fetch tool is driven by
+  the model, and prompt-injected page content could steer it at cloud
+  metadata (`169.254.169.254`), localhost services, or internal hosts.
+  webfetch now allows only `http:`/`https:` (no `file:`/`ftp:`/`data:`),
+  refuses loopback, RFC1918, CGNAT, link-local/metadata, IPv6 ULA/link-local
+  and IPv4-mapped targets, **resolves DNS before connecting** so
+  hostname→internal-IP tricks fail, follows redirects manually and re-checks
+  every hop, and fails closed on unresolvable hosts.
+- **MCP servers no longer inherit the full shell environment**
+  (`src/mcp/mcp-client.js`). Every spawned MCP server used to receive all of
+  `process.env` — provider API keys, cloud tokens, cookies — handing them to
+  whatever npm package a config starts. Servers now get a minimal OS/runtime
+  baseline (PATH, ComSpec, TEMP/HOME, proxy vars) plus only what their own
+  config explicitly declares (`cfg.env`). Secrets are opt-in per server.
+- **Skills install name traversal blocked (`src/skills/skills-manager.js`).**
+  A remote-provided install name like `../../escapee` was joined raw onto
+  `~/.loom/skills`. Names are now a strict allowlist
+  (`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`); traversal attempts error instead of
+  silently renaming or escaping the skills directory.
+
+### Added
+- **`loom web` session hardening (`src/web/web-server.js`).** Login tokens
+  previously lived until server restart; they now expire after **12 h**
+  (tunable via `LOOM_SERVER_TOKEN_TTL_MS`, cookie `Max-Age` kept in sync), a
+  lazy sweep drops expired tokens, and new **`POST /api/auth/logout`**
+  revokes the presented token immediately.
+- **Security headers on every response:** `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`; the browser UI
+  additionally ships a strict `Content-Security-Policy`
+  (`default-src 'none'; connect-src 'self'` — the page is self-contained).
+- **LAN-exposure warning:** `loom web --hostname 0.0.0.0` (or `::`) without
+  `LOOM_SERVER_PASSWORD` now prints an explicit warning that anyone on the
+  network can run an agent and reach its tools/files.
+- **New regression suite `src/tools/security.test.js`** plus five web-server
+  hardening tests (headers, CSP, token TTL expiry, Max-Age sync, logout).
+
 ## [1.2.34] — bundle bun with the npm install
 
 ### Added

@@ -5,6 +5,7 @@ const { execSync, spawn } = require('child_process');
 const { glob: globLib } = require('glob');
 const { commandRiskLabel } = require('../core/permissions');
 const { loadConfig } = require('../config/settings');
+const dnsPromises = require('dns').promises;
 
 const cwd = process.cwd();
 
@@ -13,6 +14,74 @@ function globIgnore(full) {
   if (!abs) return ['**/node_modules/**', '**/.git/**'];
   const base = path.posix.dirname(full);
   return ['node_modules', '.git'].map((n) => path.posix.join(base, '**', n, '**'));
+}
+
+// ---------------------------------------------------------------------------
+// SSRF guard (webfetch)
+//
+// The agent model decides which URLs webfetch opens, and prompt-injected page
+// content can steer it toward "check http://169.254.169.254/latest/meta-data"
+// or "read localhost:5984/_config". Those must fail closed:
+//   - only http/https, never file:/ftp:/data: transport tricks
+//   - loopback, link-local (cloud metadata!), RFC1918 private ranges, CGNAT,
+//     IPv6 ULA/link-local and IPv4-mapped addresses are refused
+//   - hostnames are resolved BEFORE connecting so a DNS name pointing into
+//     internal space is caught (checking the literal hostname is not enough)
+//   - redirects are followed manually and every hop re-checked, because a
+//     public URL can bounce straight at an internal one
+// ---------------------------------------------------------------------------
+/**
+ * True when an IPv4/IPv6 address string falls in a range the agent must never
+ * fetch (loopback, link-local/metadata, private, CGNAT, malformed).
+ * @param {string} ip
+ * @returns {boolean}
+ */
+function isPrivateAddress(ip) {
+  const s = String(ip || '').toLowerCase();
+  // IPv6 handling first: exact forms and prefix families we care about.
+  if (s.includes(':')) {
+    let bare = s.replace(/^\[|\]$/g, '');
+    if (bare === '::' || bare === '::1') return true;
+    const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(bare);
+    if (mapped) return isPrivateAddress(mapped[1]);
+    if (/^f[cd][0-9a-f]{2}:/.test(bare)) return true;      // fc00::/7 ULA
+    if (/^fe[89ab][0-9a-f]:/.test(bare)) return true;      // fe80::/10 link-local
+    if (/^2001:db8:/.test(bare)) return true;              // documentation
+    return false;
+  }
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(s);
+  if (!m) return false;
+  const o = m.slice(1).map(Number);
+  if (o.some((x) => x > 255)) return true;                 // malformed → refuse
+  const [a, b] = o;
+  return (
+    a === 0 ||                                             // this-network
+    a === 10 ||                                            // RFC1918
+    a === 127 ||                                           // loopback
+    (a === 100 && b >= 64 && b <= 127) ||                  // CGNAT 100.64/10
+    (a === 169 && b === 254) ||                            // link-local / metadata
+    (a === 172 && b >= 16 && b <= 31) ||                   // RFC1918
+    (a === 192 && b === 168)                               // RFC1918
+  );
+}
+
+/**
+ * Resolve a URL's host and report whether every resolved address is public.
+ * Unresolvable hosts fail closed (false).
+ * @param {URL} u
+ * @returns {Promise<boolean>}
+ */
+async function urlIsPublic(u) {
+  const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host || host === 'localhost' || host.endsWith('.localhost')) return false;
+  if (isPrivateAddress(host)) return false;
+  let addrs;
+  try {
+    addrs = /** @type {{address: string}[]} */ (await dnsPromises.lookup(host, { all: true }));
+  } catch {
+    return false;
+  }
+  return addrs.length > 0 && addrs.every((a) => !isPrivateAddress(a.address));
 }
 
 const MODES = ['build', 'plan', 'chat'];
@@ -251,10 +320,36 @@ const TOOLS = {
       url: { type: 'string', required: true, description: 'URL to fetch' },
     },
     async execute(params) {
+      let u;
       try {
-        const resp = await fetch(params.url, { signal: AbortSignal.timeout(15000) });
-        const text = await resp.text();
-        return text.slice(0, 10000);
+        u = new URL(String(params.url || ''));
+      } catch {
+        return { error: 'Invalid URL' };
+      }
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+        return { error: 'Blocked by webfetch policy: only http/https URLs are allowed' };
+      }
+      try {
+        // Follow redirects manually so every hop passes the SSRF guard — a
+        // public URL may legitimately bounce into an internal address.
+        let current = u;
+        const signal = AbortSignal.timeout(15000);
+        for (let hop = 0; hop < 5; hop++) {
+          if (!(await urlIsPublic(current))) {
+            return { error: `Blocked by webfetch policy: ${current.hostname} resolves to a private/reserved address (SSRF guard)` };
+          }
+          const resp = await fetch(current.toString(), { redirect: 'manual', signal });
+          if ([301, 302, 303, 307, 308].includes(resp.status)) {
+            const loc = resp.headers.get('location');
+            try { resp.body && resp.body.cancel(); } catch {}
+            if (!loc) return { error: `Fetch failed: redirect ${resp.status} without Location header` };
+            current = new URL(loc, current);
+            continue;
+          }
+          const text = await resp.text();
+          return text.slice(0, 10000);
+        }
+        return { error: 'Fetch failed: too many redirects' };
       } catch (e) {
         return { error: `Fetch failed: ${e.message}` };
       }
@@ -540,4 +635,4 @@ async function getAllToolDefinitions(mode = 'build') {
   }
 }
 
-module.exports = { TOOLS, MODES, READ_ONLY_TOOLS, getToolDefinitions, getAllToolDefinitions, executeTool };
+module.exports = { TOOLS, MODES, READ_ONLY_TOOLS, getToolDefinitions, getAllToolDefinitions, executeTool, isPrivateAddress };
