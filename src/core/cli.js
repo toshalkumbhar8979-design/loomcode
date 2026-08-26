@@ -460,7 +460,31 @@ class LoomCLI {
 }
 
 function findBun() {
-  // Check common installation paths
+  // 1. The bundled bun binary shipped via @oven/bun-<platform> optional deps
+  //    (npm i -g loom-agent brings its own bun — works with zero setup).
+  try {
+    const PKGS = {
+      'win32-x64': 'bun-windows-x64',
+      'win32-arm64': 'bun-windows-aarch64',
+      'darwin-x64': 'bun-darwin-x64',
+      'darwin-arm64': 'bun-darwin-aarch64',
+      'linux-x64': 'bun-linux-x64',
+      'linux-arm64': 'bun-linux-aarch64',
+    };
+    const short = PKGS[process.platform + '-' + process.arch];
+    if (short) {
+      const exe = process.platform === 'win32' ? 'bun.exe' : 'bun';
+      const pkgRoot = path.join(__dirname, '..', '..');
+      const candidates = [
+        path.join(pkgRoot, 'node_modules', '@oven', short, 'bin', exe), // nested
+        path.join(pkgRoot, '..', '@oven', short, 'bin', exe),           // hoisted
+      ];
+      for (const c of candidates) {
+        if (fs.existsSync(c)) return c;
+      }
+    }
+  } catch {}
+  // 2. Common installation paths
   const paths = [
     path.join(os.homedir(), '.bun', 'bin', 'bun.exe'),
     path.join(os.homedir(), '.bun', 'bin', 'bun'),
@@ -471,7 +495,7 @@ function findBun() {
   for (const p of paths) {
     if (fs.existsSync(p)) return p;
   }
-  // Search PATH (Windows: where.exe, POSIX: which)
+  // 3. Search PATH (Windows: where.exe, POSIX: which)
   try {
     const { execSync } = require('child_process');
     const isWin = process.platform === 'win32';

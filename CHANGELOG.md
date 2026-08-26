@@ -4,6 +4,20 @@ All notable changes to **Loom Code** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.34] — bundle bun with the npm install
+
+### Added
+- **`npm i -g loom-agent` now brings its own bun.** The `@oven/bun-<platform>`
+  binaries (pinned to bun 1.3.14, the version the project builds against) ship
+  as `optionalDependencies`; npm downloads only the one matching the user's
+  OS/arch, and no install scripts are involved (npm allow-scripts policies
+  cannot break it). The postinstall rewrites the `loom` shims to prefer the
+  bundled binary, then `bun` from PATH.
+- **No-bun users are never stranded:** if neither the bundled binary nor a
+  PATH bun exists, the shim falls back to `node bin/loom.js` (the line-mode
+  REPL) with a hint — instead of dying with "'bun' is not recognized".
+  `findBun()` and the bin respawn paths check the bundled location first too.
+
 ## [1.2.33] — fix frozen splash on global installs + stable model picker
 
 ### Fixed

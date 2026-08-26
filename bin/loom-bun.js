@@ -17,8 +17,29 @@ const { spawnSync } = require("child_process");
 const pkgRoot = path.join(__dirname, "..");
 const underBun = typeof Bun !== "undefined" && !!process.versions.bun;
 if (!underBun) {
+  // Prefer the bundled @oven bun binary (shipped as an optional dep), then
+  // whatever bun is on PATH. Without either, still respawn so the inner
+  // failure message can guide the user.
+  const OVEN = {
+    "win32-x64": "bun-windows-x64",
+    "win32-arm64": "bun-windows-aarch64",
+    "darwin-x64": "bun-darwin-x64",
+    "darwin-arm64": "bun-darwin-aarch64",
+    "linux-x64": "bun-linux-x64",
+    "linux-arm64": "bun-linux-aarch64",
+  };
+  let bunCmd = process.platform === "win32" ? "bun.exe" : "bun";
+  const short = OVEN[process.platform + "-" + process.arch];
+  const exe = process.platform === "win32" ? "bun.exe" : "bun";
+  const ovenCandidates = short ? [
+    path.join(pkgRoot, "node_modules", "@oven", short, "bin", exe),
+    path.join(pkgRoot, "..", "@oven", short, "bin", exe),
+  ] : [];
+  for (const c of ovenCandidates) {
+    if (fs.existsSync(c)) { bunCmd = c; break; }
+  }
   const result = spawnSync(
-    process.platform === "win32" ? "bun.exe" : "bun",
+    bunCmd,
     [
       "--preload", path.join(pkgRoot, "src", "tui-preload.js"),
       __filename,
