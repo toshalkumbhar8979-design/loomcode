@@ -49,7 +49,7 @@ An AI-powered coding agent for the terminal with multi-provider support and a fu
 
 Install from npm (global — installs the `loom` command):
 ```bash
-npm install -g loom-code
+npm install -g loom-agent
 ```
 
 Or run from source:
