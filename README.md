@@ -10,6 +10,7 @@
 [![npm version](https://img.shields.io/npm/v/loom-agent?style=flat&color=blue)](https://www.npmjs.com/package/loom-agent)
 [![License: MIT](https://img.shields.io/npm/l/loom-agent?style=flat&color=green)](LICENSE)
 [![Platform: Win/Mac/Linux](https://img.shields.io/badge/platform-Win--Mac--Linux-orange)](#)
+[![Website: loomcluster.in](https://img.shields.io/badge/website-loomcluster.in-success)](https://loomcluster.in/)
 
 ![Loom Code splash — connected to NVIDIA](docs/screenshot.png)
 
