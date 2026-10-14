@@ -4,6 +4,59 @@ All notable changes to **Loom Code** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — completion harness, specialist agents, headless browser, TUI refresh
+
+### Added
+- **Drive-to-completion harness (`src/core/session.js`).** When the model ends
+  a turn with todos still pending/in_progress (the "stops between tasks"
+  failure), the loop injects a continuation listing the unfinished items — up
+  to 5 nudges per turn, build mode only, only when the turn actually wrote
+  todos. Cancelled/completed items via todowrite stop the nudging cleanly.
+  Child subagent sessions inherit the same guard.
+- **Transient provider-error retry.** Network blips / 5xx / stream resets now
+  retry the model call twice (side-effect free) instead of killing the turn
+  mid-task.
+- **Specialist subagents (`src/core/agents.js`)**: `research` (multi-source
+  investigation, sourced report), `coder` (isolated implementation),
+  `reviewer` (severity-ranked code review), `tester` (reproduce → test →
+  green), `web` (headless-browser work). All non-delegating (`no task tool`).
+- **Main orchestrator prompt.** The `build` primary agent now carries an
+  orchestrator role prompt (todo-first, delegate-to-specialists, verify,
+  finish). Primary-agent prompts are actually wired into the system prompt now
+  (`Session._primaryBlock()`) — previously `build`/`plan`/`chat` prompts were
+  registry-only and never reached the model.
+- **`browser` tool (`src/tools/browser.js`).** Headless Chromium control via
+  Playwright: goto/click/fill/press/text/eval/links/screenshot/close. Engine:
+  bundled `playwright` if installed, else `playwright-core` + system
+  Chrome/Edge. The page singleton persists across calls. Permissions: passive
+  reads allow, interactive click/fill/press ask.
+
+### Changed
+- **TUI design overhaul.** The splash leads with the full LOOM CODE wordmark
+  in solid terracotta over a separator rule and a pill-style status
+  row; the default "Loom Dark" (and Light) palettes got deeper surface
+  stepping so panels read without borders. Every selection surface — command
+  palette, slash/file popups, select modals, permission popup — now uses a
+  tinted active row with a `▸` marker; the command palette finally renders
+  each command's description; modals gained a title divider; toasts carry a
+  kind-colored status dot (● ok / ✖ error / ◆ info) and clip long text so
+  they never cover the chat. System notices sit on a tinted surface, the
+  assistant footer is brand-colored, markdown headings get an h1/h2/h3 color
+  hierarchy, the input placeholder color-codes /commands @file !shell, and
+  hard-coded reds now follow the theme's error color. Still grid-line-free in
+  the main view — color and spacing do the work, no box frames.
+- **Sidebar version now tracks `package.json`** (it was stuck at a hardcoded
+  v1.2.0 while the package moved on); splash and sidebar share one source.
+- **`task` tool description now lists every built-in subagent with its specialty.**
+- **Stop messages show the real state, not canned text.** Continuation nudges
+  now quote the model's ACTUAL last message plus the open todo list (instead
+  of one identical line every time); the empty-reply nudge reports the real
+  tool-call count; a build turn that ends with open todos returns them
+  (`resp.openTodos`) and the TUI appends "Stopped with N todo(s) still open: …"
+  with the actual items; the interrupt line reports kept chars + the
+  in-progress todo; the plan-complete line includes the planned step count;
+  "(no response)"/"(interrupted)" placeholders describe what happened.
+
 ## [1.2.36] — fix `loom web` / `loom acp` / `loom attach`
 
 ### Fixed

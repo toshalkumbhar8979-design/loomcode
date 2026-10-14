@@ -25,9 +25,9 @@ function tmpFile(name, content) {
   return p;
 }
 
-test("getToolDefinitions: build exposes all 13 base tools", () => {
+test("getToolDefinitions: build exposes all 14 base tools", () => {
   const defs = tools.getToolDefinitions("build");
-  expect(defs.map((d) => d.name).sort()).toEqual(["ask", "bash", "edit", "glob", "grep", "lsp", "mcp", "read", "task", "todowrite", "webfetch", "websearch", "write"]);
+  expect(defs.map((d) => d.name).sort()).toEqual(["ask", "bash", "browser", "edit", "glob", "grep", "lsp", "mcp", "read", "task", "todowrite", "webfetch", "websearch", "write"]);
   for (const d of defs) {
     expect(d.description).toBeTruthy();
     expect(d.input_schema).toBeTruthy();

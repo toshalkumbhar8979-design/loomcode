@@ -34,7 +34,7 @@ const DANGER_PATTERNS = [
 // user config).
 const PERMISSION_KEYS = [
   'read', 'edit', 'glob', 'grep', 'bash', 'task', 'skill', 'lsp', 'question',
-  'webfetch', 'websearch',
+  'webfetch', 'websearch', 'browser',
   'external_directory', 'doom_loop',
 ];
 
@@ -52,6 +52,15 @@ const DEFAULT_PERMISSIONS = {
     '*.env': 'deny',
     '*.env.*': 'deny',
     '*.env.example': 'allow',
+  },
+  // Browser: passive reads of live pages are as safe as webfetch (allow);
+  // INTERACTIVE actions (click/fill/press) can submit forms and change remote
+  // state, so they prompt by default. Patterns match "action arg".
+  browser: {
+    '*': 'allow',
+    'click*': 'ask',
+    'fill*': 'ask',
+    'press*': 'ask',
   },
 };
 
@@ -71,6 +80,7 @@ const TOOL_TO_PERMISSION = {
   ask: 'question',
   webfetch: 'webfetch',
   websearch: 'websearch',
+  browser: 'browser',
   todowrite: null,   // never prompts
   mcp: null,         // wired by the session (only the "add" action prompts)
 };
@@ -301,6 +311,7 @@ class PermissionManager {
       case 'ask': return String(inp.question ?? inp.text ?? '');
       case 'webfetch': return String(inp.url ?? '');
       case 'websearch': return String(inp.query ?? '');
+      case 'browser': return String(inp.action ?? '') + ' ' + String(inp.url ?? inp.selector ?? inp.key ?? inp.path ?? '');
       default: return String(inp.command ?? inp.filePath ?? inp.path ?? inp.pattern ?? inp.url ?? '');
     }
   }

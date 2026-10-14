@@ -464,12 +464,27 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
         // Keep the partial text in the bubble; the session already stored it,
         // so the user can type "continue" to resume the task.
         patchMessageAt(idx, { thinking: false, interrupted: true, thinkTime: Date.now() - t0, isError: false, parts: snapshotParts() });
-        appendMessage({ role: "system", content: "Interrupted \u2014 partial response kept. Type \"continue\" to resume the task." });
+        var keptChars = String(resp.content || "").length;
+        var inProgress = null;
+        var tdNow = sess.todos || [];
+        for (var ti = 0; ti < tdNow.length; ti++) { if (tdNow[ti].status === "in_progress") { inProgress = tdNow[ti]; break; } }
+        appendMessage({ role: "system", content: "Interrupted \u2014 kept " + keptChars + " chars of the partial response" + (inProgress ? " (in progress: " + inProgress.content + ")" : "") + ". Type \"continue\" to resume the task." });
       } else {
-        patchMessageAt(idx, { content: resp.content || "(no response)", thinking: false, thinkTime: Date.now() - t0, isError: isErr, parts: snapshotParts() });
+        patchMessageAt(idx, { content: resp.content || "(the model ended the turn without any text)", thinking: false, thinkTime: Date.now() - t0, isError: isErr, parts: snapshotParts() });
+        // Real leftovers, not a generic stop line: when the turn wrote todos
+        // and still has open ones, the session reports exactly which.
+        var openTodos = resp.openTodos;
+        if (!isErr && openTodos && openTodos.length) {
+          var openNames = [];
+          for (var oi = 0; oi < Math.min(openTodos.length, 8); oi++) openNames.push("- [" + openTodos[oi].status + "] " + openTodos[oi].content);
+          appendMessage({ role: "system", content: "Stopped with " + openTodos.length + " todo(s) still open:\n" + openNames.join("\n") + (openTodos.length > 8 ? "\n- \u2026" : "") + "\nSay \"continue\" to keep going." });
+        }
       }
       if (!isErr && sess.mode === "plan") {
-        appendMessage({ role: "system", content: "Plan complete \u2014 press Tab to switch to Build, then send \"go\" to execute." });
+        var plannedSteps = 0;
+        var planTodos = sess.todos || [];
+        for (var pi = 0; pi < planTodos.length; pi++) { if (planTodos[pi].status !== "completed" && planTodos[pi].status !== "cancelled") plannedSteps++; }
+        appendMessage({ role: "system", content: "Plan complete \u2014 " + (plannedSteps ? plannedSteps + " step(s) planned. " : "") + "press Tab to switch to Build, then send \"go\" to execute." });
       }
       setSpeedStats({ live: null, last: sess.getSpeed().last });
     }).catch(function(e) {
@@ -710,7 +725,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
           fsx.mkdirSync(dir, { recursive: true });
           const esc = (s: string) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
           const body = messages().map((m: any) => `<div class="m ${esc(m.role)}"><b>${esc(m.role)}</b><pre>${esc(String(m.content ?? ""))}</pre></div>`).join("\n");
-          const html = `<!doctype html><meta charset="utf-8"><title>Loom session</title><style>body{background:#191817;color:#e8e2d9;font-family:ui-monospace,monospace;max-width:900px;margin:2rem auto;padding:0 1rem}.m{border-left:3px solid #555;padding:.25rem .75rem;margin:.6rem 0}.m.user{border-color:#d7a35f}.m.assistant{border-color:#7aa2f7}.m.system{color:#9a938a}pre{white-space:pre-wrap;font-family:inherit;margin:.2rem 0}</style><h1>Loom Code session</h1>${body}`;
+          const html = `<!doctype html><meta charset="utf-8"><title>Loom session</title><style>body{background:#171512;color:#f2ede4;font-family:ui-monospace,monospace;max-width:900px;margin:2rem auto;padding:0 1rem}.m{border-left:3px solid #463f36;padding:.25rem .75rem;margin:.6rem 0}.m.user{border-color:#a8c496}.m.assistant{border-color:#e8845c}.m.system{color:#a89d8d}pre{white-space:pre-wrap;font-family:inherit;margin:.2rem 0}</style><h1>Loom Code session</h1>${body}`;
           const f = pathx.join(dir, (sessionId() || "session") + ".html");
           fsx.writeFileSync(f, html);
           showToast("Shared: " + f, "ok", 6000);

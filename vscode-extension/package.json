@@ -1,0 +1,88 @@
+{
+  "name": "loomcode-vscode",
+  "displayName": "Loom Code",
+  "description": "Drive the Loom Code terminal agent from VS Code: chat terminal, selection Q&A, and the Loom browser UI docked as an editor panel.",
+  "version": "0.0.1",
+  "publisher": "loomcode",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/toshalkumbhar8979-design/loomcode"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Programming Languages"
+  ],
+  "keywords": [
+    "ai",
+    "agent",
+    "terminal",
+    "coding-assistant"
+  ],
+  "icon": false,
+  "main": "./extension.js",
+  "scripts": {
+    "vscode:prepublish": "node --check extension.js"
+  },
+  "contributes": {
+    "configuration": {
+      "title": "Loom Code",
+      "properties": {
+        "loomcode.webPort": {
+          "type": "number",
+          "default": 4399,
+          "description": "Port used for the docked Loom browser UI (loom web)."
+        },
+        "loomcode.printTimeoutSeconds": {
+          "type": "number",
+          "default": 180,
+          "description": "Timeout in seconds for headless `loom -p` questions."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "loomcode.openTerminal",
+        "title": "Loom: Open Chat Terminal",
+        "category": "Loom"
+      },
+      {
+        "command": "loomcode.ask",
+        "title": "Loom: Ask About Selection",
+        "category": "Loom"
+      },
+      {
+        "command": "loomcode.openWebUi",
+        "title": "Loom: Dock Browser UI Panel",
+        "category": "Loom"
+      },
+      {
+        "command": "loomcode.stopWebUi",
+        "title": "Loom: Stop Local Server",
+        "category": "Loom"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "loomcode.ask",
+          "when": "editorHasSelection",
+          "group": "loom@1"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "loomcode.ask",
+        "key": "ctrl+alt+l",
+        "mac": "cmd+alt+l",
+        "when": "editorTextFocus"
+      }
+    ]
+  },
+  "activationEvents": []
+}

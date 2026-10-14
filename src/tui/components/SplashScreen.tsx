@@ -1,20 +1,7 @@
 // Splash screen -- logo + embedded InputBar when no messages yet. Signal reads in JSX.
-import fs from "fs";
-import path from "path";
-import { palette, LOOM_LOGO } from "../theme.ts";
+import { palette, LOOM_LOGO, VERSION } from "../theme.ts";
 import { providerName, modelName, providerKeyOk } from "../store.ts";
 import { InputBar } from "./InputBar.tsx";
-
-// Read the real version from package.json (same source as `loom --version`),
-// never a hardcoded label that drifts out of sync with releases.
-const LOOM_VERSION = (() => {
-  try {
-    const pkg = fs.readFileSync(path.join(import.meta.dir, "..", "..", "package.json"), "utf8");
-    return "v" + pkg.match(/"version":\s*"([^"]+)"/)[1];
-  } catch {
-    return "";
-  }
-})();
 
 export function SplashScreen() {
   const ui = palette("loom");
@@ -24,23 +11,29 @@ export function SplashScreen() {
       <box flexGrow={1} />
 
       <box flexDirection="column" alignItems="center" marginBottom={1}>
-        {LOOM_LOGO.map((line, i) => (
+        {LOOM_LOGO.map((line) => (
           <text fg={ui.primary}>{line}</text>
         ))}
       </box>
 
-      <box marginTop={2} flexDirection="row">
-        <text fg={ui.primary}>{"Build"}</text>
-        <text fg={ui.fgDim}>{"  "}</text>
-        <text fg={ui.fg}>{providerName()}</text>
-        <text fg={ui.fgDim}>{"  "}</text>
+      <text fg={ui.border}>{"─".repeat(60)}</text>
+
+      <box marginTop={1} flexDirection="row" alignItems="center">
+        {/* OpenTUI text nodes take fg/bg via the style prop — a direct
+            backgroundColor prop is silently ignored (the pill vanished). */}
+        {/* @ts-ignore styled span for the build chip */}
+        <text><span style={{ fg: ui.bgPanel, bg: ui.primary }}>{" build "}</span></text>
+        <text fg={ui.fgMuted}>{"  " + providerName()}</text>
+        <text fg={ui.fgMuted}>{" / "}</text>
         <text fg={ui.fg}>{modelName()}</text>
-        <text fg={ui.fgDim}>{"  "}</text>
-        <text fg={providerKeyOk() ? "green" : "yellow"}>{providerKeyOk() ? "connected" : "no key"}</text>
+        <text fg={ui.fgMuted}>{"  "}</text>
+        <text fg={providerKeyOk() ? ui.success : ui.warning}>
+          {"● " + (providerKeyOk() ? "connected" : "no key")}
+        </text>
       </box>
 
       <box marginTop={0}>
-        <text fg={ui.fgMuted}>{LOOM_VERSION}</text>
+        <text fg={ui.fgMuted}>{"v" + VERSION}</text>
       </box>
 
       <box marginY={1} width={74}>

@@ -15,18 +15,29 @@ export function ToastOverlay() {
         flexDirection="column" paddingX={1} paddingY={0}
       >
         <For each={list()}>
-          {(t) => (
-            <box
-              border borderStyle="rounded"
-              borderColor={t.kind === "error" ? ui.error : t.kind === "ok" ? ui.success : ui.primary}
-              paddingX={1} paddingY={0} marginTop={0}
-              backgroundColor={ui.bgPanel}
-            >
-              <text fg={t.kind === "error" ? ui.error : t.kind === "ok" ? ui.success : ui.fg}>
-                {" " + t.text}
-              </text>
-            </box>
-          )}
+          {(t) => {
+            const c = t.kind === "error" ? ui.error : t.kind === "ok" ? ui.success : ui.primary;
+            const dot = t.kind === "error" ? "✖" : t.kind === "ok" ? "●" : "◆";
+            // Cap the rendered width: a wide toast overlaps the chat's last
+            // rows (the box is opaque) — the store keeps the full text, only
+            // the floating chip clips with an ellipsis.
+            const body = t.text.length > 40 ? t.text.slice(0, 39) + "\u2026" : t.text;
+            return (
+              <box
+                border borderStyle="rounded"
+                borderColor={c}
+                paddingX={1} paddingY={0} marginTop={0}
+                backgroundColor={ui.bgPanel}
+              >
+                <text fg={c}>
+                  {" " + dot + " "}
+                </text>
+                <text fg={t.kind === "error" ? ui.error : ui.fg}>
+                  {body}
+                </text>
+              </box>
+            );
+          }}
         </For>
       </box>
     </Show>

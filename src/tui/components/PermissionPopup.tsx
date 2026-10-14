@@ -200,44 +200,47 @@ function PermissionPrompt() {
         <box flexDirection="column" marginTop={1} gap={0}>
           {isQ ? (
             opts.map((o, i) => (
-              <box {...row(i)} flexDirection="row" paddingY={0}>
+              <box {...row(i)} flexDirection="row" paddingY={0}
+                backgroundColor={sel() === i ? ui.bgPanelAlt : ui.bgPanel}>
                 <text fg={sel() === i ? ui.primary : ui.fgDim} paddingRight={1}>
-                  {(sel() === i ? "\u25B6 " : "  ") + fit(o, 40)}
+                  {(sel() === i ? "▸ " : "  ") + fit(o, 40)}
                 </text>
               </box>
             ))
           ) : (
             <>
-              <box {...row(0)} flexDirection="row" paddingY={0}>
+              <box {...row(0)} flexDirection="row" paddingY={0}
+                backgroundColor={sel() === 0 ? ui.bgPanelAlt : ui.bgPanel}>
                 <text fg={sel() === 0 ? ui.primary : ui.fgDim} paddingRight={1}>
-                  {(sel() === 0 ? "\u25B6 " : "  ") + "Allow"}
+                  {(sel() === 0 ? "▸ " : "  ") + "Allow"}
                 </text>
                 <text fg={ui.success}>{"(recommended)"}</text>
               </box>
-              <box {...row(1)} flexDirection="row" paddingY={0}>
+              <box {...row(1)} flexDirection="row" paddingY={0}
+                backgroundColor={sel() === 1 ? ui.bgPanelAlt : ui.bgPanel}>
                 <text fg={sel() === 1 ? ui.primary : ui.fgDim} paddingRight={1}>
-                  {(sel() === 1 ? "\u25B6 " : "  ") + "Always allow"}
+                  {(sel() === 1 ? "▸ " : "  ") + "Always allow"}
                 </text>
                 <text fg={ui.fgMuted}>{"remember for this command"}</text>
               </box>
-              <box {...row(2)}>
+              <box {...row(2)} backgroundColor={sel() === 2 ? ui.bgPanelAlt : ui.bgPanel}>
                 <text fg={sel() === 2 ? ui.primary : ui.fgDim} paddingY={0}>
-                  {(sel() === 2 ? "\u25B6 " : "  ") + "Deny"}
+                  {(sel() === 2 ? "▸ " : "  ") + "Deny"}
                 </text>
               </box>
               {pr.tool === "bash" ? (
-                <box {...row(3)}>
+                <box {...row(3)} backgroundColor={sel() === 3 ? ui.bgPanelAlt : ui.bgPanel}>
                   <text fg={sel() === 3 ? ui.primary : ui.fgDim} paddingY={0}>
-                    {(sel() === 3 ? "\u25B6 " : "  ") + "Allow all commands in this session"}
+                    {(sel() === 3 ? "▸ " : "  ") + "Allow all commands in this session"}
                   </text>
                 </box>
               ) : null}
             </>
           )}
           {isQ && !isStart ? (
-            <box {...row(opts.length)}>
+            <box {...row(opts.length)} backgroundColor={sel() === opts.length ? ui.bgPanelAlt : ui.bgPanel}>
               <text fg={sel() === opts.length ? ui.primary : ui.fgDim} paddingY={0}>
-                {(sel() === opts.length ? "\u25B6 " : "  ") + "Type your answer\u2026"}
+                {(sel() === opts.length ? "▸ " : "  ") + "Type your answer…"}
               </text>
             </box>
           ) : null}

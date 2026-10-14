@@ -71,7 +71,7 @@ function speedInfo(sp: any): { label: string; color: string } {
   if (tps == null) color = ui.fgMuted;
   else if (tps >= 25 && (latency == null || latency <= 2500)) color = ui.success;
   else if (tps >= 8 || (latency != null && latency <= 6000)) color = ui.warning;
-  else color = "#ff5555";
+  else color = ui.error;
   return { label, color };
 }
 
@@ -85,6 +85,8 @@ export function Sidebar(props: { show: boolean }) {
           <text fg={ui.primary} height={1} flexShrink={0}>{" Loom Code"}</text>
           <text fg={ui.fgMuted} height={1} flexShrink={0}>{"v" + VERSION}</text>
         </box>
+
+        <text fg={ui.border} height={1} flexShrink={0}>{"─".repeat(36)}</text>
 
         <box flexDirection="column" height={skillActive().length > 0 ? 8 : 7} flexShrink={0}>
           <box flexDirection="row" height={1} flexShrink={0}><text fg={ui.fgMuted}>{"Provider:  "}</text><text fg={ui.primary}>{providerName()}</text></box>
@@ -106,11 +108,13 @@ export function Sidebar(props: { show: boolean }) {
           ) : null}
         </box>
 
+        <text fg={ui.border} height={1} flexShrink={0}>{"─".repeat(36)}</text>
+
         <box flexDirection="row" gap={1} flexShrink={0}>
           {TAB_NAMES.map((name, i) => (
             <text fg={sidebarTab() === i ? ui.primary : ui.fgMuted} height={1} flexShrink={0}
               onMouseUp={() => setSidebarTab(i)}>
-              {"  " + name + "  "}
+              {(sidebarTab() === i ? "▌" : "  ") + name + "  "}
             </text>
           ))}
         </box>

@@ -87,9 +87,20 @@ const TOOL_DISPLAY: Record<string, ToolDisplay> = Object.assign(Object.create(nu
     diffs: null,
   },
   websearch: {
-    icon: "\u25C8",
+    icon: "◈",
     pending: "Searching web...",
-    label: (i) => "WebSearch \u0022" + String(i?.query || "") + "\u0022",
+    label: (i) => "WebSearch \"" + String(i?.query || "") + "\"",
+    diffs: null,
+  },
+  browser: {
+    icon: "◉",
+    pending: "Browsing...",
+    spinner: true,
+    label: (i) => {
+      const a = String(i?.action || "");
+      const target = String(i?.url || i?.selector || i?.key || "");
+      return "Browser " + a + (target ? " " + target.slice(0, 60) : "");
+    },
     diffs: null,
   },
   todowrite: {

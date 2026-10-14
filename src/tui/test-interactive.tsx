@@ -17,7 +17,7 @@ import { input, setInput, setCursor, suggestions, autoKind, autoIndex, messages,
 // Static theme import: the App reads the SAME module instance's theme signal,
 // so palette()/setTheme() assertions reflect the live UI. (A dynamic import
 // would code-split a second instance whose signal never changes.)
-import { palette, setTheme as setThemeFn, themeOptions as themeOptionsFn } from "./theme.ts";
+import { palette, setTheme as setThemeFn, themeOptions as themeOptionsFn, THEMES } from "./theme.ts";
 import { getToolDefinitions, executeTool } from "../tools/index.js";
 import { formatTokens, formatUsd } from "../core/usage.js";
 import { saveSession, deleteSession } from "../core/session-store.js";
@@ -91,14 +91,64 @@ async function waitForFrame(cond: (f: string) => boolean, what: string, timeoutM
   }
 }
 
+// Failure records feed the end-of-run summary — with ~70 tests of output,
+// a bare "FAIL:" line that scrolled away is useless in CI. Each record keeps
+// the test name, message, and a stripped tail of the frame at failure time
+// so the failure is self-diagnosing.
 let assertFails = 0;
+let curTest = "(boot)";
+const failures: Array<{ test: string; msg: string; frameTail: string }> = [];
+const testTimings: Array<{ name: string; ms: number }> = [];
+let curTestStart = Date.now();
+function frameTailSafe(n: number): string {
+  try {
+    const f = strip(setup.captureCharFrame());
+    const lines = f.split("\n");
+    return lines.slice(Math.max(0, lines.length - n)).join("\n");
+  } catch { return ""; } // renderer not mounted yet / already torn down
+}
 const _rawAssert = console.assert.bind(console);
 console.assert = function(cond: any, msg: string) {
-  if (!cond) { assertFails++; _rawAssert(false, msg || "assertion failed"); }
+  if (!cond) {
+    assertFails++;
+    failures.push({ test: curTest, msg: msg || "assertion failed", frameTail: frameTailSafe(12) });
+    _rawAssert(false, msg || "assertion failed");
+    // Opt-in fail-fast for bisecting a cascade: TEST_BAIL=1 stops at the
+    // first failure instead of letting dirty state pollute later tests.
+    if (process.env.TEST_BAIL) { printSummary(); process.exit(1); }
+  }
 } as any;
 
+// Ctrl+C mid-suite: print whatever we have so partial runs are diagnosable,
+// and exit 130 (SIGINT convention) instead of vanishing.
+process.on("SIGINT", () => {
+  console.log("\n--- INTERRUPTED (SIGINT) — partial summary follows ---");
+  printSummary();
+  process.exit(130);
+});
+
+function printSummary() {
+  const passed = testCount - new Set(failures.map(f => f.test)).size;
+  console.log("\n========== SUMMARY ==========");
+  console.log("tests: " + testCount + "  passed-without-failures: " + passed + "  failed-assertions: " + assertFails);
+  if (failures.length) {
+    console.log("--- FAILURES ---");
+    for (const f of failures) {
+      console.log("[" + f.test + "] " + f.msg);
+      if (f.frameTail) console.log("  frame tail:\n" + f.frameTail.split("\n").map(l => "    | " + l).join("\n"));
+    }
+  }
+  const slow = [...testTimings].sort((a, b) => b.ms - a.ms).slice(0, 5);
+  console.log("--- SLOWEST 5 ---");
+  for (const t of slow) console.log((t.ms + "ms").padStart(7) + "  " + t.name);
+}
+
 let testCount = 0;
-function header(name: string) { testCount++; console.log("\n=== TEST " + name + " ==="); }
+function header(name: string) {
+  if (testCount > 0) testTimings.push({ name: curTest, ms: Date.now() - curTestStart });
+  curTest = name; curTestStart = Date.now();
+  testCount++; console.log("\n=== TEST " + name + " ===");
+}
 function ok(name: string) { console.log("  OK \u2014 " + name); }
 
 header("1: Splash renders with InputBar");
@@ -1270,8 +1320,9 @@ const themeFile = path.join(os.homedir(), ".loom", "tui.json");
 let themeSaved = false;
 try { themeSaved = JSON.parse(fs.readFileSync(themeFile, "utf8")).theme === "ocean"; } catch {}
 console.assert(oceanBg === "#0e1a26" && themeSaved, "FAIL: ocean theme should be live + persisted, bg=" + oceanBg);
+const loomBg = THEMES.loom.palette.bg;
 const okTheme = st("loom");
-console.assert(okTheme && pal().bg === "#191817", "FAIL: setTheme('loom') should restore the default");
+console.assert(okTheme && pal().bg === loomBg, "FAIL: setTheme('loom') should restore the default");
 console.assert(st("nope") === false, "FAIL: unknown theme id should be rejected");
 ok("theme switching");
 
@@ -1290,12 +1341,12 @@ await setup.mockMouse.moveTo(hoverX, hoverY + 1);
 await sleep(250);
 const hoverFrame = strip(setup.captureCharFrame());
 const hoverRow = hoverFrame.split("\n")[hoverY + 1];
-console.assert(hoverRow && hoverRow.includes("> "), "FAIL: hovering a theme row should move the selection");
-console.assert(pal().bg !== "#191817", "FAIL: hovering a theme row should live-preview it (bg=" + pal().bg + ")");
+console.assert(hoverRow && hoverRow.includes("▸ "), "FAIL: hovering a theme row should move the selection");
+console.assert(pal().bg !== loomBg, "FAIL: hovering a theme row should live-preview it (bg=" + pal().bg + ")");
 setup.mockInput.pressEscape();
 await sleep(300);
 console.assert(modal() === null, "FAIL: Esc should close the theme picker");
-console.assert(pal().bg === "#191817", "FAIL: Esc should restore the pre-picker theme");
+console.assert(pal().bg === loomBg, "FAIL: Esc should restore the pre-picker theme");
 ok("theme hover preview");
 
 header("33: speed â€” parallel tools, warm MCP, prompt guidance");
@@ -1948,9 +1999,9 @@ try {
     setup.mockInput.pressEnter();
     await sleep(400);
     console.assert(modal()?.type === "select", "FAIL: /skills should reopen for keyboard toggle");
-    // The first row must be highlighted (">" marker) even though row 0 is a header.
+    // The first row must be highlighted ("▸" marker) even though row 0 is a header.
     frame = strip(setup.captureCharFrame());
-    console.assert(frame.split("\n").some(l => /│\s*>/.test(l)), "FAIL: skill modal should show a highlight on a selectable row, got:\n" + frame);
+    console.assert(frame.split("\n").some(l => /│\s*▸/.test(l)), "FAIL: skill modal should show a highlight on a selectable row, got:\n" + frame);
     setup.mockInput.pressEnter(); // toggle target OFF
     await sleep(400);
     const on = settings37.loadConfig().skillDisabled || [];
@@ -2428,11 +2479,14 @@ ok("vim editing + status template");
 
 console.log("");
 _sessMock.sendUserMessage = _realSendAll;
+testTimings.push({ name: curTest, ms: Date.now() - curTestStart });
 if (assertFails === 0) {
   console.log("ALL " + testCount + " TESTS PASSED \u2014 run good");
+  printSummary();
   process.exit(0);
 } else {
-  console.log(assertFails + " assertion(s) FAILED \u2014 see FAIL lines above");
+  console.log(assertFails + " assertion(s) FAILED");
+  printSummary();
   process.exit(1);
 }
 

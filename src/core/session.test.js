@@ -195,7 +195,7 @@ test("runTurn: abort preserves partial streamed text", async () => {
   });
   expect(res.interrupted).toBe(true);
   expect(s.interrupted).toBe(false); // flag reset by finishInterrupted
-  expect(res.content).toBe("(interrupted)");
+  expect(res.content).toBe("(interrupted before any text was streamed)");
   expect(deltas.length).toBe(0);
   const s2 = freshSession();
   s2.getResponse = async () => {
@@ -216,12 +216,132 @@ test("runTurn: no tool-use cap — long tool chains run until the model stops", 
     if (calls <= 60) {
       return { type: "assistant", content: "", toolCalls: [{ id: "t" + calls, name: "todowrite", input: { todos: [{ text: "step " + calls, status: "pending" }] } }] };
     }
+    // Mark the tracked work done before the final reply — otherwise the
+    // drive-to-completion guard would (correctly) keep nudging.
+    if (calls === 61) {
+      return { type: "assistant", content: "", toolCalls: [{ id: "t61", name: "todowrite", input: { todos: [{ content: "step 60", status: "completed" }] } }] };
+    }
     return { type: "assistant", content: "finally done", toolCalls: [] };
   };
   const res = await s.runTurn({});
   expect(res.type).toBe("text");
   expect(res.content).toContain("finally done");
-  expect(calls).toBe(61);
+  expect(calls).toBe(62);
+});
+
+test("runTurn: drive-to-completion — premature summary with open todos continues", async () => {
+  const s = freshSession();
+  let calls = 0;
+  s.getResponse = async () => {
+    calls++;
+    if (calls === 1) {
+      return { type: "assistant", content: "", toolCalls: [{ id: "t1", name: "todowrite", input: { todos: [
+        { content: "item one", status: "pending" },
+        { content: "item two", status: "pending" },
+      ] } }] };
+    }
+    if (calls === 2) {
+      return { type: "assistant", content: "", toolCalls: [{ id: "t2", name: "todowrite", input: { todos: [
+        { content: "item one", status: "completed" },
+        { content: "item two", status: "pending" },
+      ] } }] };
+    }
+    if (calls === 3) {
+      // Premature wrap-up while "item two" is still open.
+      return { type: "assistant", content: "Done so far — item one is finished.", toolCalls: [] };
+    }
+    if (calls === 4) {
+      return { type: "assistant", content: "", toolCalls: [{ id: "t4", name: "todowrite", input: { todos: [
+        { content: "item one", status: "completed" },
+        { content: "item two", status: "completed" },
+      ] } }] };
+    }
+    return { type: "assistant", content: "All done.", toolCalls: [] };
+  };
+  const res = await s.runTurn({});
+  expect(res.type).toBe("text");
+  expect(res.content).toBe("All done.");
+  expect(calls).toBe(5);
+  const nudges = s.messages.filter((m) => m.role === "user" && String(m.content).includes("unfinished work detected"));
+  expect(nudges.length).toBe(1);
+  expect(String(nudges[0].content)).toContain("item two");
+  // The nudge quotes the model's ACTUAL last message, not a canned line.
+  expect(String(nudges[0].content)).toContain("Your last message was:");
+  expect(String(nudges[0].content)).toContain("Done so far");
+  // Everything completed -> no leftovers surfaced to the UI.
+  expect(res.openTodos).toBeUndefined();
+});
+
+test("runTurn: drive-to-completion nudges are capped", async () => {
+  const s = freshSession();
+  let calls = 0;
+  s.getResponse = async () => {
+    calls++;
+    if (calls === 1) {
+      return { type: "assistant", content: "", toolCalls: [{ id: "t1", name: "todowrite", input: { todos: [{ content: "stuck item", status: "pending" }] } }] };
+    }
+    return { type: "assistant", content: "premature stop", toolCalls: [] };
+  };
+  const res = await s.runTurn({});
+  expect(res.type).toBe("text");
+  // 1 tool call + 5 nudged continuations; the 6th premature reply returns.
+  expect(calls).toBe(7);
+  const nudges = s.messages.filter((m) => m.role === "user" && String(m.content).includes("unfinished work detected"));
+  expect(nudges.length).toBe(5);
+  // Every nudge carries the actual last reply and the open todo list.
+  expect(String(nudges[0].content)).toContain("premature stop");
+  expect(String(nudges[0].content)).toContain("stuck item");
+  // The turn reports the REAL leftovers so the UI can show them.
+  expect(res.openTodos.map((t) => t.content)).toEqual(["stuck item"]);
+});
+
+test("runTurn: transient provider errors are retried before surfacing", async () => {
+  const s = freshSession();
+  let calls = 0;
+  s.getResponse = async () => {
+    calls++;
+    if (calls <= 2) throw new Error("socket hang up");
+    return { type: "assistant", content: "recovered", toolCalls: [] };
+  };
+  const res = await s.runTurn({});
+  expect(res.type).toBe("text");
+  expect(res.content).toBe("recovered");
+  expect(calls).toBe(3);
+});
+
+test("runTurn: empty reply after tools is nudged with the real tool-call count", async () => {
+  const s = freshSession();
+  let calls = 0;
+  s.getResponse = async () => {
+    calls++;
+    if (calls === 1) {
+      return { type: "assistant", content: "", toolCalls: [{ id: "t1", name: "read", input: { filePath: __filename } }] };
+    }
+    if (calls === 2) return { type: "assistant", content: "", toolCalls: [] }; // silent stop
+    return { type: "assistant", content: "recovered with actual text", toolCalls: [] };
+  };
+  const res = await s.runTurn({});
+  expect(res.type).toBe("text");
+  expect(res.content).toBe("recovered with actual text");
+  expect(calls).toBe(3);
+  const nudge = s.messages.find((m) => m.role === "user" && String(m.content).includes("empty reply"));
+  expect(nudge).toBeTruthy();
+  expect(String(nudge.content)).toContain("1 tool call");
+});
+
+test("primary agents: role prompt reaches the system prompt; children are exempt", () => {
+  const s = freshSession();
+  s.setMode("build");
+  expect(s._primaryBlock()).toContain("MAIN ORCHESTRATOR");
+  s.setMode("plan");
+  expect(s._primaryBlock()).toContain("Plan agent");
+  // Child sessions and @agent turns use _agentBlock, never the primary block.
+  const child = freshSession();
+  child._isChild = true;
+  expect(child._primaryBlock()).toBe("");
+  const agentTurn = freshSession();
+  agentTurn.agent = { id: "explore", name: "Explore", mode: "subagent", tools: ["read"] };
+  expect(agentTurn._primaryBlock()).toBe("");
 });
 
 test("runTurn: model errors surface as error responses", async () => {

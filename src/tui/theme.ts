@@ -2,6 +2,8 @@
 // palette() returns a live Proxy: each property is read from the currently
 // selected theme at render time, so switching themes re-renders instantly.
 import { createSignal } from "solid-js";
+import fs from "fs";
+import path from "path";
 import { loadTuiJson, saveTuiJson } from "./tui-config.ts";
 
 export type Palette = {
@@ -22,49 +24,50 @@ export type Palette = {
 export type Theme = { id: string; label: string; desc: string; palette: Palette };
 
 const LOOM_DARK: Palette = {
-  // Deep warm charcoal — terracotta accents
-  bg: "#191817",
-  bgMsg: "#131211",
-  bgPanel: "#211f1e",
-  bgPanelAlt: "#2a2725",
-  bgInput: "#25221f",
-  bgHover: "#322e2a",
-  border: "#4a4440",
-  borderFocus: "#e07856",
-  fg: "#f0ebe4",
-  fgDim: "#a89e93",
-  fgMuted: "#6e655c",
-  primary: "#e07856",
-  primarySoft: "#f4a27f",
-  secondary: "#b8d0a8",
-  accent: "#e8b06f",
+  // Deep warm charcoal — terracotta accents (ember layers: every surface
+  // steps clearly toward bgPanelAlt so panels read without any borders)
+  bg: "#171512",
+  bgMsg: "#121009",
+  bgPanel: "#1f1c18",
+  bgPanelAlt: "#282420",
+  bgInput: "#201d18",
+  bgHover: "#322c24",
+  border: "#463f36",
+  borderFocus: "#e8845c",
+  fg: "#f2ede4",
+  fgDim: "#a89d8d",
+  fgMuted: "#6b6252",
+  primary: "#e8845c",
+  primarySoft: "#f5a883",
+  secondary: "#a8c496",
+  accent: "#edb56f",
   success: "#a3c084",
   warning: "#e0b356",
-  error: "#e06c5a",
+  error: "#e06858",
   thinking: "#d9a35f",
   syntax: {
-    kw: "#e07856",
+    kw: "#e8845c",
     str: "#a3c084",
-    com: "#6e655c",
+    com: "#6b6252",
     num: "#e0b356",
-    call: "#e8b06f",
-    plain: "#f0ebe4",
+    call: "#edb56f",
+    plain: "#f2ede4",
   },
 };
 
 const LIGHT: Palette = {
   // Paper light — warm parchment with terracotta
-  bg: "#faf7f2",
-  bgMsg: "#efe9df",
-  bgPanel: "#f3eee6",
-  bgPanelAlt: "#eae3d8",
+  bg: "#faf7f0",
+  bgMsg: "#efe8dc",
+  bgPanel: "#f2ece1",
+  bgPanelAlt: "#e8e0d1",
   bgInput: "#ffffff",
-  bgHover: "#e0d6c8",
-  border: "#c9bfae",
+  bgHover: "#ddd3c2",
+  border: "#c4b9a5",
   borderFocus: "#c2593a",
   fg: "#2b2620",
   fgDim: "#6f675c",
-  fgMuted: "#9a9082",
+  fgMuted: "#968c7c",
   primary: "#c2593a",
   primarySoft: "#a34a2f",
   secondary: "#5c7a4a",
@@ -76,7 +79,7 @@ const LIGHT: Palette = {
   syntax: {
     kw: "#c2593a",
     str: "#5f8a3d",
-    com: "#9a9082",
+    com: "#968c7c",
     num: "#a97a1a",
     call: "#b0742f",
     plain: "#2b2620",
@@ -301,8 +304,20 @@ export function palette(_name?: string): Palette {
   }) as Palette;
 }
 
-export const VERSION = "1.2.0";
+// Version read from package.json — the single source of truth for `loom
+// --version`, the splash, and the sidebar (a hardcoded const drifted to 1.2.0
+// while the package moved on).
+export const VERSION = (() => {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(import.meta.dir, "..", "..", "package.json"), "utf8"));
+    return String(pkg.version || "0.0.0");
+  } catch {
+    return "0.0.0";
+  }
+})();
 
+// Full "LOOM CODE" block wordmark for the splash, rendered in the theme's
+// primary (terracotta on the default theme).
 export const LOOM_LOGO = [
   " ██╗      ██████╗  ██████╗ ███╗   ███╗      ██████╗ ██████╗ ██████╗ ███████╗",
   " ██║     ██╔═══██╗██╔═══██╗████╗ ████║     ██╔════╝██╔═══██╗██╔══██╗██╔════╝",

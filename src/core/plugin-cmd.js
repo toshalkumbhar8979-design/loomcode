@@ -123,6 +123,7 @@ function mcpHelp() {
     '',
     'Example (claude-compatible): /mcp add stm32 -- "C:\\stm32-mcp\\.venv\\Scripts\\python.exe" -m stm32_mcp.server',
     'Example with env: /mcp add -e BRAVE_API_KEY=x brave-search -- npx -y @modelcontextprotocol/server-brave-search',
+    'From the shell (same syntax): loom add mcp [-e KEY=V] <name> [--] <command> [args...]',
     'The "--" separator is optional; quote any path with spaces. Env keys are usable as $KEY in args.',
     'In the /mcp and /connectors browsers, press A to add with the same one-liner syntax.',
   ].join('\n');

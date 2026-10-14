@@ -23,6 +23,13 @@ const COMPACT_DEFAULT_THRESHOLD = 0.75;
 const COMPACT_KEEP_MESSAGES = 8;
 // Never compact conversations shorter than this.
 const COMPACT_MIN_MESSAGES = 6;
+// Drive-to-completion: how many continuation nudges one turn may spend when
+// the model stops with todos still unfinished (the "stops between tasks"
+// failure). Capped so a model that refuses to update its todos cannot spin.
+const MAX_DRIVE_NUDGES = 5;
+// Transient provider failures (network blip, 5xx, stream reset) retry the
+// model call this many times before the turn surfaces an error.
+const PROVIDER_RETRIES = 2;
 
 /**
  * @typedef {Object} SpeedStats
@@ -242,6 +249,19 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
 - When done, summarize in 1-2 sentences.` : ''}${this.mode === 'plan' ? `- Read-only tools only: read, glob, grep, webfetch, todowrite. No MCP tools.
 - Investigate thoroughly, then output a "## Plan" with ordered steps (exact file path + what changes each step makes). No narration.` : ''}${this.mode === 'chat' ? `- No tools available; answer conversationally.
 - If the user wants code changes, tell them to switch to Build mode (Tab or /build) and resend.` : ''}${this.config.outputStyle ? `\n\n## Output style\n${this.config.outputStyle}` : ''}`;
+  }
+
+  // System-prompt suffix for the active PRIMARY agent (build/plan/chat): each
+  // primary can carry a role prompt (the Build orchestrator instructions, the
+  // Plan agent role, …) that appends after the base prompt. Child sessions and
+  // @agent turns already use _agentBlock, and primaries never set this.agent,
+  // so the two cannot stack. Resolved lazily so per-turn config changes apply.
+  _primaryBlock() {
+    if (this._isChild || this.agent) return '';
+    let agent = null;
+    try { agent = require('./agents').resolveAgent(this.mode); } catch { return ''; }
+    if (!agent || !agent.prompt) return '';
+    return '\n\n## Acting as the "' + agent.name + '" agent\n' + agent.prompt + '\n';
   }
 
   // Create ./LOOM.md with a template when missing, so memory exists from the
@@ -542,13 +562,19 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
           interrupted: true,
         });
       }
-      return { type: 'text', content: streamed || '(interrupted)', interrupted: true };
+      return { type: 'text', content: streamed || '(interrupted before any text was streamed)', interrupted: true };
     };
 
     // No tool-use cap: the model decides when a turn is finished; the user can
     // always Esc-interrupt a runaway loop.
     let ranTools = false;
     let nudged = false;
+    let toolCallsThisTurn = 0;
+    // Drive-to-completion state (see the no-toolCalls branch below).
+    let driveNudges = 0;
+    let todowroteThisTurn = false;
+    // Transient provider-error retry state.
+    let providerRetries = 0;
     while (true) {
       if (this.interrupted) {
         return finishInterrupted();
@@ -574,6 +600,16 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
             }
             continue;
           }
+        }
+        // Transient provider failure (network blip, 5xx, stream reset): retry
+        // the model call a couple of times instead of killing the turn
+        // mid-task. No tools ran for this iteration, so a retry is side-effect
+        // free.
+        if (providerRetries < PROVIDER_RETRIES) {
+          providerRetries++;
+          await new Promise((resolve) => setTimeout(resolve, 400 * providerRetries));
+          if (this.interrupted) return finishInterrupted();
+          continue;
         }
         return { type: 'error', content: err.message };
       }
@@ -611,15 +647,59 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
         // Silent-stop guard: models occasionally end a turn with an EMPTY
         // reply right after running tools (truncation / provider hiccup),
         // which reads to the user like "the agent just stopped". One
-        // automatic continuation instead of dead-ending with '(no response)'.
+        // automatic continuation instead of dead-ending with a placeholder.
         if (!text.trim() && ranTools && !nudged && !this.interrupted) {
           nudged = true;
-          this.addMessage({ role: 'user', content: '(your last reply was empty — continue where you left off and finish the task)' });
+          this.addMessage({
+            role: 'user',
+            content: '(the model returned an empty reply after ' + toolCallsThisTurn +
+              ' tool call(s) — continue where you left off and finish the task)',
+          });
           continue;
         }
-        return { type: 'text', content: text || '(no response)' };
+        // Drive-to-completion guard: the model stopped calling tools in the
+        // middle of tracked work (todos written this turn still
+        // pending/in_progress). Inject one continuation that quotes the
+        // model's ACTUAL last message and lists the unfinished items — up to
+        // MAX_DRIVE_NUDGES times — so a premature summary does not strand the
+        // task. The model can stop cleanly by completing or cancelling the
+        // items via todowrite. Plan/chat modes are excluded (plan drafts are
+        // meant to end with pending steps).
+        if (!this.interrupted && this.mode === 'build' && ranTools && todowroteThisTurn && driveNudges < MAX_DRIVE_NUDGES) {
+          const unfinished = (this.todos || []).filter((t) => t.status === 'pending' || t.status === 'in_progress');
+          if (unfinished.length) {
+            driveNudges++;
+            const list = unfinished.slice(0, 20).map((t) => '- [' + t.status + '] ' + t.content).join('\n');
+            // Quote what the model actually said — a canned nudge alone gives
+            // the user (and the model) no clue WHERE the turn went off the rails.
+            const lastReply = text.replace(/\s+/g, ' ').trim();
+            const snippet = lastReply
+              ? '\nYour last message was: "' + (lastReply.length > 240 ? lastReply.slice(0, 240) + '…' : lastReply) + '"'
+              : '';
+            this.addMessage({
+              role: 'user',
+              content: '(unfinished work detected: ' + unfinished.length + ' todo(s) still open:\n' + list + snippet +
+                '\nYour reply stopped the turn, but the work above is not done — continue exactly where you left off and finish it. ' +
+                'Only stop when every item is completed or cancelled via todowrite, or when something concrete blocks you — then name the blocker.)',
+            });
+            continue;
+          }
+        }
+        // Surface WHAT is still open when a build-mode turn that WROTE todos
+        // ends with work remaining (same signal as the nudge above), so the
+        // UI can show the real leftovers instead of a generic "stopped"
+        // placeholder. Stale todos from older turns stay silent.
+        const openTodos = (this.mode === 'build' && todowroteThisTurn)
+          ? (this.todos || []).filter((t) => t.status === 'pending' || t.status === 'in_progress')
+          : [];
+        return {
+          type: 'text',
+          content: text || '(the model ended the turn without any text)',
+          openTodos: openTodos.length ? openTodos : undefined,
+        };
       }
       ranTools = true;
+      toolCallsThisTurn += toolCalls.length;
 
       // Execute independent tool calls in parallel; results are appended in the
       // original call order so the conversation history stays deterministic.
@@ -659,7 +739,7 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
         // are checked separately where they apply.
         const permKey = { read:'read', edit:'edit', write:'edit', glob:'glob', grep:'grep', bash:'bash',
                           task:'task', skill:'skill', lsp:'lsp', question:'question', ask:'question', webfetch:'webfetch',
-                          websearch:'websearch' }[tc.name];
+                          websearch:'websearch', browser:'browser' }[tc.name];
         const isMcpAdd = tc.name === 'mcp' && tc.input && tc.input.action === 'add';
         if (permKey || isMcpAdd) {
           const arg = this.permissions.permissionArg(tc.name, tc.input || {});
@@ -734,6 +814,7 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
         this.addMessage({ role: 'tool', toolCallId: tc.id, content: text });
         // Persist real todo state when the model uses the todowrite tool.
         if (tc.name === 'todowrite' && !outcome.error) {
+          todowroteThisTurn = true;
           this.setTodos(tc.input && tc.input.todos);
           // Notify observers (sidebar, etc.) over the tiny event bus — the TUI
           // subscribes once and the panel updates without a re-render cycle.
@@ -805,7 +886,7 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
       maxTokens: this.config.maxTokens || 8192,
       temperature: this.config.temperature ?? 0.7,
       tools: toolDefs,
-      system: this.systemPrompt + (this._skillBlock || '') + (this._agentBlock || ''),
+      system: this.systemPrompt + (this._skillBlock || '') + (this._agentBlock || '') + this._primaryBlock(),
       signal: this.abortController?.signal,
       // Extended thinking: models tagged 'reasoning' reason BEFORE every
       // reply — including after each tool result — so complex tasks get

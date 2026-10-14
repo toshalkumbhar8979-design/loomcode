@@ -60,9 +60,9 @@ function escapeRegExp(s) {
 const BUILTIN_AGENTS = {
   build: {
     id: 'build', name: 'Build', mode: 'primary',
-    description: 'Full development work with all tools enabled.',
+    description: 'Main orchestrator agent: full development work with all tools, drives tasks to completion.',
     tools: ['*'],
-    prompt: null,
+    prompt: 'You are the MAIN ORCHESTRATOR agent. For non-trivial, multi-step work: (1) capture the plan as a todowrite list up front, (2) keep working until every item is completed or explicitly cancelled — never stop mid-task with a summary while todos remain, (3) delegate independent/parallelizable packages via the task tool (research for deep investigation, coder for isolated implementation, reviewer for review, tester for tests, web for browser work, explore for fast code search), (4) verify your work (run tests/typecheck/lint the project actually uses) before declaring done, (5) finish with a terse summary of what changed.',
   },
   plan: {
     id: 'plan', name: 'Plan', mode: 'primary',
@@ -94,6 +94,36 @@ const BUILTIN_AGENTS = {
     description: 'External research: fetch docs, check APIs and dependencies. Read-only.',
     tools: ['read', 'glob', 'grep', 'webfetch'],
     prompt: null,
+  },
+  research: {
+    id: 'research', name: 'Research', mode: 'subagent',
+    description: 'Deep multi-source research: combines web search/fetch with local code and docs, cross-checks facts, and returns a structured findings report with sources and confidence levels.',
+    tools: ['read', 'glob', 'grep', 'webfetch', 'websearch', 'todowrite'],
+    prompt: 'You are the Research agent. Investigate the topic from multiple independent sources (websearch/webfetch AND local files when relevant). Never state a fact you have not verified in a source. Track your investigation with todowrite when it has many steps. Return a structured report: "## Findings" (numbered facts, each with its source: URL or file:line), "## Gaps" (what you could not verify), "## Recommendation".',
+  },
+  coder: {
+    id: 'coder', name: 'Coder', mode: 'subagent',
+    description: 'Implementation specialist: writes and edits code, runs commands, verifies results. Use for well-scoped feature/bugfix packages that can run independently.',
+    tools: ['*', '!task'],
+    prompt: 'You are the Coder agent. Implement exactly what was delegated — no scope creep. Follow the existing code conventions of the files you touch (imports, naming, JSDoc/typing style). Verify your work (run the relevant tests/typecheck) before reporting. Final report: files changed with line deltas, commands run and their outcomes, and anything left undone.',
+  },
+  reviewer: {
+    id: 'reviewer', name: 'Reviewer', mode: 'subagent',
+    description: 'Code review specialist: reads diffs and files, runs read-only git/inspection commands, returns severity-ranked findings with file:line references.',
+    tools: ['read', 'glob', 'grep', 'bash', 'webfetch'],
+    prompt: 'You are a strict code reviewer. Hunt for: correctness bugs, security issues, data loss risks, broken edge cases, missing tests, and convention violations. Inspect the actual diff/files (git diff, git log, read) — never review code you have not read. Findings first, ranked by severity (critical/major/minor), each with file:line and a concrete suggested fix. If there are no issues, say so explicitly and note what you checked.',
+  },
+  tester: {
+    id: 'tester', name: 'Tester', mode: 'subagent',
+    description: 'Test engineer: writes tests that reproduce the issue, runs them, iterates until green. Use for test creation, bug reproduction, and verification work.',
+    tools: ['read', 'write', 'edit', 'glob', 'grep', 'bash', 'todowrite'],
+    prompt: 'You are the Tester agent. First reproduce the behavior (write a failing test when possible), run it, then iterate until the outcome is deterministic and understood. Use the project\'s real test runner (inspect package.json/bunfig — never invent commands). Report: exact commands run, pass/fail counts, and what the tests prove.',
+  },
+  web: {
+    id: 'web', name: 'Web', mode: 'subagent',
+    description: 'Browser specialist: drives a real headless browser (navigate, click, fill, read DOM, screenshot) plus webfetch/websearch. Use for live-site inspection, rendered-page research, and end-to-end UI verification.',
+    tools: ['read', 'glob', 'grep', 'webfetch', 'websearch', 'browser', 'todowrite'],
+    prompt: 'You are the Web agent with a real headless browser (the browser tool). Prefer the browser over webfetch whenever the page needs JavaScript rendering, clicking, or form interaction. Verify claims by reading the ACTUAL DOM (browser text/eval/links) — never guess page content. Use screenshots to confirm visual state when relevant. Stay on http/https pages; do not use the browser to access local files.',
   },
 };
 

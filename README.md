@@ -30,7 +30,8 @@ An AI-powered coding agent for the terminal with multi-provider support and a fu
 - Session memory, /undo, /redo, /compact, /reset, /fork
 - One-shot print mode: `loom -p "query"`
 - Editor integration via the Agent Client Protocol (ACP): `loom acp` (JSON-RPC over stdio) so Zed, JetBrains, and Neovim plugins can drive Loom as their coding agent
-- Browser interface via `loom web` — a zero-dependency Node HTTP server (chat in the browser, password auth, CORS) plus `loom attach` to share the same server from the terminal; optional mDNS advertising as `loom.local` via [bonjour-service](https://www.npmjs.com/package/bonjour-service)
+- OpenCode-style agent harness: main orchestrator agent delegates to specialist subagents (`research`, `coder`, `reviewer`, `tester`, `web`, `explore`, `scout`) via the `task` tool, and a drive-to-completion loop keeps working while todos are still open
+- Headless browser tool (`browser`) — navigate, click, fill, read the DOM, and screenshot real pages from the `web` agent
 - Usage & billing tracking per session + lifetime
 
 ## Prerequisites
@@ -103,34 +104,7 @@ loom --version
 loom --help
 loom --basic                      # skip TUI, use line-mode REPL
 loom acp                          # ACP subprocess mode for editor integrations
-loom web                          # browser interface (HTTP server, opens browser)
-loom attach http://localhost:4096 # attach the terminal to a running loom web
 ```
-
-## Web
-
-Loom runs in your browser with `loom web` — a zero-dependency HTTP server that
-serves a single-page UI and drives the same core session loop as the TUI. Same
-providers/models, tools, MCP servers, and saved sessions; chat streams live in
-the browser, and a shared terminal client can attach to the same server.
-
-```bash
-loom web                           # 127.0.0.1, random port, opens the browser
-loom web --port 4096               # fixed port
-loom web --hostname 0.0.0.0        # reachable on the LAN
-loom web --mdns                    # advertise as loom.local (implies 0.0.0.0)
-loom web --mdns-domain proj.local  # custom mDNS domain
-loom web --cors https://example.com
-LOOM_SERVER_PASSWORD=secret loom web   # password-protect (user: LOOM_SERVER_USERNAME, default "loom")
-
-# Attach the terminal (shares the server's sessions/state):
-loom attach http://localhost:4096
-```
-
-Config-file equivalent (`~/.loom/config.json`): `{ "server": { "port": 4096,
-"hostname": "0.0.0.0", "mdns": true, "cors": ["https://example.com"] } }` — CLI
-flags take precedence. Full flags, the JSON API, and `loom attach` options are
-documented in **[docs/web.md](docs/web.md)**.
 
 ## Editor integration (ACP)
 

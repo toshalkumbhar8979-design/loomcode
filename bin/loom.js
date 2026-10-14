@@ -24,16 +24,6 @@ process.on('unhandledRejection', (reason) => {
     require('../src/acp/acp-server').main();
     return;
   }
-  if (sub === 'web') {
-    // Browser interface: HTTP server on 127.0.0.1, opens the browser.
-    require('../src/web/web-server').main();
-    return;
-  }
-  if (sub === 'attach') {
-    // Terminal client for a running `loom web` server.
-    require('../src/web/attach').main();
-    return;
-  }
   try {
     await updateCheck();
     await main();

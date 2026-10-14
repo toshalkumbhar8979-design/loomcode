@@ -9,6 +9,10 @@ const { ProviderRouter, PROVIDERS } = require('../providers');
 const { saveSession, loadSession } = require('./session-store');
 const { defaultMcpInstall } = require('./plugin-cmd');
 
+// Single source of truth for every version string the CLI prints (banner,
+// --version). package.json is the only place to bump.
+const VERSION = require('../../package.json').version;
+
 const LOOM_BASE = `
  ██╗      ██████╗  ██████╗ ███╗   ███╗      ██████╗ ██████╗ ██████╗ ███████╗
  ██║     ██╔═══██╗██╔═══██╗████╗ ████║     ██╔════╝██╔═══██╗██╔══██╗██╔════╝
@@ -38,7 +42,7 @@ class LoomCLI {
       terminal: true,
     });
     console.log(LOOM_BASE);
-    console.log(`\n  Loom Code v1.2.28 — AI Coding Agent for the terminal`);
+    console.log(`\n  Loom Code v${VERSION} — AI Coding Agent for the terminal`);
     console.log(`  Press Ctrl+C or ESC to interrupt | /help for commands\n`);
 
     process.stdin.on('keypress', (str, key) => {
@@ -391,7 +395,13 @@ class LoomCLI {
    */
   async openGraphBrowser(graph) {
     const http = require('http');
-    const template = fs.readFileSync(path.join(__dirname, '..', 'web', 'graph-view.html'), 'utf8');
+    let template;
+    try {
+      template = fs.readFileSync(path.join(__dirname, '..', 'web', 'graph-view.html'), 'utf8');
+    } catch {
+      console.log('Browser graph view is not available (the web UI has been removed).');
+      return;
+    }
     const html = template.replace('window.__GRAPH__ || { nodes: [], edges: [] }', JSON.stringify(graph).replace(/<\/script/gi, '<\\/script'));
     const server = http.createServer((req, res) => {
       const p = req.url || '/';
@@ -509,7 +519,6 @@ async function main() {
   const cli = new LoomCLI();
 
   const args = process.argv.slice(2);
-  const VERSION = require('../../package.json').version;
 
   const printIdx = args.indexOf('-p');
   const printLongIdx = args.indexOf('--print');
@@ -530,8 +539,7 @@ if (args.includes('--help') || args.includes('-h')) {
     console.log('  loom --basic            Use basic line-mode REPL (no TUI)');
     console.log('  loom --auto             Auto-approve permission prompts');
     console.log('  loom acp                ACP server (JSON-RPC over stdio, for editor plugins)');
-    console.log('  loom web                Browser interface (HTTP server, opens the browser)');
-    console.log('  loom attach <url>       Attach the terminal to a running `loom web` server');
+    console.log('  loom add mcp <spec>     Add an MCP server (same syntax as /mcp add)');
     console.log('  loom -s <session-id>    Resume a saved session');
     console.log('  loom --version           Show version');
     console.log('  loom --help              Show this help');
@@ -549,6 +557,23 @@ if (args.includes('--help') || args.includes('-h')) {
     await cli.cmdGraph(open ? ['open'] : []);
     if (!open) process.exit(0);
     return;
+  }
+
+  // loom add mcp <name> [--] <command> [args...] — register an MCP server from
+  // the shell with the same one-liner syntax as /mcp add (quote paths with
+  // spaces; -e KEY=V for env). Exits 0 on success.
+  if (args[0] === 'add' && args[1] === 'mcp') {
+    const spec = args.slice(2);
+    if (!spec.length) {
+      console.log('Usage: loom add mcp [-e KEY=V] <name> [--] <command> [args...]');
+      console.log('Example: loom add mcp fetch -- npx -y mcp-server-fetch');
+      process.exit(1);
+    }
+    const { mcpAddLineCmd } = require('./plugin-cmd');
+    const msg = mcpAddLineCmd(spec.join(' '));
+    const ok = typeof msg === 'string' && msg.startsWith('Added');
+    console.log(ok ? msg : 'Error: ' + msg);
+    process.exit(ok ? 0 : 1);
   }
 
   if (sessionId && sIndex !== -1) {

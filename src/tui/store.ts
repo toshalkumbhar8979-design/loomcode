@@ -324,7 +324,9 @@ export function allModelOptions() {
       if (!m) continue;
       const key = r.provider + "/" + r.model;
       seen.add(key);
-      out.push({ label: m.name, value: m.id, sub: m.id, provider: r.provider, tags: m.tags, recent: true });
+      // No sub: the full id repeated under every name was pure clutter — the
+      // id is still searchable (filtered() matches value + tags).
+      out.push({ label: m.name, value: m.id, provider: r.provider, tags: m.tags, recent: true });
     }
   }
   for (const p of PROVIDER_ORDER) {
@@ -337,7 +339,7 @@ export function allModelOptions() {
     for (const m of mods) {
       const key = p + "/" + m.id;
       if (seen.has(key)) continue;
-      out.push({ label: m.name, value: m.id, sub: m.id, provider: p, tags: m.tags });
+      out.push({ label: m.name, value: m.id, provider: p, tags: m.tags });
     }
   }
   out.push({ label: "(custom model ID)", value: "__custom__" });

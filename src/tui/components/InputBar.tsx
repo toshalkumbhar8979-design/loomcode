@@ -201,17 +201,19 @@ export function InputBar() {
           </text>
           {slashWin().items.map((item, i) => {
             const abs = slashWin().start + i;
+            const act = abs === autoIndex();
             return (
               <box
- flexDirection="row" paddingY={0}
+                flexDirection="row" paddingY={0}
+                backgroundColor={act ? ui.bgPanelAlt : undefined}
                 onMouseDown={() => selectSuggestionAt(abs)}
                 onMouseUp={() => pickSuggestionAt(abs)}
               >
-                <text fg={abs === autoIndex() ? ui.primary : ui.fgDim}>
-                  {(abs === autoIndex() ? "\u25B6 " : "   ") + item.label.split(" ")[0]}
+                <text fg={act ? ui.primary : ui.fgDim}>
+                  {(act ? "▸ " : "  ") + item.label.split(" ")[0]}
                 </text>
                 <Show when={!!item.desc}>
-                  <text fg={abs === autoIndex() ? ui.fg : ui.fgMuted}>
+                  <text fg={act ? ui.fg : ui.fgMuted}>
                     {"  " + item.desc}
                   </text>
                 </Show>
@@ -230,15 +232,19 @@ export function InputBar() {
         >
           {fileWin().items.map((item, i) => {
             const abs = fileWin().start + i;
+            const act = abs === autoIndex();
             return (
-              <text
-
-                fg={abs === autoIndex() ? ui.primary : ui.fgDim}
+              // Box wrapper: text nodes ignore a direct backgroundColor prop.
+              <box
+                flexDirection="row"
+                backgroundColor={act ? ui.bgPanelAlt : undefined}
                 onMouseDown={() => selectSuggestionAt(abs)}
                 onMouseUp={() => pickSuggestionAt(abs)}
               >
-                {(abs === autoIndex() ? ">  " : "   ") + item.label}
-              </text>
+                <text fg={act ? ui.primary : ui.fgDim}>
+                  {(act ? "▸ " : "  ") + item.label}
+                </text>
+              </box>
             );
           })}
           <text fg={ui.fgMuted}>{"  UP/DN TAB/ENTER pick  wheel/click  ESC close" + rangeHint(fileWin().start, fileWin().total)}</text>
@@ -271,8 +277,13 @@ export function InputBar() {
             <box flexGrow={1} flexDirection="column" justifyContent="center">
               <text>
                 {/* @ts-ignore OpenTUI text nodes take fg/bg via the style prop (TextNodeOptions), not as direct props */}
-                <span style={{ fg: showCursor() ? ui.fgMuted : ui.bgInput }}>{"\u2588"}</span>
-                <span style={{ fg: ui.fgMuted }}>{" Ask anything...  /commands  @file  !shell"}</span>
+                <span style={{ fg: showCursor() ? ui.fg : ui.bgInput }}>{"\u2588"}</span>
+                <span style={{ fg: ui.fgMuted }}>{" Ask anything...  "}</span>
+                <span style={{ fg: ui.primary }}>{"/commands"}</span>
+                <span style={{ fg: ui.fgMuted }}>{"  "}</span>
+                <span style={{ fg: ui.accent }}>{"@file"}</span>
+                <span style={{ fg: ui.fgMuted }}>{"  "}</span>
+                <span style={{ fg: ui.warning }}>{"!shell"}</span>
               </text>
             </box>
           }

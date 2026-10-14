@@ -12,10 +12,15 @@ dist/
 *.tsbuildinfo
 *.tgz
 *.exe
-tu.txt
+tui.txt
 .loom/graph/
 .vscode/
 fix1.txt
 tui-out*.txt
+tu.txt
 cap.txt
 pw1.txt
+input/
+FROZEN-SPLASH-DEBUG.md
+HN_POST.md
+UPCOMING-FEATURES.md

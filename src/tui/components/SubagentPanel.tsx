@@ -25,7 +25,7 @@ function statusColor(s: SubagentEntry["status"]): string {
   if (s === "running") return ui.warning || ui.primary;
   if (s === "done") return ui.success || ui.primary;
   if (s === "cancelled") return ui.fgMuted;
-  return "#ff5555";
+  return ui.error || "#ff5555";
 }
 
 function fmtCost(c: number): string {

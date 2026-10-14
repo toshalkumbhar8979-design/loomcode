@@ -74,7 +74,7 @@ process.title = "loom-code";
     const args = process.argv.slice(2);
     const coreMode = args.includes("--basic") || args.includes("-p") || args.includes("--print")
       || args.includes("--help") || args.includes("-h") || args.includes("--version") || args.includes("-v")
-      || ["acp", "web", "attach", "graph"].includes(args[0]);
+      || ["acp", "graph"].includes(args[0]);
     if (!coreMode) {
       await import("@opentui/solid/preload");
       await import("../src/tui-open.tsx");
@@ -82,17 +82,9 @@ process.title = "loom-code";
     }
     // Subcommands that must never reach the interactive CLI/TUI: cli.main()
     // has no handler for them and would fall through to launching the full
-    // screen app (`loom web` painted the splash instead of serving HTTP).
-    if (args[0] === "web") {
-      require("../src/web/web-server.js").main();
-      return;
-    }
+    // screen app instead of running the requested command.
     if (args[0] === "acp") {
       require("../src/acp/acp-server.js").main();
-      return;
-    }
-    if (args[0] === "attach") {
-      require("../src/web/attach.js").main();
       return;
     }
     const { main } = require("../src/core/cli.js");

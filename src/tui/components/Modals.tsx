@@ -35,12 +35,16 @@ export function ModalFrame(props: { title: string; subtitle?: string; children: 
   // Floating panel: centered over the terminal but NOT a full-screen takeover —
   // no backdrop fill, so the chat and any running agent stay visible behind it
   // ("same window, hovering"). Keys still belong to the modal while open.
+  // Border is subtle (ui.border) — the title carries the accent, no divider
+  // rules inside (they read as a grid).
   return (
     <box position="absolute" top={0} left={0} right={0} bottom={0}
       alignItems="center" justifyContent="center" flexDirection="column">
-      <box border borderStyle="rounded" borderColor={ui.primary} backgroundColor={ui.bgPanel}
-        paddingX={3} paddingY={2} flexDirection="column" minWidth={52} maxWidth={72}>
-        <text fg={ui.primary}>{props.title}</text>
+      <box border borderStyle="rounded" borderColor={ui.border} backgroundColor={ui.bgPanel}
+        paddingX={3} paddingY={1} flexDirection="column" minWidth={52} maxWidth={72}>
+        <box flexDirection="row" alignItems="center">
+          <text fg={ui.primary}>{"◆ " + props.title}</text>
+        </box>
         {props.subtitle ? <text fg={ui.fgMuted} marginTop={0}>{props.subtitle}</text> : null}
         <box flexDirection="column" marginTop={1}>{props.children}</box>
         {props.footer ? <text fg={ui.fgMuted} marginTop={1}>{props.footer}</text> : null}
@@ -298,6 +302,7 @@ export function SelectModal(props: {
           return (
             <box
               flexDirection="row" paddingLeft={2}
+              backgroundColor={active ? ui.bgPanelAlt : undefined}
               // Hover moves the selection (live theme preview via onPreview) —
               // but only for genuine pointer movement, never while a
               // keyboard/wheel scroll is settling (see hoverLockUntil).
@@ -306,10 +311,10 @@ export function SelectModal(props: {
               onMouseUp={() => clickRow(abs)}
             >
               <text fg={active ? ui.primary : ui.fgDim}>
-                {(active ? " > " : "   ") + fit(opt.label, LABEL_MAX)}
+                {(active ? " ▸ " : "   ") + fit(opt.label, LABEL_MAX)}
               </text>
-              {opt.recent ? <text fg={ui.fgMuted}> {" \u2713 recent"}</text> : null}
-              {opt.sub ? <text fg={ui.fgDim}>  {"(" + fit(opt.sub, SUB_MAX) + ")"}</text> : null}
+              {opt.recent ? <text fg={ui.fgMuted}> {" ✓ recent"}</text> : null}
+              {opt.sub ? <text fg={active ? ui.fg : ui.fgDim}>  {"(" + fit(opt.sub, SUB_MAX) + ")"}</text> : null}
             </box>
           );
         })}
@@ -615,25 +620,31 @@ function ServerBrowser(props: { kind: "mcp" | "connector" }) {
   // capped so the command column keeps ~28 chars. Without an explicit width the
   // name text yoga-shrinks to zero width when the command is long.
   const nameW = () => Math.min(30, Math.max(18, ...servers().map(s => String(s.name).length + 9)));
-  // Command column budget: modal inner ~64 chars minus name column minus the
-  // "→  " arrow — any longer and the text pixel-punches past the right border.
-  const cmdW = () => Math.max(24, 62 - nameW());
+  // Command column budget: modal inner ~62 chars (64 minus the row's left
+  // padding) minus name column — any longer and the text pixel-punches past
+  // the right border.
+  const cmdW = () => Math.max(22, 60 - nameW());
 
   return (
-    <ModalFrame title={title} subtitle={"Enter toggles a server on/off" + rangeSub()} footer={kbNav().submit + " toggle  |  A add " + (kind === "connector" ? "connector" : "server") + "  |  wheel scroll  |  " + kbNav().cancel + " close"}>
+    <ModalFrame title={title} subtitle={"Enter toggles a server" + rangeSub()} footer={kbNav().submit + " toggle  ·  A add  ·  " + kbNav().cancel + " close"}>
       <box onMouseScroll={scrollBy} flexDirection="column" flexShrink={0}>
         {win().items.map((s, i) => {
           const abs = win().start + i;
+          const active = abs === sel();
           return (
             <box
- flexDirection="row" paddingY={0} height={1} flexShrink={0}
+              flexDirection="row" paddingY={0} height={1} flexShrink={0}
+              paddingLeft={1}
+              backgroundColor={active ? ui.bgPanelAlt : undefined}
               onMouseDown={() => setSel(abs)}
               onMouseUp={() => { if (abs === sel()) { const r = toggleServer(s.name); if (!r || !r.error) refresh(); } }}
             >
-              <text fg={abs === sel() ? ui.primary : ui.fgDim} width={nameW()} height={1} flexShrink={0}>
-                {"  " + (s.enabled ? "[on] " : "[off] ") + s.name}
+              <text fg={active ? ui.primary : ui.fgDim} width={nameW()} height={1} flexShrink={0}>
+                {(active ? "▸ " : "  ") + "[" + (s.enabled ? "on" : "off") + "] " + s.name}
               </text>
-              <text fg={ui.fgMuted} height={1} flexGrow={1}>{"\u2192  " + mcpFit(s.command + " " + (s.args || []).join(" "), cmdW())}</text>
+              <text fg={s.enabled ? ui.success : ui.fgMuted} height={1} flexGrow={1}>
+                {mcpFit(s.command + " " + (s.args || []).join(" "), cmdW())}
+              </text>
             </box>
           );
         })}
@@ -705,15 +716,18 @@ export function PaletteModal(props: { onPick: (cmd: string) => void }) {
       <box onMouseScroll={scrollBy}>
         {win().items.map((it, i) => {
           const abs = win().start + i;
+          const active = abs === sel();
           return (
             <box
- flexDirection="row" paddingY={0}
+              flexDirection="row" paddingY={0}
+              backgroundColor={active ? ui.bgPanelAlt : undefined}
               onMouseDown={() => setSel(abs)}
               onMouseUp={() => clickRow(abs)}
             >
-              <text fg={abs === sel() ? ui.primary : ui.fgDim}>
-                {abs === sel() ? "> " : "   "}{it.label.split("/")[1] || it.label}
+              <text fg={active ? ui.primary : ui.fgDim}>
+                {active ? "▸ " : "  "}{it.label.split("/")[1] || it.label}
               </text>
+              {it.sub ? <text fg={active ? ui.fg : ui.fgMuted}>{"  " + String(it.sub).slice(0, 36)}</text> : null}
             </box>
           );
         })}

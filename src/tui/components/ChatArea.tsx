@@ -441,8 +441,8 @@ function MsgBubble(props: { m: any; idx: number }) {
 
   if (m.role === "system") {
     return (
-      <box marginBottom={1} paddingX={2}>
-        <text fg={ui.fgMuted}>{m.content}</text>
+      <box marginBottom={1} paddingX={2} backgroundColor={ui.bgMsg}>
+        <text fg={ui.fgMuted}>{"· " + m.content}</text>
       </box>
     );
   }
@@ -486,7 +486,7 @@ function MsgBubble(props: { m: any; idx: number }) {
       {!todoShown && m.todos?.length ? <TodosBlock todos={m.todos} /> : null}
       {!isThink ? (
         <box flexDirection="row" paddingLeft={3} marginTop={1}>
-          <text fg={isErr ? ui.error : ui.secondary}>{"\u25A3 " + (agentTag || "Loom")}</text>
+          <text fg={isErr ? ui.error : ui.primary}>{"\u25A3 " + (agentTag || "Loom")}</text>
           <text fg={ui.fgMuted}>
             {(m.thinkTime ? " \u00B7 " + fmtMs(m.thinkTime) : "") + (isStop ? " \u00B7 interrupted" : "")}
           </text>

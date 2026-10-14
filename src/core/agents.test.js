@@ -236,3 +236,43 @@ test("runSubagent: cancelSubagent aborts a live child and the run resolves inter
     Session.prototype.runTurn = origRunTurn;
   }
 });
+
+test("registry: specialist subagents (research/coder/reviewer/tester/web) + build orchestrator prompt", () => {
+  const all = agents.loadAgents();
+  for (const id of ["research", "coder", "reviewer", "tester", "web"]) {
+    expect(all[id]).toBeTruthy();
+    expect(all[id].mode).toBe("subagent");
+    expect(all[id].prompt).toBeTruthy();
+    expect(all[id].description).toBeTruthy();
+    // no recursion: subagents can never delegate further
+    expect(agents.agentToolAllowed(all[id], "task")).toBe(false);
+  }
+  // the main agent carries the orchestrator role prompt
+  expect(all.build.prompt).toContain("MAIN ORCHESTRATOR");
+  // tool scoping per specialist
+  expect(agents.agentToolAllowed(all.web, "browser")).toBe(true);
+  expect(agents.agentToolAllowed(all.web, "websearch")).toBe(true);
+  expect(agents.agentToolAllowed(all.research, "websearch")).toBe(true);
+  expect(agents.agentToolAllowed(all.research, "write")).toBe(false);
+  expect(agents.agentToolAllowed(all.reviewer, "bash")).toBe(true);
+  expect(agents.agentToolAllowed(all.reviewer, "edit")).toBe(false);
+  expect(agents.agentToolAllowed(all.tester, "bash")).toBe(true);
+  expect(agents.agentToolAllowed(all.tester, "write")).toBe(true);
+  expect(agents.agentToolAllowed(all.coder, "write")).toBe(true);
+});
+
+test("browser tool: registered with actions, rejects bad input without launching", async () => {
+  const tools = require("../tools");
+  const defs = tools.getToolDefinitions("build");
+  const browser = defs.find((d) => d.name === "browser");
+  expect(browser).toBeTruthy();
+  expect(browser.description).toContain("headless");
+  expect(browser.input_schema.required).toContain("action");
+  // Unknown action / bad url fail fast (no engine needed).
+  const badAction = await tools.executeTool("browser", { action: "explode" });
+  expect(badAction.error).toContain("Unknown action");
+  const badUrl = await tools.executeTool("browser", { action: "goto", url: "file:///etc/passwd" });
+  expect(badUrl.error).toContain("http/https");
+  const noSel = await tools.executeTool("browser", { action: "click" });
+  expect(noSel.error).toContain("CSS selector");
+});

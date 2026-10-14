@@ -440,7 +440,7 @@ const TOOLS = {
   },
   task: {
     name: 'task',
-    description: 'Delegate a self-contained subtask to a subagent that runs fully autonomously and returns its final answer. Use when a piece of work can run independently (parallelizable), needs a focused toolset, or benefits from a different model. Pick the smallest suitable agent: explore (fast read-only code search), scout (web/docs research), general (full toolset except delegation). Pass the agent a COMPLETE, self-contained instruction: the goal, relevant file paths, and exactly what to return. The subagent may run tools autonomously; fold its findings into your own answer afterwards.',
+    description: 'Delegate a self-contained subtask to a subagent that runs fully autonomously and returns its final answer. Use when a piece of work can run independently (parallelizable), needs a focused toolset, or benefits from a different model. Agents: general (full toolset, default), explore (fast read-only code search), scout (quick docs lookups), research (deep multi-source investigation with a sourced report), coder (isolated implementation packages), reviewer (severity-ranked code review), tester (write/run tests until green), web (headless-browser work on live pages). Pick the smallest suitable agent. Pass a COMPLETE, self-contained instruction: the goal, relevant file paths, and exactly what to return. The subagent may run tools autonomously; fold its findings into your own answer afterwards.',
     parameters: {
       prompt: { type: 'string', required: true, description: 'Complete instructions for the subagent — goal, relevant file paths, and the exact output to return' },
       agent: { type: 'string', required: false, description: 'Subagent id: general (default), explore, scout, or a custom one from config.agents' },
@@ -460,6 +460,22 @@ const TOOLS = {
       const ms = res.durationMs;
       const usage = `[${res.agent} finished in ${(ms / 1000).toFixed(1)}s \u00B7 ${res.tokensIn + res.tokensOut} tokens \u00B7 ${res.costUsd > 0.001 ? '$' + res.costUsd.toFixed(4) : 'free'}]`;
       return usage + '\n\n' + res.content;
+    }
+  },
+  browser: {
+    name: 'browser',
+    description: 'Drive a real headless browser (Playwright). Actions: goto (open an http/https url), click (CSS selector), fill (selector + text), press (key like Enter), text (visible page text + title/url), eval (JS expression in the page context), links (list page links), screenshot (save PNG, returns the file path), close. The browser stays open between calls so you can navigate, interact, and re-read the page. Prefer this over webfetch when the page needs JavaScript rendering or interaction.',
+    parameters: {
+      action: { type: 'string', required: true, description: '"goto" | "click" | "fill" | "press" | "text" | "eval" | "links" | "screenshot" | "close"' },
+      url: { type: 'string', required: false, description: 'Page url (action=goto)' },
+      selector: { type: 'string', required: false, description: 'CSS selector (action=click or fill)' },
+      text: { type: 'string', required: false, description: 'Text to type into the selector (action=fill)' },
+      key: { type: 'string', required: false, description: 'Key to press, e.g. Enter (action=press)' },
+      script: { type: 'string', required: false, description: 'JS expression evaluated in the page (action=eval)' },
+      path: { type: 'string', required: false, description: 'Screenshot destination path (action=screenshot; default: OS temp dir)' },
+    },
+    async execute(params) {
+      return require('./browser').run(params);
     }
   },
   mcp: {

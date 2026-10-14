@@ -57,7 +57,8 @@ function spansToNodes(spans: any[], keyPrefix: string) {
 
 function HeadingText(props: { level: 1 | 2 | 3; spans: any[]; keyPrefix: string }) {
   const marker = props.level === 1 ? "# " : props.level === 2 ? "## " : "### ";
-  return <text fg={ui.primary}>{marker}{spansToNodes(props.spans, props.keyPrefix)}</text>;
+  const color = props.level === 1 ? ui.primary : props.level === 2 ? ui.primarySoft : ui.secondary;
+  return <text fg={color}>{marker}{spansToNodes(props.spans, props.keyPrefix)}</text>;
 }
 
 export function MdText(props: { md: string; wrap?: boolean }) {
