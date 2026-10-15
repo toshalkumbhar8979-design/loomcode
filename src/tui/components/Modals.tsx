@@ -1,5 +1,5 @@
 // Modals -- provider picker, model picker, key input, base URL, settings, palette.
-import { createSignal, createMemo, onMount } from "solid-js";
+import { createSignal, createMemo, onMount, onCleanup } from "solid-js";
 import { useKeyboard, usePaste } from "@opentui/solid";
 import { palette } from "../theme.ts";
 import * as kbs from "../keybinds.ts";
@@ -663,8 +663,9 @@ export function ConnectorsModal() {
 
 // ── Sandbox setup wizard ──
 // Three steps: docker check (with install link when missing) → OS pick →
-// live setup. The container is global — once built, every session and every
-// agent routes commands through it.
+// live setup with a real progress bar (setup streams from the core layer —
+// the TUI never freezes). The container is global and idles in the
+// background; the agent's sandbox tool uses it on demand.
 export function SandboxModal() {
   const sb = require("../../core/sandbox.js");
   const [step, setStep] = createSignal<"docker" | "os" | "setup">("docker");
@@ -673,6 +674,30 @@ export function SandboxModal() {
   const [logs, setLogs] = createSignal<string[]>([]);
   const [busy, setBusy] = createSignal(false);
   const [err, setErr] = createSignal<string | null>(null);
+  const [prog, setProg] = createSignal<{ stage: string; pct: number | null; step: number; total: number } | null>(null);
+  const [spin, setSpin] = createSignal(0);
+  let spinTimer: ReturnType<typeof setInterval> | null = null;
+  onCleanup(() => { if (spinTimer) clearInterval(spinTimer); });
+
+  // Spinner frames while setup is busy (drives the "working…" indicator).
+  function startSpinner() {
+    if (spinTimer) clearInterval(spinTimer);
+    spinTimer = setInterval(() => setSpin((s) => (s + 1) % 10), 120);
+  }
+  function stopSpinner() {
+    if (spinTimer) clearInterval(spinTimer);
+    spinTimer = null;
+  }
+  const SPIN_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
+
+  const STAGE_LABELS: Record<string, string> = {
+    pull: "Pulling image",
+    create: "Creating container",
+    start: "Starting container",
+    essentials: "Installing essentials",
+    browser: "Installing browser",
+    done: "Ready",
+  };
 
   // Docker already installed → advance straight to OS selection (with a
   // brief "installed" flash so the user sees the check happened).
@@ -693,14 +718,18 @@ export function SandboxModal() {
     setStep("setup");
     setBusy(true);
     setErr(null);
+    setProg(null);
+    startSpinner();
     setLogs(["Preparing " + os.label + " (" + os.image + ")…"]);
     sb.setupSandbox({
       osId: os.id,
       onLog: (/** @type {string} */ l) => setLogs((xs) => [...xs, l]),
+      onProgress: (/** @type {{ stage: string; pct: number | null; step: number; total: number }} */ p) => setProg(p),
     }).then((/** @type {{ ok: boolean, error?: string }} */ res) => {
       setBusy(false);
+      stopSpinner();
       if (res.ok) {
-        appendMessage({ role: "system", content: "Sandbox is live (" + os.label + "). Agent commands now run inside Docker; your project is mounted at /workspace. The sandbox is shared: every session and agent uses it." });
+        appendMessage({ role: "system", content: "Sandbox is live (" + os.label + "). The container idles in the background; the agent will use it via the sandbox tool whenever isolation is needed. Your project is mounted at /workspace." });
         showToast("Sandbox ready — " + os.label, "ok");
         closeModal();
       } else {
@@ -805,9 +834,39 @@ export function SandboxModal() {
         </box>
       ) : null}
       {step() === "setup" ? (
-        <box flexDirection="column" maxWidth={64}>
-          {logs().slice(-8).map((l) => <text fg={ui.fgMuted}>{"▸ " + l}</text>)}
-          {busy() ? <text fg={ui.primary}>…</text> : null}
+        <box flexDirection="column" maxWidth={72}>
+          {/* Stage checklist with a live pull-progress bar (pct from core). */}
+          {prog() ? (() => {
+            const p = prog()!;
+            const os = sb.OS_CATALOG[osSel()];
+            // Same stage order the core reports (browser only when offered).
+            const keys = ["pull", "create", "start", "essentials"]
+              .concat(os.browser ? ["browser"] : [], ["done"])
+              .slice(0, p.total);
+            return (
+              <box flexDirection="column" marginBottom={1}>
+                {keys.map((key, i) => {
+                  const done = i < p.step || p.stage === "done";
+                  const active = i === p.step && p.stage !== "done";
+                  const mark = done ? "✓" : active ? SPIN_FRAMES[spin()] : "○";
+                  const color = done ? ui.success : active ? ui.primary : ui.fgDim;
+                  let bar = "";
+                  if (active && p.pct != null) {
+                    const width = 20;
+                    const filled = Math.round((p.pct / 100) * width);
+                    bar = " [" + "█".repeat(filled) + "░".repeat(width - filled) + "] " + p.pct + "%";
+                  } else if (active) {
+                    bar = " …";
+                  }
+                  return (
+                    <text fg={color}>{mark + " " + STAGE_LABELS[key] + bar}</text>
+                  );
+                })}
+              </box>
+            );
+          })() : <text fg={ui.fgMuted}>Starting…</text>}
+          {logs().slice(-6).map((l) => <text fg={ui.fgMuted}>{"▸ " + l.slice(0, 68)}</text>)}
+          {busy() ? <text fg={ui.primary}>{SPIN_FRAMES[spin()] + " working — you can esc; setup continues in the background"}</text> : null}
           {err() ? (
             <box flexDirection="column" marginTop={1}>
               <text fg={ui.error}>{err()}</text>

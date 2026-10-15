@@ -111,3 +111,35 @@ test("installLink: platform URL + guide embeds it", () => {
   expect(link.startsWith("https://docs.docker.com/")).toBe(true);
   expect(sandbox.installGuide()).toContain(link);
 });
+
+test("trackPullLine: folds docker-pull layer lines into fractions + percent", () => {
+  const layers = new Map();
+  // Queued layer → 0%.
+  sandbox.trackPullLine("9ad6246f5168: Waiting", layers);
+  expect(layers.get("9ad6246f5168")).toBe(0);
+  // Mid-download: 5MB of 10MB.
+  sandbox.trackPullLine("9ad6246f5168: Downloading [==>         ] 5MB/10MB", layers);
+  expect(layers.get("9ad6246f5168")).toBeCloseTo(0.5, 5);
+  // A second, fully downloaded layer (IDs are hex).
+  sandbox.trackPullLine("3c814d5612ab: Pull complete", layers);
+  expect(layers.get("3c814d5612ab")).toBe(1);
+  // Overall percent = average of per-layer fractions (2 layers: 0.5 + 1).
+  expect(sandbox.pullPercent(layers)).toBe(75);
+  // Unrelated lines are ignored; empty maps report null (no bar yet).
+  const empty = new Map();
+  sandbox.trackPullLine("Status: Downloaded newer image", empty);
+  expect(empty.size).toBe(0);
+  expect(sandbox.pullPercent(empty)).toBeNull();
+});
+
+test("ensureContainerAlive: friendly error when sandbox was never set up", async () => {
+  // Not enabled in a fresh config dir → no docker invocation at all.
+  const res = await sandbox.ensureContainerAlive();
+  expect(res.ok).toBe(false);
+  expect(res.error).toContain("/sandbox");
+});
+
+test("runInSandbox: refuses before setup (no forced routing)", async () => {
+  const res = await sandbox.runInSandbox("echo hi");
+  expect("error" in res).toBe(true);
+});

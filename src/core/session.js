@@ -263,6 +263,7 @@ ${this.loadSkills()}
 ## Mode
 You are in ${this.mode === 'build' ? 'BUILD MODE (full agent)' : this.mode === 'plan' ? 'PLAN MODE (read-only analysis)' : 'CHAT MODE (conversation only)'}.
 ${this.mode === 'build' ? `- You have all tools available: read, write, edit, bash, glob, grep, webfetch, and MCP tools.
+- bash runs on the user's machine. Only use the sandbox tool when isolation is genuinely needed (the user asked for it, or the command is risky/Linux-only); never for ordinary commands.
 - Inspect, edit, and verify the result yourself end-to-end.
 - When done, summarize in 1-2 sentences.` : ''}${this.mode === 'plan' ? `- Read-only tools only: read, glob, grep, webfetch, todowrite. No MCP tools.
 - Investigate thoroughly, then output a "## Plan" with ordered steps (exact file path + what changes each step makes). No narration.` : ''}${this.mode === 'chat' ? `- No tools available; answer conversationally.

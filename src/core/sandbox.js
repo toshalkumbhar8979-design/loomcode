@@ -1,4 +1,9 @@
-// Docker sandbox — a lightweight, isolated OS for the agent's shell commands.
+// Docker sandbox — a lightweight, isolated Linux OS the agent can use ON
+// DEMAND. It is NOT a routing layer: host commands (bash tool) keep running
+// on the user's machine exactly as before. When the agent needs isolation
+// (user asked for the sandbox, a risky command, a Linux-only tool), it calls
+// the dedicated `sandbox` tool, which runs that ONE command via `docker exec`
+// into a shared idle-running container.
 //
 // Flow (guided in the TUI via the /sandbox modal):
 //   1. Step 1 checks Docker. If missing, the modal shows the download link
@@ -8,13 +13,12 @@
 //      node images, ~250–900 MB). Step 3 pulls it, creates the single
 //      GLOBAL loom-sandbox container with the PROJECT mounted at /workspace,
 //      installs essentials (+ headless chromium when offered, best-effort)
-//      and keeps the container idle-running.
-//   3. With sandbox.enabled, the bash tool routes every command through
-//      `docker exec` into that container instead of the host shell. File
+//      and keeps the container idle-running in the background.
+//   3. With sandbox.enabled, the sandbox TOOL becomes available. Each call
+//      revives the container if it stopped (e.g. after a Docker restart) and
+//      re-mounts the current project, then runs just that command. File
 //      tools stay on the host — the mount is the same directory, so reads
-//      and writes are shared while side effects of commands stay contained.
-//      ensureProjectMount() re-creates the container when the active project
-//      changes, so every session/agent shares one sandbox.
+//      and writes are shared while side effects of the command stay contained.
 //
 // Security posture: no --privileged, no host network, only the project dir
 // is mounted (rw), container runs as the image's default non-root user when
@@ -179,20 +183,22 @@ function toSandboxPath(hostDir, projectRoot) {
 }
 
 /**
- * Run a shell command inside the sandbox container. Streams output via
- * onChunk('out'|'err') while running; resolves with { output, code } or
- * { error }.
+ * Run ONE shell command inside the sandbox container (used by the sandbox
+ * tool — host commands stay on the bash tool). Revives the container if it
+ * stopped and re-mounts the current project, then streams output via
+ * onChunk('out'|'err'); resolves with { output, code } or { error }.
  * @param {string} command
  * @param {{ workdir?: string, projectRoot?: string, timeoutMs?: number, onChunk?: (text: string, stream: 'out'|'err') => void }} [opts]
  * @returns {Promise<{ output: string, code: number }|{ error: string }>}
  */
-function runInSandbox(command, opts) {
+async function runInSandbox(command, opts) {
   const o = opts || {};
-  // Shared container follows the active project (no-op when unchanged).
-  const remount = ensureProjectMount(o.projectRoot);
-  if (!remount.ok && remount.error !== 'sandbox disabled') {
-    return Promise.resolve({ error: 'sandbox re-mount failed: ' + remount.error });
-  }
+  // Bring the container back if the daemon restarted, then make sure it
+  // mounts the CURRENT project (cheap no-op when both already match).
+  const alive = await ensureContainerAlive();
+  if (!alive.ok) return { error: alive.error };
+  const remount = await ensureProjectMount(o.projectRoot);
+  if (!remount.ok) return { error: 'sandbox re-mount failed: ' + remount.error };
   const wd = toSandboxPath(o.workdir, o.projectRoot);
   const timeoutMs = o.timeoutMs || 120000;
   return new Promise((resolve) => {
@@ -235,19 +241,113 @@ function runInSandbox(command, opts) {
 }
 
 /**
+ * Spawn a host command, line-buffer its output, never block the event loop.
+ * Used by setupSandbox so the TUI keeps rendering (and the progress UI keeps
+ * updating) while docker pull / package installs run.
+ * @param {string} cmd
+ * @param {string[]} args
+ * @param {{ timeoutMs?: number, onLine?: (line: string, stream: 'out'|'err') => void }} [opts]
+ * @returns {Promise<{ code: number, out: string }>}
+ */
+function spawnAsync(cmd, args, opts) {
+  const o = opts || {};
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(cmd, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (e) {
+      resolve({ code: -1, out: (e && e.message) || String(e) });
+      return;
+    }
+    const timer = o.timeoutMs
+      ? setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, o.timeoutMs)
+      : null;
+    let out = '';
+    const MAX_OUT = 4 * 1024 * 1024;
+    const feed = (/** @type {Buffer} */ d, /** @type {'out'|'err'} */ stream) => {
+      const t = d.toString();
+      if (out.length < MAX_OUT) out += t;
+      if (!o.onLine) return;
+      // Line-buffer: docker writes progress with \r on TTYs and \n otherwise;
+      // treat both as separators so the UI gets fresh rows, not one blob.
+      const lines = t.split(/\r?\n/);
+      for (const line of lines) {
+        if (!line) continue;
+        try { o.onLine(line.replace(/\x1b\[[0-9;]*m/g, ''), stream); } catch {}
+      }
+    };
+    child.stdout.on('data', (d) => feed(d, 'out'));
+    child.stderr.on('data', (d) => feed(d, 'err'));
+    child.on('error', (err) => {
+      if (timer) clearTimeout(timer);
+      resolve({ code: -1, out: (out ? out + '\n' : '') + err.message });
+    });
+    child.on('close', (code) => {
+      if (timer) clearTimeout(timer);
+      resolve({ code: code == null ? 1 : code, out });
+    });
+  });
+}
+
+// "12.34MB" / "951kB" / "1.2GB" → bytes (docker prints SI-style units).
+function parseBytes(str, unit) {
+  const n = parseFloat(str);
+  if (!isFinite(n)) return 0;
+  const u = String(unit || '').toLowerCase();
+  if (u === 'gb') return n * 1e9;
+  if (u === 'mb') return n * 1e6;
+  if (u === 'kb') return n * 1e3;
+  return n;
+}
+
+/**
+ * Fold one docker-pull stdout line into the per-layer progress map. Layers
+ * report "Downloading [bar] X/Y", "Extracting [bar] X/Y", then "Pull complete".
+ * @param {string} line
+ * @param {Map<string, number>} layers layer-id → fraction 0..1
+ */
+function trackPullLine(line, layers) {
+  const done = /^([0-9a-f]{8,64}):\s+(?:Download complete|Pull complete)\s*$/i.exec(line);
+  if (done) { layers.set(done[1], 1); return; }
+  // "Waiting" = queued layer, no bytes yet.
+  const waiting = /^([0-9a-f]{8,64}):\s+Waiting\s*$/i.exec(line);
+  if (waiting) { layers.set(waiting[1], 0); return; }
+  const active = /^([0-9a-f]{8,64}):\s+(?:Downloading|Extracting)\s+(?:\[[^\]]*\]\s+)?([\d.]+)([kmgt]?b)(?:\/([\d.]+)([kmgt]?b))?/i.exec(line);
+  if (active) {
+    const id = active[1];
+    if (active[4]) {
+      const total = parseBytes(active[4], active[5]);
+      const cur = parseBytes(active[2], active[3]);
+      if (total > 0) layers.set(id, Math.min(1, cur / total));
+    } else if (!layers.has(id)) {
+      layers.set(id, 0);
+    }
+  }
+}
+
+function pullPercent(layers) {
+  if (!layers.size) return null;
+  let sum = 0;
+  for (const frac of layers.values()) sum += frac;
+  return Math.min(99, Math.round((sum / layers.size) * 100));
+}
+
+/**
  * Build the sandbox: pull the chosen OS image, (re)create the container with
  * the project mounted, install essentials (+ headless chromium when the OS
- * offers it). Idempotent — re-running refreshes. The container is a single
- * GLOBAL resource (~/.loom/config.json records it), so every session and
+ * offers it). Fully ASYNC — every docker call streams, so the TUI never
+ * freezes and onProgress/onLog deliver live updates. The container is a
+ * single GLOBAL resource (~/.loom/config.json records it), so every session and
  * every agent shares the same sandbox; only the mounted project follows the
  * working directory via ensureProjectMount().
- * @param {{ osId?: string, projectRoot?: string, onLog?: (line: string) => void }} [opts]
+ * @param {{ osId?: string, projectRoot?: string, onLog?: (line: string) => void, onProgress?: (p: { stage: string, pct: number|null, step: number, total: number }) => void }} [opts]
  * @returns {Promise<{ ok: true, container: string }|{ ok: false, error: string }>}
  */
 async function setupSandbox(opts) {
   const o = opts || {};
   const root = path.resolve(o.projectRoot || process.cwd());
   const log = o.onLog || (() => {});
+  const prog = o.onProgress || (() => {});
   const { state, version } = detectDocker();
   if (state === 'not_installed') return { ok: false, error: 'Docker is not installed. Run /sandbox guide for setup steps.' };
   if (state === 'no_daemon') {
@@ -256,77 +356,124 @@ async function setupSandbox(opts) {
   const osEntry = OS_CATALOG.find((x) => x.id === o.osId) || OS_CATALOG[0];
   const image = osEntry.image;
   log('Docker ' + version + ' detected — using ' + osEntry.label + ' (' + image + ').');
-  try {
-    log('Pulling ' + image + ' (first run only)…');
-    execFileSync('docker', ['pull', image], { encoding: 'utf8', windowsHide: true, timeout: 600000, stdio: ['ignore', 'pipe', 'pipe'] });
-    // Recreate from scratch so image updates + mount changes always apply.
-    try { execFileSync('docker', ['rm', '-f', CONTAINER], { windowsHide: true, timeout: 30000, stdio: 'ignore' }); } catch {}
-    log('Creating container ' + CONTAINER + ' with ' + root + ' mounted at /workspace…');
-    execFileSync('docker', [
-      'create',
-      '--name', CONTAINER,
-      // Isolation: project dir only, no host network, no extra privileges.
-      '-v', root + ':/workspace',
-      '-w', '/workspace',
-      // Idle-forever main process; every agent command is a docker exec.
-      image, 'sleep', 'infinity',
-    ], { encoding: 'utf8', windowsHide: true, timeout: 60000, stdio: ['ignore', 'pipe', 'pipe'] });
-    execFileSync('docker', ['start', CONTAINER], { windowsHide: true, timeout: 60000, stdio: 'ignore' });
-    const pkgCmd = osEntry.pkg === 'apk'
-      ? 'apk add --no-cache ' + BASE_PACKAGES
-      : 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq --no-install-recommends ' + BASE_PACKAGES + ' && rm -rf /var/lib/apt/lists/*';
-    log('Installing essentials (' + BASE_PACKAGES + ')…');
-    execFileSync('docker', ['exec', CONTAINER, 'sh', '-lc', pkgCmd],
-      { encoding: 'utf8', windowsHide: true, timeout: 600000, stdio: ['ignore', 'pipe', 'pipe'] });
-    // Headless browser, when the chosen OS offers one — best-effort so a
-    // missing chromium package never fails the whole setup.
-    if (osEntry.browser) {
-      const browserCmd = osEntry.pkg === 'apk'
-        ? 'apk add --no-cache chromium'
-        : 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq --no-install-recommends chromium && rm -rf /var/lib/apt/lists/*';
-      log('Installing a headless Chromium (best-effort)…');
-      try {
-        execFileSync('docker', ['exec', CONTAINER, 'sh', '-lc', browserCmd],
-          { encoding: 'utf8', windowsHide: true, timeout: 600000, stdio: ['ignore', 'pipe', 'pipe'] });
-      } catch {
-        log('Chromium unavailable in this image — browser tooling will be limited (sandbox continues).');
+  // Stages reported to onProgress: pull → create → start → essentials → browser → done.
+  const stages = ['pull', 'create', 'start', 'essentials'].concat(osEntry.browser ? ['browser'] : [], ['done']);
+  const stageIdx = (/** @type {string} */ s) => { const i = stages.indexOf(s); return i < 0 ? 0 : i; };
+  prog({ stage: 'pull', pct: 0, step: stageIdx('pull'), total: stages.length });
+
+  // ── Stage 1: pull the image (real per-layer progress, async + streamed) ──
+  log('Pulling ' + image + ' (first run only)…');
+  const layers = new Map();
+  let lastPct = -1;
+  const pull = await spawnAsync('docker', ['pull', image], {
+    timeoutMs: 600000,
+    onLine: (line) => {
+      trackPullLine(line, layers);
+      const pct = pullPercent(layers);
+      if (pct != null && pct !== lastPct) {
+        lastPct = pct;
+        prog({ stage: 'pull', pct, step: stageIdx('pull'), total: stages.length });
       }
-    }
-    const cfg = loadConfig();
-    cfg.sandbox = Object.assign({}, cfg.sandbox, {
-      enabled: true, pending: false, image, osId: osEntry.id, projectRoot: root,
-    });
-    saveConfig(cfg);
-    log('Sandbox ready' + (osEntry.browser ? ' — including a headless Chromium for the browser tool' : '') + '.');
-    log('Agent commands now run inside ' + CONTAINER + ' (/workspace = this project). Every session and agent shares it.');
-    return { ok: true, container: CONTAINER };
-  } catch (e) {
-    return { ok: false, error: 'Sandbox setup failed: ' + (e && e.message ? e.message : String(e)) };
+      if (/^status:|^digest:|up to date/i.test(line)) log(line);
+    },
+  });
+  if (pull.code !== 0) {
+    return { ok: false, error: 'docker pull failed (exit ' + pull.code + '): ' + pull.out.slice(-400) };
   }
+  prog({ stage: 'pull', pct: 100, step: stageIdx('pull'), total: stages.length });
+
+  // ── Stage 2: recreate the container from scratch (image updates + mount) ──
+  prog({ stage: 'create', pct: null, step: stageIdx('create'), total: stages.length });
+  await spawnAsync('docker', ['rm', '-f', CONTAINER], { timeoutMs: 30000 });
+  log('Creating container ' + CONTAINER + ' with ' + root + ' mounted at /workspace…');
+  const create = await spawnAsync('docker', [
+    'create',
+    '--name', CONTAINER,
+    // Isolation: project dir only, no host network, no extra privileges.
+    '-v', root + ':/workspace',
+    '-w', '/workspace',
+    // Idle-forever main process; every agent command is a docker exec.
+    image, 'sleep', 'infinity',
+  ], { timeoutMs: 60000 });
+  if (create.code !== 0) {
+    return { ok: false, error: 'docker create failed (exit ' + create.code + '): ' + create.out.slice(-300) };
+  }
+
+  // ── Stage 3: start it (stays idle in the background until the sandbox
+  // tool is explicitly invoked) ──
+  prog({ stage: 'start', pct: null, step: stageIdx('start'), total: stages.length });
+  const start = await spawnAsync('docker', ['start', CONTAINER], { timeoutMs: 60000 });
+  if (start.code !== 0) {
+    return { ok: false, error: 'docker start failed (exit ' + start.code + '): ' + start.out.slice(-300) };
+  }
+
+  // ── Stage 4: install essentials (streamed so the UI shows life) ──
+  prog({ stage: 'essentials', pct: null, step: stageIdx('essentials'), total: stages.length });
+  const pkgCmd = osEntry.pkg === 'apk'
+    ? 'apk add --no-cache ' + BASE_PACKAGES
+    : 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq --no-install-recommends ' + BASE_PACKAGES + ' && rm -rf /var/lib/apt/lists/*';
+  log('Installing essentials (' + BASE_PACKAGES + ')…');
+  const install = await spawnAsync('docker', ['exec', CONTAINER, 'sh', '-lc', pkgCmd], {
+    timeoutMs: 600000,
+    onLine: (line) => { if (!/^\s*$/.test(line)) log(line); },
+  });
+  if (install.code !== 0) {
+    return { ok: false, error: 'package install failed (exit ' + install.code + '): ' + install.out.slice(-400) };
+  }
+
+  // ── Stage 5: headless browser when the OS offers one — best-effort, so a
+  // missing chromium package never fails the whole setup. ──
+  if (osEntry.browser) {
+    prog({ stage: 'browser', pct: null, step: stageIdx('browser'), total: stages.length });
+    const browserCmd = osEntry.pkg === 'apk'
+      ? 'apk add --no-cache chromium'
+      : 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq --no-install-recommends chromium && rm -rf /var/lib/apt/lists/*';
+    log('Installing a headless Chromium (best-effort)…');
+    const browser = await spawnAsync('docker', ['exec', CONTAINER, 'sh', '-lc', browserCmd], {
+      timeoutMs: 600000,
+      onLine: (line) => { if (!/^\s*$/.test(line)) log(line); },
+    });
+    if (browser.code !== 0) {
+      log('Chromium unavailable in this image — browser tooling will be limited (sandbox continues).');
+    }
+  }
+
+  prog({ stage: 'done', pct: 100, step: stageIdx('done'), total: stages.length });
+  const cfg = loadConfig();
+  cfg.sandbox = Object.assign({}, cfg.sandbox, {
+    enabled: true, pending: false, image, osId: osEntry.id, projectRoot: root,
+  });
+  saveConfig(cfg);
+  log('Sandbox ready' + (osEntry.browser ? ' — including a headless Chromium for the browser tool' : '') + '.');
+  log('Container ' + CONTAINER + ' idles in the background; the sandbox tool uses it only when the agent needs a Linux environment.');
+  return { ok: true, container: CONTAINER };
 }
 
 /**
  * Make sure the shared container mounts the CURRENT project. Sessions in
  * different directories share one sandbox — when the active project changes
  * we just re-create the container with the new mount (image stays cached).
- * Cheap no-op when the mount already matches.
+ * Cheap no-op when the mount already matches. Fully async (never blocks the
+ * TUI event loop).
  * @param {string} [projectRoot]
- * @returns {{ ok: true }|{ ok: false, error: string }}
+ * @returns {Promise<{ ok: true }|{ ok: false, error: string }>}
  */
-function ensureProjectMount(projectRoot) {
+async function ensureProjectMount(projectRoot) {
   const root = path.resolve(projectRoot || process.cwd());
   const cfg = loadConfig();
   if (!cfg.sandbox || !cfg.sandbox.enabled) return { ok: false, error: 'sandbox disabled' };
   if (cfg.sandbox.projectRoot === root) return { ok: true };
   const image = cfg.sandbox.image || DEFAULT_IMAGE;
   try {
-    try { execFileSync('docker', ['rm', '-f', CONTAINER], { windowsHide: true, timeout: 30000, stdio: 'ignore' }); } catch {}
-    execFileSync('docker', [
+    await spawnAsync('docker', ['rm', '-f', CONTAINER], { timeoutMs: 30000 });
+    const create = await spawnAsync('docker', [
       'create', '--name', CONTAINER,
       '-v', root + ':/workspace', '-w', '/workspace',
       image, 'sleep', 'infinity',
-    ], { encoding: 'utf8', windowsHide: true, timeout: 60000, stdio: ['ignore', 'pipe', 'pipe'] });
-    execFileSync('docker', ['start', CONTAINER], { windowsHide: true, timeout: 60000, stdio: 'ignore' });
+    ], { timeoutMs: 60000 });
+    if (create.code !== 0) return { ok: false, error: 're-mount create failed: ' + create.out.slice(-200) };
+    const start = await spawnAsync('docker', ['start', CONTAINER], { timeoutMs: 60000 });
+    if (start.code !== 0) return { ok: false, error: 're-mount start failed: ' + start.out.slice(-200) };
     cfg.sandbox.projectRoot = root;
     saveConfig(cfg);
     return { ok: true };
@@ -336,9 +483,35 @@ function ensureProjectMount(projectRoot) {
 }
 
 /**
- * Should the bash tool route this command through the sandbox? Cheap config
- * check — container liveness is verified at setup time, and exec errors
- * surface per command.
+ * Make sure the container exists and is RUNNING before a sandbox-tool call.
+ * Revives a stopped container (Docker Desktop restart, reboot) with a quick
+ * `docker start`; never recreates (image/mount are setup-time concerns).
+ * @returns {Promise<{ ok: true }|{ ok: false, error: string }>}
+ */
+async function ensureContainerAlive() {
+  const cfg = loadConfig();
+  if (!cfg.sandbox || !cfg.sandbox.enabled) {
+    return { ok: false, error: 'Sandbox is not set up. Run /sandbox (or /sandbox setup) first — it only takes a minute and is needed once.' };
+  }
+  if (process.env.LOOM_SANDBOX === '0') {
+    return { ok: false, error: 'Sandbox disabled via LOOM_SANDBOX=0.' };
+  }
+  const inspect = await spawnAsync('docker', ['inspect', '-f', '{{.State.Running}}', CONTAINER], { timeoutMs: 15000 });
+  if (inspect.code !== 0 || !inspect.out.trim()) {
+    return { ok: false, error: 'Sandbox container is missing (deleted?). Run /sandbox setup again.' };
+  }
+  if (inspect.out.trim() === 'true') return { ok: true };
+  const start = await spawnAsync('docker', ['start', CONTAINER], { timeoutMs: 60000 });
+  if (start.code !== 0) {
+    return { ok: false, error: 'Sandbox container exists but could not be started: ' + start.out.slice(-200) + '. If Docker was restarted, start it and try again.' };
+  }
+  return { ok: true };
+}
+
+/**
+ * Is the sandbox TOOL available (set up and not kill-switched)? Used by the
+ * sandbox tool to decide between running and a helpful "run /sandbox first"
+ * error — NOT to route ordinary bash commands (those stay on the host).
  * @returns {boolean}
  */
 function shouldUseSandbox() {
@@ -348,7 +521,7 @@ function shouldUseSandbox() {
 }
 
 /**
- * Toggle sandbox command routing (container keeps running either way).
+ * Toggle sandbox availability (the container idles either way).
  * @param {boolean} on
  */
 function setSandboxEnabled(on) {
@@ -393,7 +566,10 @@ module.exports = {
   runInSandbox,
   setupSandbox,
   ensureProjectMount,
+  ensureContainerAlive,
   shouldUseSandbox,
+  trackPullLine,
+  pullPercent,
   setSandboxEnabled,
   markInstallPending,
   isReadySignal,

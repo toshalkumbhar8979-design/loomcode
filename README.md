@@ -163,7 +163,7 @@ self-test client (`node scripts/acp-smoke.js`) live in **[docs/acp.md](docs/acp.
 | `/tasks` | — | Background tasks |
 | `/share` | — | Export chat as HTML |
 | `/worktree` | `<name>` | New git worktree |
-| `/sandbox` | `setup\|status\|on\|off\|rm` | Docker sandbox |
+| `/sandbox` | `setup\|status\|on\|off\|rm` | Docker sandbox (opt-in `sandbox` tool; host untouched) |
 | `/style` | `[preset\|text]` | Output style preset |
 | `/vim` | — | Toggle vim editing |
 | `/remember` | `<fact>` | Save a fact to LOOM.md |

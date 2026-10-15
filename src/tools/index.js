@@ -186,31 +186,13 @@ const TOOLS = {
   },
   bash: {
     name: 'bash',
-    description: 'Execute a shell command.',
+    description: 'Execute a shell command on the user\'s machine.',
     parameters: {
       command: { type: 'string', required: true, description: 'The command to execute' },
       workdir: { type: 'string', required: false, description: 'Working directory' },
       background: { type: 'boolean', required: false, description: 'Run without waiting (dev servers, long builds). Returns a task id immediately; check with the /tasks panel.' },
     },
     async execute(params, ctx) {
-      // Docker sandbox: when enabled (/sandbox setup), every command runs
-      // inside the loom-sandbox container instead of the host shell.
-      // Background tasks stay on the host (they outlive tool timeouts).
-      const sandbox = require('../core/sandbox');
-      if (!params.background && sandbox.shouldUseSandbox()) {
-        if (!pathAllowed(params.workdir || cwd)) return { error: sandboxDenied('bash', params.workdir || cwd) };
-        const risk = params._approved ? null : commandRiskLabel(params.command);
-        if (risk) return { error: `Blocked by safety filter: ${risk}. Approve it via the permission prompt to run it anyway.` };
-        const stream = ctx && typeof ctx.stream === 'function' ? ctx.stream : null;
-        const res = await sandbox.runInSandbox(params.command, {
-          workdir: params.workdir || cwd,
-          onChunk: stream ? (text, which) => stream(text, which) : undefined,
-        });
-        if ('error' in res) return { error: res.error };
-        let out = res.output;
-        if (res.code !== 0) out += `\n[exit code: ${res.code}]`;
-        return out || 'command completed';
-      }
       // Background mode: fire-and-forget via the task registry.
       if (params.background) {
         const bt = require('../core/background-tasks');
@@ -281,6 +263,32 @@ const TOOLS = {
           resolve({ error: `Error executing command: ${e.message}` });
         }
       });
+    }
+  },
+  sandbox: {
+    name: 'sandbox',
+    description: 'Run a shell command INSIDE the Docker sandbox (isolated Linux container, project mounted at /workspace). Use ONLY when isolation is needed: the user asked for the sandbox, the command is risky (installs, deletions, untrusted scripts), or a Linux-only environment is required. For ordinary commands use bash (host). One command per call; the container idles in the background between calls.',
+    parameters: {
+      command: { type: 'string', required: true, description: 'The Linux shell command to run inside the container' },
+      workdir: { type: 'string', required: false, description: 'Working directory inside the container (host paths under the project map to /workspace/...)' },
+      timeoutMs: { type: 'number', required: false, description: 'Kill the command after this many ms (default 120000)' },
+    },
+    async execute(params, ctx) {
+      // Opt-in isolation path: nothing is routed here automatically. The
+      // container is revived/re-mounted on demand, then torn back to idle.
+      const sandbox = require('../core/sandbox');
+      const risk = params._approved ? null : commandRiskLabel(params.command);
+      if (risk) return { error: `Blocked by safety filter: ${risk}. Approve it via the permission prompt to run it anyway.` };
+      const stream = ctx && typeof ctx.stream === 'function' ? ctx.stream : null;
+      const res = await sandbox.runInSandbox(params.command, {
+        workdir: params.workdir || cwd,
+        timeoutMs: typeof params.timeoutMs === 'number' && params.timeoutMs > 0 ? params.timeoutMs : undefined,
+        onChunk: stream ? (text, which) => stream(text, which) : undefined,
+      });
+      if ('error' in res) return { error: res.error };
+      let out = res.output;
+      if (res.code !== 0) out += `\n[exit code: ${res.code}]`;
+      return out || 'command completed';
     }
   },
   grep: {

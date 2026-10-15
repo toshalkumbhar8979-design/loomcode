@@ -29,16 +29,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   modal: (1) Docker check — if missing, shows the platform install link with
   an "open download page" action and remembers the pending install; (2) OS
   pick — Alpine (~250 MB, apk), Debian Slim (~600 MB, apt) or Ubuntu
-  (~900 MB, apt); (3) live build with streamed logs. Setup pulls the chosen
-  `node:20-*` image, creates the single shared `loom-sandbox` container with
-  the project mounted at `/workspace`, installs essentials (git, bash, curl,
-  ripgrep, coreutils) plus a headless Chromium where offered (best-effort).
-  The container is global — every session and every agent routes commands
-  through it — and `ensureProjectMount()` re-creates it cheaply when the
-  active project changes. Isolation: project dir only, no host network, no
-  `--privileged`. The bash tool routes through `docker exec` when enabled;
-  `LOOM_SANDBOX=0` is a hard kill-switch. Saying "docker is ready" after
-  installing reopens the wizard at the OS step.
+  (~900 MB, apt); (3) live build with a real progress UI: per-stage
+  checklist (pull → create → start → essentials → browser → ready), a
+  percentage bar driven by actual docker-pull layer bytes, and streamed
+  install logs. Setup is fully asynchronous — the TUI never freezes — and
+  the wizard can be esc'd while setup continues in the background. Setup
+  pulls the chosen `node:20-*` image, creates the single shared
+  `loom-sandbox` container with the project mounted at `/workspace`,
+  installs essentials (git, bash, curl, ripgrep, coreutils) plus a headless
+  Chromium where offered (best-effort). Isolation: project dir only, no host
+  network, no `--privileged`. The container idles in the background; the
+  dedicated **`sandbox` tool** runs one command inside it only when the
+  agent decides isolation is needed (see Changed). `LOOM_SANDBOX=0` is a
+  hard kill-switch. Saying "docker is ready" after installing reopens the
+  wizard at the OS step.
 - **Drive-to-completion harness (`src/core/session.js`).** When the model ends
   a turn with todos still pending/in_progress (the "stops between tasks"
   failure), the loop injects a continuation listing the unfinished items — up
@@ -82,6 +86,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     todos are surfaced to the UI whenever the guard engaged.
 
 ### Changed
+- **Sandbox is now opt-in per command, not a global router.** Enabling the
+  sandbox no longer hijacks the bash tool — every host command keeps running
+  on your machine (Windows included) exactly as before. Instead, a dedicated
+  **`sandbox` tool** appears; the agent calls it only when isolation is
+  genuinely needed (you asked for the sandbox, the command is risky, or a
+  Linux-only environment is required). Each call revives the container if it
+  stopped (e.g. after a Docker Desktop restart) and re-mounts the current
+  project, then runs just that one command via `docker exec`. The container
+  idles in the background between calls; `/sandbox off` disables the tool
+  (not the host), `/sandbox on` re-enables it. The setup wizard's build step
+  also became fully non-blocking: docker pull streams per-layer progress
+  into a live percentage bar, package installs stream their output, and the
+  TUI stays responsive throughout (esc lets setup finish in the background).
 - **Slash popup decluttered.** The autocomplete popup and command palette
   now show a short one-line description per command — argument syntax is no
   longer appended (it lives in `/help` and the README table). Duplicate

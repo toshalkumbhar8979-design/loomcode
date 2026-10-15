@@ -1096,13 +1096,13 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
         if (ssub === "guide") { appendMessage({ role: "system", content: sandbox.installGuide() }); return; }
         if (ssub === "off") {
           sandbox.setSandboxEnabled(false);
-          appendMessage({ role: "system", content: "Sandbox off — agent commands run on the host again. The container is kept (run /sandbox on to re-enable, /sandbox rm to delete it)." });
+          appendMessage({ role: "system", content: "Sandbox off — the sandbox tool is disabled; the agent works on your machine as usual. The container is kept (run /sandbox on to re-enable, /sandbox rm to delete it)." });
           return;
         }
         if (ssub === "on") {
           if (st.container !== "running") { appendMessage({ role: "system", content: "Sandbox container is not running. Run /sandbox setup first." }); return; }
           sandbox.setSandboxEnabled(true);
-          appendMessage({ role: "system", content: "Sandbox on — agent commands now run inside " + sandbox.CONTAINER + "." });
+          appendMessage({ role: "system", content: "Sandbox on — the agent can use the sandbox tool for isolated commands inside " + sandbox.CONTAINER + " when needed. Everything else stays on your machine." });
           return;
         }
         if (ssub === "rm") {
@@ -1117,7 +1117,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
           var line = "Sandbox: ";
           if (st.docker === "not_installed") line += "Docker not installed";
           else if (st.docker === "no_daemon") line += "Docker installed, daemon not running";
-          else line += "Docker " + st.dockerVersion + " \u00b7 container " + st.container + (st.enabled ? " \u00b7 routing ON" : " \u00b7 routing off");
+          else line += "Docker " + st.dockerVersion + " \u00b7 container " + st.container + (st.enabled ? " \u00b7 sandbox tool on" : " \u00b7 sandbox tool off");
           if (st.pending) line += "\nWaiting for you to install Docker \u2014 when it's done say \"docker is ready\" (or run /sandbox).";
           else if (st.docker === "not_installed") line += "\nRun /sandbox for the setup wizard.";
           else if (st.container === "absent") line += "\nRun /sandbox to build it.";

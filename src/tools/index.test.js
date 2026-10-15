@@ -27,7 +27,7 @@ function tmpFile(name, content) {
 
 test("getToolDefinitions: build exposes all 14 base tools", () => {
   const defs = tools.getToolDefinitions("build");
-  expect(defs.map((d) => d.name).sort()).toEqual(["ask", "bash", "browser", "edit", "glob", "grep", "lsp", "mcp", "read", "task", "todowrite", "webfetch", "websearch", "write"]);
+  expect(defs.map((d) => d.name).sort()).toEqual(["ask", "bash", "browser", "edit", "glob", "grep", "lsp", "mcp", "read", "sandbox", "task", "todowrite", "webfetch", "websearch", "write"]);
   for (const d of defs) {
     expect(d.description).toBeTruthy();
     expect(d.input_schema).toBeTruthy();
@@ -149,6 +149,24 @@ test("sandbox: config sandbox.paths blocks outside, allows inside", async () => 
     const g = await tools.executeTool("glob", { pattern: "**/*", path: path.join(tmpDir, "..") });
     expect(g.error).toContain("Blocked by sandbox");
   } finally {
+    delete process.env.LOOM_CONFIG_DIR;
+    try { fs.rmSync(cfgDir, { recursive: true, force: true }); } catch {}
+  }
+});
+test("sandbox tool: opt-in only — helpful error when never set up (no auto-routing)", async () => {
+  // Fresh config: sandbox not enabled. The tool must NOT fall back to the
+  // host shell or docker; it explains how to set up. Bash is unaffected.
+  const cfgDir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-cfg-"));
+  process.env.LOOM_CONFIG_DIR = cfgDir;
+  process.env.LOOM_SANDBOX = "0"; // hard kill-switch also honored
+  try {
+    const res = await tools.executeTool("sandbox", { command: "echo hi" });
+    expect(res.error).toContain("/sandbox");
+    // Host bash keeps working regardless of the sandbox state.
+    const bash = await tools.executeTool("bash", { command: "echo host-still-works" });
+    expect(String(bash.result)).toContain("host-still-works");
+  } finally {
+    delete process.env.LOOM_SANDBOX;
     delete process.env.LOOM_CONFIG_DIR;
     try { fs.rmSync(cfgDir, { recursive: true, force: true }); } catch {}
   }
