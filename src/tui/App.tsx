@@ -588,7 +588,15 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
     getSession().conversationId = id;
     var pendingParts: Record<string, any> = {};
     getSession().messages = data.messages.map(function(m) {
-      var clean: any = { role: m.role, content: m.content, toolCalls: m.toolCalls };
+      // toolCallId MUST survive the resume: the provider wire format sends it
+      // as tool_call_id / tool_use_id — dropping it makes the next turn fail
+      // with "400: missing field tool_call_id" (NVIDIA) after a resume.
+      var clean: any = {
+        role: m.role,
+        content: m.content,
+        toolCalls: m.toolCalls || (m as any).tool_calls,
+        toolCallId: m.toolCallId || (m as any).tool_call_id,
+      };
       if (m.reasoning) clean.reasoning = m.reasoning;
       return clean;
     });

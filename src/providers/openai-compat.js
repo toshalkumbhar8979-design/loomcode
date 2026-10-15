@@ -9,12 +9,17 @@ function formatMessages(messages, options) {
   for (const m of messages) {
     if (m.role === 'system') continue;
     if (m.role === 'tool') {
-      out.push({ role: 'tool', tool_call_id: m.toolCallId, content: String(m.content) });
+      // A tool row without its id would be rejected by the API ("missing
+      // field tool_call_id" — NVIDIA is strict about this). Skip orphans
+      // from hand-edited/resumed sessions instead of failing the turn.
+      const tcid = m.toolCallId || m.tool_call_id;
+      if (tcid) out.push({ role: 'tool', tool_call_id: tcid, content: String(m.content) });
       continue;
     }
     const msg = { role: m.role, content: m.content || '' };
-    if (m.toolCalls && m.toolCalls.length) {
-      msg.tool_calls = m.toolCalls.map(tc => ({
+    const calls = m.toolCalls || m.tool_calls;
+    if (calls && calls.length) {
+      msg.tool_calls = calls.map(tc => ({
         id: tc.id,
         type: 'function',
         function: { name: tc.name, arguments: typeof tc.input === 'string' ? tc.input : JSON.stringify(tc.input || {}) },
@@ -80,6 +85,7 @@ function normalize(resp) {
     content: message.content || '',
     toolCalls,
     usage: resp.usage,
+    finishReason: choice?.finish_reason || undefined,
   };
 }
 
@@ -208,10 +214,12 @@ function createOpenAICompatProvider({ getKey, providerId, envKeyHint, clientFact
       let content = '';
       let reasoning = '';
       let usage = null;
+      let finishReason = null;
       const toolAcc = new Map();
 
       for await (const chunk of s) {
         if (chunk.usage) usage = chunk.usage;
+        if (chunk.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
         const delta = chunk.choices?.[0]?.delta || {};
         // DeepSeek-style reasoning_content / OpenRouter reasoning deltas.
         const rt = delta.reasoning_content || delta.reasoning;
@@ -243,7 +251,7 @@ function createOpenAICompatProvider({ getKey, providerId, envKeyHint, clientFact
         toolCalls.push({ id: acc.id, name: acc.name, input });
       }
 
-      return { content, reasoning, toolCalls, usage };
+      return { content, reasoning, toolCalls, usage, finishReason: finishReason || undefined };
     } catch (err) {
       if (isAbortError(err)) throw err;
       throw wrapErr(err, options.model || '?', envKeyHint, getBaseUrl(providerId));

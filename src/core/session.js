@@ -645,15 +645,18 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
       if (!toolCalls.length) {
         const text = String(resp.content || '');
         // Silent-stop guard: models occasionally end a turn with an EMPTY
-        // reply right after running tools (truncation / provider hiccup),
-        // which reads to the user like "the agent just stopped". One
-        // automatic continuation instead of dead-ending with a placeholder.
-        if (!text.trim() && ranTools && !nudged && !this.interrupted) {
+        // reply — right after running tools (truncation / provider hiccup)
+        // or even on a plain first reply (reasoning-only stop, content
+        // filter). One automatic continuation instead of dead-ending with
+        // a placeholder. `nudged` caps it at one per turn.
+        if (!text.trim() && !nudged && !this.interrupted) {
           nudged = true;
           this.addMessage({
             role: 'user',
-            content: '(the model returned an empty reply after ' + toolCallsThisTurn +
-              ' tool call(s) — continue where you left off and finish the task)',
+            content: ranTools
+              ? '(the model returned an empty reply after ' + toolCallsThisTurn +
+                ' tool call(s) — continue where you left off and finish the task)'
+              : '(your last reply was empty — respond to the user with text, or use tools to do the work)',
           });
           continue;
         }
@@ -692,9 +695,15 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
         const openTodos = (this.mode === 'build' && todowroteThisTurn)
           ? (this.todos || []).filter((t) => t.status === 'pending' || t.status === 'in_progress')
           : [];
+        // finish_reason=length means the reply was CUT OFF by maxTokens —
+        // common with reasoning models (thinking eats the budget, the final
+        // answer never streams). Name it instead of a mystery placeholder.
+        const truncHint = resp.finishReason === 'length'
+          ? '(the reply hit the max-tokens limit mid-stream — the model ran out of output budget before writing any text. Raise maxTokens in config, or /think off to free the thinking budget)'
+          : '(the model ended the turn without any text)';
         return {
           type: 'text',
-          content: text || '(the model ended the turn without any text)',
+          content: text || truncHint,
           openTodos: openTodos.length ? openTodos : undefined,
         };
       }

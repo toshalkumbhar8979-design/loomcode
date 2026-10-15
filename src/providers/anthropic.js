@@ -50,10 +50,15 @@ function buildBody(messages, options) {
       continue;
     }
     if (m.role === 'tool') {
-      out.push({
-        role: 'user',
-        content: [{ type: 'tool_result', tool_use_id: m.toolCallId, content: String(m.content) }],
-      });
+      // tool_use_id is required by the API — skip orphaned tool rows from
+      // resumed/hand-edited sessions rather than failing the whole turn.
+      const tcid = m.toolCallId || m.tool_call_id;
+      if (tcid) {
+        out.push({
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: tcid, content: String(m.content) }],
+        });
+      }
       continue;
     }
     if (m.role === 'assistant') {
@@ -70,7 +75,7 @@ function buildBody(messages, options) {
       } else if (m.content) {
         blocks.push({ type: 'text', text: m.content });
       }
-      for (const tc of m.toolCalls || []) {
+      for (const tc of (m.toolCalls || m.tool_calls) || []) {
         blocks.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input || {} });
       }
       out.push({ role: 'assistant', content: blocks });

@@ -56,6 +56,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the actual items; the interrupt line reports kept chars + the
   in-progress todo; the plan-complete line includes the planned step count;
   "(no response)"/"(interrupted)" placeholders describe what happened.
+- **Sessions now live in per-session folders inside the project**
+  (claude-code/opencode style): `<project>/.loom/sessions/<id>/session.json`
+  (metadata) + `messages.jsonl` (one message per line, append/rewrite-safe).
+  Old flat `~/.loom/sessions/<id>.json` files stay readable and are migrated
+  into the project folder on the next save; the /sessions picker merges both.
+
+### Fixed
+- **Resuming a session 400'd the next turn** (`NVIDIA error 400: missing
+  field tool_call_id`). The resume path rebuilt the in-memory message list
+  from `{role, content, toolCalls}` only — dropping `toolCallId` — so the
+  provider payload carried a tool row with no id. Resume now preserves
+  `toolCallId` (and aliases legacy snake_case `tool_calls`/`tool_call_id`
+  on load); both providers also skip orphaned tool rows defensively instead
+  of failing the turn.
+- **"The model ended the turn without any text" now says why when it knows.**
+  `finish_reason` is captured from the stream; a truncated reply (reasoning
+  ate the output budget) reports that instead of a mystery placeholder.
 
 ## [1.2.36] — fix `loom web` / `loom acp` / `loom attach`
 
