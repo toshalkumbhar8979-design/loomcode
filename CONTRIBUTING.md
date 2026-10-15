@@ -84,7 +84,7 @@ npm test
 - TypeScript/React in `.tsx`, JavaScript in `.js` (no `.esm.json` types in the codebase)
 - Use `const`/`let` at top level
 - Import at top of file, never dynamic imports inside functions
-- Use `shell-quote` and `spawn()` for ANY external commands, never string-interpolated shell
+- Use `spawn()`/`execFile()` with an argument array for external commands, never string-interpolated shell
 - Never commit secrets or API keys to the repo
 
 ## Kept Secrets

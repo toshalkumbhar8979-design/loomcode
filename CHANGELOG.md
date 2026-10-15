@@ -6,6 +6,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — completion harness, specialist agents, headless browser, TUI refresh
 
+### Security
+- **All dependency advisories cleared — `npm audit` reports 0
+  vulnerabilities** (was 7: 4 critical, 1 high, 2 low):
+  - `@opentui/solid` / `@opentui/core` (+ all platform binaries)
+    0.5.3 → **0.5.17** — fixes the `@babel/core` arbitrary-file-read
+    advisory and the `solid-js`/`seroval` critical chain.
+  - `seroval` + `seroval-plugins` forced to **1.6.9** via npm `overrides`
+    (solid-js is peer-pinned to 1.9.12 by @opentui/solid; 1.6.9 is exactly
+    the seroval line solid 1.9.17 itself moved to — fixes the critical
+    `fromJSON()` thenable-assimilation + memory-exhaustion advisories).
+  - `shell-quote` **removed** — it was an unused direct dependency carrying
+    a critical `quote()` command-injection advisory.
+  - `diff` ^7 → **^9.0.0** (we only use `diffLines`, unchanged; 9.x ships
+    CJS exports) — fixes the parsePatch/applyPatch DoS advisory.
+  - `brace-expansion` re-resolved to **5.0.12** (transitive, via
+    `npm audit fix`) — fixes the DoS/recursion advisories.
+
 ### Added
 - **Docker sandbox with a guided `/sandbox` wizard (`src/core/sandbox.js`,
   `SandboxModal`).** `/sandbox` (or `/sandbox setup`) opens a three-step
