@@ -75,6 +75,28 @@ function detectDocker(runner) {
 }
 
 /**
+ * NON-BLOCKING Docker detection (spawn-based twin of detectDocker). The TUI
+ * must never call the sync version — `docker version` can hang 10s when the
+ * daemon is starting, which froze the whole interface. Injectable async
+ * runner for tests: (cmd, args) => Promise<{code, out}>.
+ * @param {(cmd: string, args: string[]) => Promise<{ code: number, out: string }>} [runner]
+ * @returns {Promise<{ state: DockerState, version: string }>}
+ */
+async function detectDockerAsync(runner) {
+  const run = runner || ((/** @type {string} */ cmd, /** @type {string[]} */ args) =>
+    spawnAsync(cmd, args, { timeoutMs: 10000 }));
+  const server = await run('docker', ['version', '--format', '{{.Server.Version}}']);
+  if (server.code === 0) {
+    const version = String(server.out || '').trim();
+    if (version) return { state: 'ready', version };
+    return { state: 'no_daemon', version: '' };
+  }
+  const cli = await run('docker', ['--version']);
+  if (cli.code === 0) return { state: 'no_daemon', version: '' };
+  return { state: 'not_installed', version: '' };
+}
+
+/**
  * Platform-appropriate Docker install guide shown before the user leaves to
  * install. Mentions the restart when the installer requires one, and the
  * exact phrase that resumes setup after they come back.
@@ -163,6 +185,41 @@ function sandboxStatus() {
     osId: sandboxCfg.osId || 'alpine',
     projectRoot: sandboxCfg.projectRoot || '',
   };
+}
+
+/**
+ * NON-BLOCKING twin of sandboxStatus (spawn-based docker checks). Use this
+ * from the TUI — the sync version freezes the interface while docker answers.
+ * @returns {Promise<ReturnType<typeof sandboxStatus>>}
+ */
+async function sandboxStatusAsync() {
+  const cfg = loadConfig();
+  const sandboxCfg = cfg.sandbox || {};
+  const { state, version } = await detectDockerAsync();
+  let container = /** @type {'running'|'stopped'|'absent'} */ ('absent');
+  if (state === 'ready') {
+    const insp = await spawnAsync('docker', ['inspect', '-f', '{{.State.Running}}', CONTAINER], { timeoutMs: 10000 });
+    if (insp.code === 0) container = insp.out.trim() === 'true' ? 'running' : 'stopped';
+  }
+  return {
+    docker: state,
+    dockerVersion: version,
+    enabled: !!sandboxCfg.enabled && container === 'running',
+    pending: !!sandboxCfg.pending,
+    container,
+    image: sandboxCfg.image || DEFAULT_IMAGE,
+    osId: sandboxCfg.osId || 'alpine',
+    projectRoot: sandboxCfg.projectRoot || '',
+  };
+}
+
+/**
+ * Config-only pending check (no docker involved — zero cost, never blocks).
+ * @returns {boolean}
+ */
+function sandboxPending() {
+  const cfg = loadConfig();
+  return !!(cfg.sandbox && cfg.sandbox.pending);
 }
 
 /**
@@ -348,7 +405,7 @@ async function setupSandbox(opts) {
   const root = path.resolve(o.projectRoot || process.cwd());
   const log = o.onLog || (() => {});
   const prog = o.onProgress || (() => {});
-  const { state, version } = detectDocker();
+  const { state, version } = await detectDockerAsync();
   if (state === 'not_installed') return { ok: false, error: 'Docker is not installed. Run /sandbox guide for setup steps.' };
   if (state === 'no_daemon') {
     return { ok: false, error: 'Docker is installed but the daemon is not running. Start Docker Desktop (or `sudo systemctl start docker`), then run /sandbox setup again.' };
@@ -558,10 +615,13 @@ module.exports = {
   DEFAULT_IMAGE,
   OS_CATALOG,
   detectDocker,
+  detectDockerAsync,
   installGuide,
   installLink,
   openInstallPage,
   sandboxStatus,
+  sandboxStatusAsync,
+  sandboxPending,
   toSandboxPath,
   runInSandbox,
   setupSandbox,

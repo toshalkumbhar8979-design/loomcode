@@ -99,6 +99,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   also became fully non-blocking: docker pull streams per-layer progress
   into a live percentage bar, package installs stream their output, and the
   TUI stays responsive throughout (esc lets setup finish in the background).
+- **Every docker status check is now spawn-based (non-blocking).** The last
+  synchronous `execFileSync` calls — `detectDocker()` (wizard open, setup
+  start, "docker is ready" resume), `sandboxStatus()` (session start,
+  `/sandbox status`, `/sandbox on`), and `/sandbox rm` — blocked the whole
+  event loop for up to 10–30 s while Docker Desktop answered, freezing the
+  TUI (no cursor, no renders) and swallowing live progress updates. New
+  async twins (`detectDockerAsync`, `sandboxStatusAsync`, `sandboxPending`)
+  stream results back via promises; the wizard shows a spinner during the
+  check instead of hanging; the session-start pending reminder is now a
+  config-only read (zero docker calls).
 - **Slash popup decluttered.** The autocomplete popup and command palette
   now show a short one-line description per command — argument syntax is no
   longer appended (it lives in `/help` and the README table). Duplicate

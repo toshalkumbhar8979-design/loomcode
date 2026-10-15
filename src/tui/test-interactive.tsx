@@ -2484,33 +2484,37 @@ header("53: /sandbox — guided setup wizard modal (docker check → OS pick →
 setup.mockInput.typeText("/sandbox");
 await sleep(200);
 setup.mockInput.pressEnter();
-await sleep(300);
+await sleep(400);
 console.assert(modal()?.type === "sandbox", "FAIL: /sandbox should open the sandbox wizard, got " + String(modal()?.type));
 frame = strip(setup.captureCharFrame());
 console.assert(frame.includes("Sandbox Setup"), "FAIL: wizard should show its title, got:\n" + frame);
 console.assert(frame.includes("Step 1/3") || frame.includes("Step 2/3"), "FAIL: wizard should show a step marker, got:\n" + frame);
 // Environment-agnostic branch: the harness machine may or may not have
 // Docker. Missing → install-link step; ready → auto-advance to OS pick.
+// Detection is now async (spawn-based), so allow it time to resolve.
 const sb53 = require("../core/sandbox.js");
-const d53 = sb53.detectDocker();
+const d53 = await sb53.detectDockerAsync();
 if (d53.state === "ready") {
-  await sleep(700); // the modal auto-advances to OS selection ~600ms
+  await sleep(1600); // async detect + the modal's 600ms auto-advance timer
   frame = strip(setup.captureCharFrame());
   console.assert(frame.includes("Alpine Linux"), "FAIL: OS pick should list Alpine, got:\n" + frame);
   console.assert(frame.includes("browser") || frame.includes("+browser"), "FAIL: Alpine should advertise browser support, got:\n" + frame);
 } else {
-  console.assert(frame.includes("not installed") || frame.includes("not running") || frame.includes("Step 1/3"), "FAIL: docker-missing step should explain the state, got:\n" + frame);
+  console.assert(frame.includes("not installed") || frame.includes("not running") || frame.includes("Checking") || frame.includes("Step 1/3"), "FAIL: docker-missing step should explain the state, got:\n" + frame);
   // The download link (or its platform host) must be offered in the guide.
-  console.assert(frame.includes("docs.docker.com") || frame.includes("install") || frame.includes("Install"), "FAIL: missing-docker step should point at the install guide, got:\n" + frame);
+  if (frame.includes("not installed")) {
+    console.assert(frame.includes("docs.docker.com") || frame.includes("install") || frame.includes("Install"), "FAIL: missing-docker step should point at the install guide, got:\n" + frame);
+  }
 }
-// Esc closes the wizard; /sandbox status still works as a text command.
+// Esc closes the wizard; /sandbox status still works as a text command
+// (async docker check — wait for the status line to land).
 setup.mockInput.pressEscape();
 await sleep(150);
 console.assert(modal() === null, "FAIL: esc should close the sandbox wizard");
 setup.mockInput.typeText("/sandbox status");
 await sleep(150);
 setup.mockInput.pressEnter();
-await sleep(200);
+await sleep(800);
 frame = strip(setup.captureCharFrame());
 console.assert(modal() === null && frame.includes("Sandbox:"), "FAIL: /sandbox status should print a status line, got:\n" + frame);
 ok("sandbox wizard modal + status fallback");

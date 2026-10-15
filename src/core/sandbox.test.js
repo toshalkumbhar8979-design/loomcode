@@ -39,6 +39,25 @@ test("detectDocker: ready when server version returns", () => {
   expect(res.version).toBe("27.0.1");
 });
 
+test("detectDockerAsync: spawn-based, same states, never blocks", async () => {
+  const ok = await sandbox.detectDockerAsync(async () => ({ code: 0, out: "27.0.1\n" }));
+  expect(ok.state).toBe("ready");
+  expect(ok.version).toBe("27.0.1");
+  const noDaemon = await sandbox.detectDockerAsync(async (cmd, args) =>
+    args[0] === "--version" // CLI probe succeeds, daemon probe fails
+      ? { code: 0, out: "Docker version 27.0.1\n" }
+      : { code: 1, out: "Cannot connect to the Docker daemon" });
+  expect(noDaemon.state).toBe("no_daemon");
+  const missing = await sandbox.detectDockerAsync(async () => ({ code: -1, out: "spawn docker ENOENT" }));
+  expect(missing.state).toBe("not_installed");
+});
+
+test("sandboxPending: config-only check needs no docker", () => {
+  expect(sandbox.sandboxPending()).toBe(false);
+  sandbox.markInstallPending();
+  expect(sandbox.sandboxPending()).toBe(true);
+});
+
 test("installGuide: platform steps + the resume phrase", () => {
   const guide = sandbox.installGuide();
   expect(guide).toContain("docker.com");

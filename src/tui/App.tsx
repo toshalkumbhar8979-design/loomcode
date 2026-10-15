@@ -168,18 +168,37 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
     // Docker-install resume: while an install is pending, "docker is ready"
     // continues the sandbox setup in THIS session instead of going to the
     // model. Outside the pending flow the phrase is ordinary conversation.
+    // All docker state checks are ASYNC (spawn-based) — a sync status call
+    // here froze the whole TUI whenever the docker daemon was slow.
     if (sandbox.isReadySignal(raw)) {
-      var st0 = sandbox.sandboxStatus();
-      if (st0.pending || st0.docker === "ready" && st0.container === "absent" && /set ?up|build|create|make/i.test(raw)) {
+      if (sandbox.sandboxPending()) {
         recordPrompt(raw); setDraft("");
         appendMessage({ role: "user", content: raw });
-        if (st0.docker === "ready" || st0.docker === "no_daemon") {
-          appendMessage({ role: "system", content: "Docker detected \u2014 pick an OS to finish the sandbox setup." });
-          openModal({ type: "sandbox" });
-        } else {
-          sandbox.markInstallPending();
-          appendMessage({ role: "system", content: sandbox.installGuide() });
-        }
+        sandbox.sandboxStatusAsync().then(function(st0) {
+          if (st0.docker === "ready" || st0.docker === "no_daemon") {
+            appendMessage({ role: "system", content: "Docker detected \u2014 pick an OS to finish the sandbox setup." });
+            openModal({ type: "sandbox" });
+          } else {
+            sandbox.markInstallPending();
+            appendMessage({ role: "system", content: sandbox.installGuide() });
+          }
+        });
+        return;
+      }
+      if (!thinking()) {
+        // Might be a "set up the sandbox" request (docker ready, no container
+        // yet). Check async, then either open the wizard or treat as chat.
+        sandbox.sandboxStatusAsync().then(function(st0) {
+          if (st0.docker === "ready" && st0.container === "absent" && /set ?up|build|create|make/i.test(raw)) {
+            recordPrompt(raw); setDraft("");
+            appendMessage({ role: "user", content: raw });
+            appendMessage({ role: "system", content: "Docker detected \u2014 pick an OS to finish the sandbox setup." });
+            openModal({ type: "sandbox" });
+          } else {
+            recordPrompt(raw); setDraft("");
+            runPrompt(raw, false);
+          }
+        });
         return;
       }
     }
@@ -1089,9 +1108,9 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
       }
       case "sandbox": {
         var ssub = args[0];
-        var st = sandbox.sandboxStatus();
         // The setup wizard is a modal: docker check (with download link) →
         // OS pick → live build. Bare /sandbox and /sandbox setup open it.
+        // Status/on/rm use ASYNC docker calls — sync ones froze the TUI.
         if (!ssub || ssub === "setup" || ssub === "os") { openModal({ type: "sandbox" }); return; }
         if (ssub === "guide") { appendMessage({ role: "system", content: sandbox.installGuide() }); return; }
         if (ssub === "off") {
@@ -1100,28 +1119,49 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
           return;
         }
         if (ssub === "on") {
-          if (st.container !== "running") { appendMessage({ role: "system", content: "Sandbox container is not running. Run /sandbox setup first." }); return; }
-          sandbox.setSandboxEnabled(true);
-          appendMessage({ role: "system", content: "Sandbox on — the agent can use the sandbox tool for isolated commands inside " + sandbox.CONTAINER + " when needed. Everything else stays on your machine." });
+          sandbox.sandboxStatusAsync().then(function(stOn) {
+            if (stOn.container !== "running") { appendMessage({ role: "system", content: "Sandbox container is not running. Run /sandbox setup first." }); return; }
+            sandbox.setSandboxEnabled(true);
+            appendMessage({ role: "system", content: "Sandbox on — the agent can use the sandbox tool for isolated commands inside " + sandbox.CONTAINER + " when needed. Everything else stays on your machine." });
+          });
           return;
         }
         if (ssub === "rm") {
-          try {
-            require("child_process").execFileSync("docker", ["rm", "-f", sandbox.CONTAINER], { windowsHide: true, timeout: 30000, stdio: "ignore" });
-            sandbox.setSandboxEnabled(false);
-            appendMessage({ role: "system", content: "Sandbox container removed. Run /sandbox setup to rebuild it." });
-          } catch { appendMessage({ role: "system", content: "No sandbox container to remove." }); }
+          appendMessage({ role: "system", content: "Removing the sandbox container…" });
+          var rmCp = require("child_process");
+          var rmSpawn = rmCp.spawn("docker", ["rm", "-f", sandbox.CONTAINER], { windowsHide: true });
+          var rmDone = false;
+          var rmTimer = setTimeout(function() { if (!rmDone) { rmDone = true; try { rmSpawn.kill(); } catch {} appendMessage({ role: "system", content: "Sandbox removal timed out. Is Docker running?" }); } }, 30000);
+          rmSpawn.on("close", function(rmCode) {
+            if (rmDone) return;
+            rmDone = true;
+            clearTimeout(rmTimer);
+            if (rmCode === 0) {
+              sandbox.setSandboxEnabled(false);
+              appendMessage({ role: "system", content: "Sandbox container removed. Run /sandbox setup to rebuild it." });
+            } else {
+              appendMessage({ role: "system", content: "No sandbox container to remove." });
+            }
+          });
+          rmSpawn.on("error", function() {
+            if (rmDone) return;
+            rmDone = true;
+            clearTimeout(rmTimer);
+            appendMessage({ role: "system", content: "No sandbox container to remove (docker not reachable)." });
+          });
           return;
         }
         if (ssub === "status") {
-          var line = "Sandbox: ";
-          if (st.docker === "not_installed") line += "Docker not installed";
-          else if (st.docker === "no_daemon") line += "Docker installed, daemon not running";
-          else line += "Docker " + st.dockerVersion + " \u00b7 container " + st.container + (st.enabled ? " \u00b7 sandbox tool on" : " \u00b7 sandbox tool off");
-          if (st.pending) line += "\nWaiting for you to install Docker \u2014 when it's done say \"docker is ready\" (or run /sandbox).";
-          else if (st.docker === "not_installed") line += "\nRun /sandbox for the setup wizard.";
-          else if (st.container === "absent") line += "\nRun /sandbox to build it.";
-          appendMessage({ role: "system", content: line });
+          sandbox.sandboxStatusAsync().then(function(st) {
+            var line = "Sandbox: ";
+            if (st.docker === "not_installed") line += "Docker not installed";
+            else if (st.docker === "no_daemon") line += "Docker installed, daemon not running";
+            else line += "Docker " + st.dockerVersion + " \u00b7 container " + st.container + (st.enabled ? " \u00b7 sandbox tool on" : " \u00b7 sandbox tool off");
+            if (st.pending) line += "\nWaiting for you to install Docker \u2014 when it's done say \"docker is ready\" (or run /sandbox).";
+            else if (st.docker === "not_installed") line += "\nRun /sandbox for the setup wizard.";
+            else if (st.container === "absent") line += "\nRun /sandbox to build it.";
+            appendMessage({ role: "system", content: line });
+          });
           return;
         }
         appendMessage({ role: "system", content: "Usage: /sandbox (wizard) | status | on | off | rm | guide" });
@@ -1597,10 +1637,11 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
       }, 500);
     }
     // Sandbox install pending from a previous session: remind on start so
-    // the user knows to come back with "docker is ready". Skipped in the
-    // test harness (same flag as the session prompt).
+    // the user knows to come back with "docker is ready". Config-only check
+    // (no docker invocation — the old sandboxStatus() froze startup).
+    // Skipped in the test harness (same flag as the session prompt).
     try {
-      if (!process.env.LOOM_NO_SESSION_PROMPT && sandbox.sandboxStatus().pending) {
+      if (!process.env.LOOM_NO_SESSION_PROMPT && sandbox.sandboxPending()) {
         setTimeout(function() {
           appendMessage({ role: "system", content: "Docker sandbox setup is still pending. Install Docker (see /sandbox guide), then say \"docker is ready\" and I'll build it automatically." });
         }, 800);

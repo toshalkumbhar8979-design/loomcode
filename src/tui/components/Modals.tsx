@@ -669,7 +669,9 @@ export function ConnectorsModal() {
 export function SandboxModal() {
   const sb = require("../../core/sandbox.js");
   const [step, setStep] = createSignal<"docker" | "os" | "setup">("docker");
-  const [docker, setDocker] = createSignal(sb.detectDocker());
+  // null = detection running (spawn-based, non-blocking — the old sync
+  // detectDocker() froze the whole TUI for up to 10s while docker answered).
+  const [docker, setDocker] = createSignal<{ state: string; version: string } | null>(null);
   const [osSel, setOsSel] = createSignal(0);
   const [logs, setLogs] = createSignal<string[]>([]);
   const [busy, setBusy] = createSignal(false);
@@ -699,18 +701,28 @@ export function SandboxModal() {
     done: "Ready",
   };
 
-  // Docker already installed → advance straight to OS selection (with a
-  // brief "installed" flash so the user sees the check happened).
+  // Async Docker check on open — never blocks the render loop.
   onMount(() => {
-    if (docker().state === "ready") {
-      setTimeout(() => { if (step() === "docker") setStep("os"); }, 600);
-    }
+    startSpinner();
+    sb.detectDockerAsync().then((/** @type {{ state: string; version: string }} */ d) => {
+      setDocker(d);
+      if (d.state === "ready") {
+        // brief "installed" flash, then straight to OS selection.
+        setTimeout(() => { if (step() === "docker") setStep("os"); }, 600);
+      } else {
+        stopSpinner();
+      }
+    });
   });
 
   function recheck() {
-    const d = sb.detectDocker();
-    setDocker(d);
-    if (d.state === "ready") setStep("os");
+    setDocker(null);
+    startSpinner();
+    sb.detectDockerAsync().then((/** @type {{ state: string; version: string }} */ d) => {
+      setDocker(d);
+      stopSpinner();
+      if (d.state === "ready") setStep("os");
+    });
   }
 
   function startSetup() {
@@ -751,12 +763,14 @@ export function SandboxModal() {
     if (kbs.dialogIs("dialog_select_next", ks)) { if (s === "os") setOsSel((i) => Math.min(sb.OS_CATALOG.length - 1, i + 1)); return; }
     if (kbs.dialogIs("dialog_select_submit", ks)) {
       if (s === "docker") {
-        if (docker().state === "not_installed") {
+        const d = docker();
+        if (!d) return; // still detecting — enter does nothing yet
+        if (d.state === "not_installed") {
           sb.markInstallPending();
           sb.openInstallPage();
           appendMessage({ role: "system", content: "Opened the Docker download page. Install Docker (restart if asked), then run /sandbox again — or just say \"docker is ready\" in chat." });
           closeModal();
-        } else if (docker().state === "no_daemon") {
+        } else if (d.state === "no_daemon") {
           recheck();
         } else {
           setStep("os");
@@ -769,7 +783,7 @@ export function SandboxModal() {
   });
 
   const link = sb.installLink();
-  const st = () => docker().state;
+  const st = () => (docker() ? docker()!.state : "checking");
 
   return (
     <ModalFrame
@@ -789,6 +803,11 @@ export function SandboxModal() {
           : "enter retry · esc close"
       }
     >
+      {step() === "docker" && st() === "checking" ? (
+        <box flexDirection="column">
+          <text fg={ui.fgMuted}>{SPIN_FRAMES[spin()] + " Checking Docker…"}</text>
+        </box>
+      ) : null}
       {step() === "docker" && st() === "not_installed" ? (
         <box flexDirection="column">
           <text fg={ui.warning}>Docker is not installed</text>
@@ -809,7 +828,7 @@ export function SandboxModal() {
       ) : null}
       {step() === "docker" && st() === "ready" ? (
         <box flexDirection="column">
-          <text fg={ui.success}>Docker installed (v{docker().version})</text>
+          <text fg={ui.success}>Docker installed (v{(docker() || { version: "?" }).version})</text>
           <text fg={ui.fgMuted} marginTop={1}>Opening OS selection…</text>
         </box>
       ) : null}
