@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] — completion harness, specialist agents, headless browser, TUI refresh
 
 ### Added
+- **Docker sandbox with a guided `/sandbox` wizard (`src/core/sandbox.js`,
+  `SandboxModal`).** `/sandbox` (or `/sandbox setup`) opens a three-step
+  modal: (1) Docker check — if missing, shows the platform install link with
+  an "open download page" action and remembers the pending install; (2) OS
+  pick — Alpine (~250 MB, apk), Debian Slim (~600 MB, apt) or Ubuntu
+  (~900 MB, apt); (3) live build with streamed logs. Setup pulls the chosen
+  `node:20-*` image, creates the single shared `loom-sandbox` container with
+  the project mounted at `/workspace`, installs essentials (git, bash, curl,
+  ripgrep, coreutils) plus a headless Chromium where offered (best-effort).
+  The container is global — every session and every agent routes commands
+  through it — and `ensureProjectMount()` re-creates it cheaply when the
+  active project changes. Isolation: project dir only, no host network, no
+  `--privileged`. The bash tool routes through `docker exec` when enabled;
+  `LOOM_SANDBOX=0` is a hard kill-switch. Saying "docker is ready" after
+  installing reopens the wizard at the OS step.
 - **Drive-to-completion harness (`src/core/session.js`).** When the model ends
   a turn with todos still pending/in_progress (the "stops between tasks"
   failure), the loop injects a continuation listing the unfinished items — up
@@ -32,6 +47,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reads allow, interactive click/fill/press ask.
 
 ### Changed
+- **Slash popup decluttered.** The autocomplete popup and command palette
+  now show a short one-line description per command — argument syntax is no
+  longer appended (it lives in `/help` and the README table). Duplicate
+  entries were removed from the picker while their handlers stay callable:
+  `/model` → `/models`, `/thinking` + `/details` → `/settings`, `/rewind`
+  → `/restore` (40 → 36 entries). Every desc was shortened to ~2–35 chars
+  so rows fit on one clean line. README table regenerated from the real
+  list (it previously advertised commands that no longer exist).
 - **TUI design overhaul.** The splash leads with the full LOOM CODE wordmark
   in solid terracotta over a separator rule and a pill-style status
   row; the default "Loom Dark" (and Light) palettes got deeper surface

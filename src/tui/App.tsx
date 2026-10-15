@@ -52,7 +52,7 @@ import { prettyToolName, stripAnsi } from "./toolname.ts";
 import { toolDisplay } from "./tool-display.ts";
 import {
   ProviderPicker, SelectModal, InputModal, SettingsModal,
-  PaletteModal, McpModal, ConnectorsModal, GraphModal,
+  PaletteModal, McpModal, ConnectorsModal, GraphModal, SandboxModal,
   openModelPicker, openKeyModal, openBaseUrlEditor,
   showProvidersText, showHelpText, showAgentsText,
   openGraphModal,
@@ -65,6 +65,7 @@ import { snapshotBefore, snapshotAfter, snapshotBashBefore, diffBashAfter, clear
 import { createRestorePoint, listRestorePoints, restoreTo } from "../core/restore.js";
 import { PROVIDERS, PROVIDER_ORDER, PROVIDER_LABELS } from "../providers/index.js";
 import * as plugin from "../core/plugin-cmd.js";
+import * as sandbox from "../core/sandbox.js";
 import { on } from "../core/events.js";
 import { listSkills } from "../skills/skills-manager.js";
 
@@ -117,14 +118,15 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
     if (text.startsWith("/")) {
       var q = text.slice(1).toLowerCase();
       var hits = SLASH_LIST.filter(function(c) { return c.cmd.startsWith(q); }).map(function(c) {
-        var s: Suggestion = { label: "/" + c.cmd, desc: c.desc + (c.args ? " \u2014 " + c.args : "") };
+        // Popup stays terse: short desc only — syntax lives in /help (args).
+        var s: Suggestion = { label: "/" + c.cmd, desc: c.desc };
         return s;
       });
       // Custom commands (.loom/commands/*.md) join the picker after built-ins.
       try {
         const { listCustomCommands } = require("../core/custom-commands.js");
         for (const cc of listCustomCommands()) {
-          if (cc.name.toLowerCase().startsWith(q)) hits.push({ label: "/" + cc.name, desc: "custom command \u2014 " + cc.file });
+          if (cc.name.toLowerCase().startsWith(q)) hits.push({ label: "/" + cc.name, desc: "custom command" });
         }
       } catch {}
       setSuggestions(hits); setAutoKind("slash"); setAutoIndex(0);
@@ -162,6 +164,25 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
 
     if (raw.startsWith("/")) { recordPrompt(raw); setDraft(""); processSlash(raw); return; }
     if (raw.startsWith("!")) { recordPrompt(raw); setDraft(""); appendMessage({ role: "user", content: raw }); appendMessage({ role: "system", content: runShell(raw.slice(1)) }); return; }
+
+    // Docker-install resume: while an install is pending, "docker is ready"
+    // continues the sandbox setup in THIS session instead of going to the
+    // model. Outside the pending flow the phrase is ordinary conversation.
+    if (sandbox.isReadySignal(raw)) {
+      var st0 = sandbox.sandboxStatus();
+      if (st0.pending || st0.docker === "ready" && st0.container === "absent" && /set ?up|build|create|make/i.test(raw)) {
+        recordPrompt(raw); setDraft("");
+        appendMessage({ role: "user", content: raw });
+        if (st0.docker === "ready" || st0.docker === "no_daemon") {
+          appendMessage({ role: "system", content: "Docker detected \u2014 pick an OS to finish the sandbox setup." });
+          openModal({ type: "sandbox" });
+        } else {
+          sandbox.markInstallPending();
+          appendMessage({ role: "system", content: sandbox.installGuide() });
+        }
+        return;
+      }
+    }
 
     // "@agent â€¦" delegates the whole turn to that subagent (same as the model
     // calling the task tool â€” but explicit). "@file â€¦" still inlines the file.
@@ -1066,6 +1087,46 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
         openModal({ type: "connectors" });
         return;
       }
+      case "sandbox": {
+        var ssub = args[0];
+        var st = sandbox.sandboxStatus();
+        // The setup wizard is a modal: docker check (with download link) →
+        // OS pick → live build. Bare /sandbox and /sandbox setup open it.
+        if (!ssub || ssub === "setup" || ssub === "os") { openModal({ type: "sandbox" }); return; }
+        if (ssub === "guide") { appendMessage({ role: "system", content: sandbox.installGuide() }); return; }
+        if (ssub === "off") {
+          sandbox.setSandboxEnabled(false);
+          appendMessage({ role: "system", content: "Sandbox off — agent commands run on the host again. The container is kept (run /sandbox on to re-enable, /sandbox rm to delete it)." });
+          return;
+        }
+        if (ssub === "on") {
+          if (st.container !== "running") { appendMessage({ role: "system", content: "Sandbox container is not running. Run /sandbox setup first." }); return; }
+          sandbox.setSandboxEnabled(true);
+          appendMessage({ role: "system", content: "Sandbox on — agent commands now run inside " + sandbox.CONTAINER + "." });
+          return;
+        }
+        if (ssub === "rm") {
+          try {
+            require("child_process").execFileSync("docker", ["rm", "-f", sandbox.CONTAINER], { windowsHide: true, timeout: 30000, stdio: "ignore" });
+            sandbox.setSandboxEnabled(false);
+            appendMessage({ role: "system", content: "Sandbox container removed. Run /sandbox setup to rebuild it." });
+          } catch { appendMessage({ role: "system", content: "No sandbox container to remove." }); }
+          return;
+        }
+        if (ssub === "status") {
+          var line = "Sandbox: ";
+          if (st.docker === "not_installed") line += "Docker not installed";
+          else if (st.docker === "no_daemon") line += "Docker installed, daemon not running";
+          else line += "Docker " + st.dockerVersion + " \u00b7 container " + st.container + (st.enabled ? " \u00b7 routing ON" : " \u00b7 routing off");
+          if (st.pending) line += "\nWaiting for you to install Docker \u2014 when it's done say \"docker is ready\" (or run /sandbox).";
+          else if (st.docker === "not_installed") line += "\nRun /sandbox for the setup wizard.";
+          else if (st.container === "absent") line += "\nRun /sandbox to build it.";
+          appendMessage({ role: "system", content: line });
+          return;
+        }
+        appendMessage({ role: "system", content: "Usage: /sandbox (wizard) | status | on | off | rm | guide" });
+        return;
+      }
       case "sessions": {
         const saved = listSessions();
         if (!saved.length) {
@@ -1535,6 +1596,16 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
         if (!autoPerm() && !permission() && !modal()) askSessionPermissions();
       }, 500);
     }
+    // Sandbox install pending from a previous session: remind on start so
+    // the user knows to come back with "docker is ready". Skipped in the
+    // test harness (same flag as the session prompt).
+    try {
+      if (!process.env.LOOM_NO_SESSION_PROMPT && sandbox.sandboxStatus().pending) {
+        setTimeout(function() {
+          appendMessage({ role: "system", content: "Docker sandbox setup is still pending. Install Docker (see /sandbox guide), then say \"docker is ready\" and I'll build it automatically." });
+        }, 800);
+      }
+    } catch {}
     _skillToastOff = on("trigger:skill", function(d: any) {
       const names = (d?.skills || []).join(", ");
       showToast("skill: " + names, "ok", 5000);
@@ -1604,6 +1675,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
             {m.type === "palette" ? <PaletteModal onPick={m.onPick} /> : null}
             {m.type === "mcp" ? <McpModal /> : null}
             {m.type === "connectors" ? <ConnectorsModal /> : null}
+            {m.type === "sandbox" ? <SandboxModal /> : null}
             {m.type === "graph" ? <GraphModal graph={m.graph} err={m.graphError} /> : null}
             {m.type === "subagents" ? <SubagentPanel /> : null}
             {m.type === "subagent_detail" ? <SubagentDetailPanel /> : null}

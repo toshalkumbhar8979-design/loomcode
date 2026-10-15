@@ -193,6 +193,24 @@ const TOOLS = {
       background: { type: 'boolean', required: false, description: 'Run without waiting (dev servers, long builds). Returns a task id immediately; check with the /tasks panel.' },
     },
     async execute(params, ctx) {
+      // Docker sandbox: when enabled (/sandbox setup), every command runs
+      // inside the loom-sandbox container instead of the host shell.
+      // Background tasks stay on the host (they outlive tool timeouts).
+      const sandbox = require('../core/sandbox');
+      if (!params.background && sandbox.shouldUseSandbox()) {
+        if (!pathAllowed(params.workdir || cwd)) return { error: sandboxDenied('bash', params.workdir || cwd) };
+        const risk = params._approved ? null : commandRiskLabel(params.command);
+        if (risk) return { error: `Blocked by safety filter: ${risk}. Approve it via the permission prompt to run it anyway.` };
+        const stream = ctx && typeof ctx.stream === 'function' ? ctx.stream : null;
+        const res = await sandbox.runInSandbox(params.command, {
+          workdir: params.workdir || cwd,
+          onChunk: stream ? (text, which) => stream(text, which) : undefined,
+        });
+        if ('error' in res) return { error: res.error };
+        let out = res.output;
+        if (res.code !== 0) out += `\n[exit code: ${res.code}]`;
+        return out || 'command completed';
+      }
       // Background mode: fire-and-forget via the task registry.
       if (params.background) {
         const bt = require('../core/background-tasks');

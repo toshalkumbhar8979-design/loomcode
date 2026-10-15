@@ -128,43 +128,50 @@ Zed (add to `~/.config/zed/settings.json`, then Command Palette → `agent: new 
 Full transport spec, JetBrains/Neovim configs, the protocol walkthrough, and a
 self-test client (`node scripts/acp-smoke.js`) live in **[docs/acp.md](docs/acp.md)**.
 
-## Slash Commands (35 total)
+## Slash Commands (36 total)
 
 | Command | Args | Description |
 |---------|------|-------------|
-| `/help` | — | Show all commands |
-| `/build` | — | Build mode — all tools |
-| `/plan` | — | Plan mode — read-only analysis |
+| `/help` | — | Show help |
+| `/agents` | — | List agents |
+| `/build` | — | Build mode — full tools |
+| `/plan` | — | Plan mode — read only |
 | `/chat` | — | Chat mode — no tools |
-| `/agents` | — | List primary agents and subagents |
-| `/connect` | `[provider]` | Add/connect a provider |
-| `/key` | — | Edit API key for current provider |
+| `/connect` | `[provider]` | Connect a provider |
+| `/key` | — | Edit API key |
 | `/baseurl` | `[provider] [url]` | Set provider base URL |
-| `/model` | `[model-id]` | Pick active model |
-| `/models` | — | List available models |
-| `/providers` | — | List supported providers |
-| `/status` | — | Show connection status |
-| `/usage` | — | Show token usage and billing |
-| `/new` | — | Start a new session |
+| `/models` | — | Model picker |
+| `/providers` | — | List providers |
+| `/status` | — | Connection status |
+| `/usage` | — | Token usage & billing |
+| `/budget` | `free\|cheap\|best\|auto` | Budget level |
+| `/new` | — | New session |
 | `/clear` | — | Clear the chat |
-| `/compact` | — | Compact conversation |
-| `/undo` | — | Undo last exchange |
-| `/redo` | — | Redo last undone exchange |
-| `/reset` | — | Reset the session |
-| `/settings` | — | Toggle details/sidebar/etc. |
+| `/restore` | — | Restore earlier state |
+| `/settings` | — | Settings — details, thinking, sidebar |
 | `/sessions` | — | Browse saved sessions |
-| `/share` | — | Export current session to JSON |
-| `/export` | — | Export to markdown |
-| `/thinking` | — | Toggle thinking visibility |
-| `/details` | — | Toggle tool detail visibility |
-| `/init` | — | Create LOOM.md |
-| `/memory` | — | Show memory files |
-| `/doctor` | — | Run diagnostics |
+| `/theme` | — | Switch UI theme |
+| `/graph` | — | Memory graph |
 | `/skills` | `install\|remove` | Manage skills |
 | `/mcp` | `add\|remove\|toggle` | Manage MCP servers |
-| `/debug` | — | Show debug info |
-| `/fork` | — | Fork conversation |
+| `/connectors` | `add\|remove\|toggle` | Manage connectors |
+| `/permissions` | `reset\|auto` | Permission rules |
+| `/subagents` | — | Subagent runs |
+| `/context` | — | Context window usage |
+| `/think` | `off\|low\|medium\|high` | Thinking budget |
+| `/approve` | — | Approve plan → Build |
+| `/tasks` | — | Background tasks |
+| `/share` | — | Export chat as HTML |
+| `/worktree` | `<name>` | New git worktree |
+| `/sandbox` | `setup\|status\|on\|off\|rm` | Docker sandbox |
+| `/style` | `[preset\|text]` | Output style preset |
+| `/vim` | — | Toggle vim editing |
+| `/remember` | `<fact>` | Save a fact to LOOM.md |
 | `/exit` | — | Quit Loom Code |
+
+Aliases still work when typed but are hidden from the picker to keep it
+clean: `/model` → `/models`, `/thinking` + `/details` → `/settings`,
+`/rewind` → `/restore`.
 
 ## Keybindings
 

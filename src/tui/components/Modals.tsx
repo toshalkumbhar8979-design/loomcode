@@ -661,6 +661,166 @@ export function ConnectorsModal() {
   return <ServerBrowser kind="connector" />;
 }
 
+// ── Sandbox setup wizard ──
+// Three steps: docker check (with install link when missing) → OS pick →
+// live setup. The container is global — once built, every session and every
+// agent routes commands through it.
+export function SandboxModal() {
+  const sb = require("../../core/sandbox.js");
+  const [step, setStep] = createSignal<"docker" | "os" | "setup">("docker");
+  const [docker, setDocker] = createSignal(sb.detectDocker());
+  const [osSel, setOsSel] = createSignal(0);
+  const [logs, setLogs] = createSignal<string[]>([]);
+  const [busy, setBusy] = createSignal(false);
+  const [err, setErr] = createSignal<string | null>(null);
+
+  // Docker already installed → advance straight to OS selection (with a
+  // brief "installed" flash so the user sees the check happened).
+  onMount(() => {
+    if (docker().state === "ready") {
+      setTimeout(() => { if (step() === "docker") setStep("os"); }, 600);
+    }
+  });
+
+  function recheck() {
+    const d = sb.detectDocker();
+    setDocker(d);
+    if (d.state === "ready") setStep("os");
+  }
+
+  function startSetup() {
+    const os = sb.OS_CATALOG[osSel()];
+    setStep("setup");
+    setBusy(true);
+    setErr(null);
+    setLogs(["Preparing " + os.label + " (" + os.image + ")…"]);
+    sb.setupSandbox({
+      osId: os.id,
+      onLog: (/** @type {string} */ l) => setLogs((xs) => [...xs, l]),
+    }).then((/** @type {{ ok: boolean, error?: string }} */ res) => {
+      setBusy(false);
+      if (res.ok) {
+        appendMessage({ role: "system", content: "Sandbox is live (" + os.label + "). Agent commands now run inside Docker; your project is mounted at /workspace. The sandbox is shared: every session and agent uses it." });
+        showToast("Sandbox ready — " + os.label, "ok");
+        closeModal();
+      } else {
+        setErr(res.error || "setup failed");
+      }
+    });
+  }
+
+  useKeyboard((key) => {
+    const ks = kbs.keyString(key);
+    if (kbs.is("modal_cancel", ks)) { closeModal(); return; }
+    const s = step();
+    if (s === "setup") {
+      // Retry after a failed setup; while busy esc is the only exit.
+      if (!busy() && err() && kbs.dialogIs("dialog_select_submit", ks)) { setErr(null); startSetup(); }
+      return;
+    }
+    if (kbs.dialogIs("dialog_select_prev", ks)) { if (s === "os") setOsSel((i) => Math.max(0, i - 1)); return; }
+    if (kbs.dialogIs("dialog_select_next", ks)) { if (s === "os") setOsSel((i) => Math.min(sb.OS_CATALOG.length - 1, i + 1)); return; }
+    if (kbs.dialogIs("dialog_select_submit", ks)) {
+      if (s === "docker") {
+        if (docker().state === "not_installed") {
+          sb.markInstallPending();
+          sb.openInstallPage();
+          appendMessage({ role: "system", content: "Opened the Docker download page. Install Docker (restart if asked), then run /sandbox again — or just say \"docker is ready\" in chat." });
+          closeModal();
+        } else if (docker().state === "no_daemon") {
+          recheck();
+        } else {
+          setStep("os");
+        }
+        return;
+      }
+      if (s === "os" && !busy()) startSetup();
+      return;
+    }
+  });
+
+  const link = sb.installLink();
+  const st = () => docker().state;
+
+  return (
+    <ModalFrame
+      title="Sandbox Setup"
+      subtitle={
+        step() === "docker" ? "Step 1/3 — Docker check"
+        : step() === "os" ? "Step 2/3 — pick a lightweight OS"
+        : "Step 3/3 — building the sandbox"
+      }
+      footer={
+        step() === "docker"
+          ? (st() === "not_installed" ? "enter open download page · esc close"
+             : st() === "no_daemon" ? "enter re-check · esc close"
+             : "checking…")
+          : step() === "os" ? "up/down pick · enter start setup · esc close"
+          : busy() ? "working… esc to keep running in background"
+          : "enter retry · esc close"
+      }
+    >
+      {step() === "docker" && st() === "not_installed" ? (
+        <box flexDirection="column">
+          <text fg={ui.warning}>Docker is not installed</text>
+          <text fg={ui.fgMuted} marginTop={1}>The sandbox needs Docker once. After that it is permanent.</text>
+          <box flexDirection="column" marginTop={1}>
+            <text fg={ui.fg}>1. Install Docker Desktop (restart if asked)</text>
+            <text fg={ui.primary}>   {link}</text>
+            <text fg={ui.fg}>2. Start it and wait for "running"</text>
+            <text fg={ui.fg}>3. Come back here and press enter</text>
+          </box>
+        </box>
+      ) : null}
+      {step() === "docker" && st() === "no_daemon" ? (
+        <box flexDirection="column">
+          <text fg={ui.warning}>Docker is installed but not running</text>
+          <text fg={ui.fgMuted} marginTop={1}>Start Docker Desktop (or: sudo systemctl start docker), wait for it, then press enter to re-check.</text>
+        </box>
+      ) : null}
+      {step() === "docker" && st() === "ready" ? (
+        <box flexDirection="column">
+          <text fg={ui.success}>Docker installed (v{docker().version})</text>
+          <text fg={ui.fgMuted} marginTop={1}>Opening OS selection…</text>
+        </box>
+      ) : null}
+      {step() === "os" ? (
+        <box flexDirection="column">
+          {sb.OS_CATALOG.map((/** @type {{ id: string, label: string, sizeNote: string, browser: boolean }} */ os, /** @type {number} */ i) => {
+            const active = i === osSel();
+            return (
+              <box
+                key={os.id} flexDirection="row" paddingY={0}
+                backgroundColor={active ? ui.bgPanelAlt : undefined}
+                onMouseDown={() => setOsSel(i)}
+                onMouseUp={() => { if (osSel() === i) startSetup(); }}
+              >
+                <text fg={active ? ui.primary : ui.fgDim}>{active ? "▸ " : "  "}{os.label}</text>
+                <text fg={active ? ui.fg : ui.fgMuted}>{"  " + os.sizeNote}</text>
+                {os.browser ? <text fg={ui.success}>  +browser</text> : null}
+              </box>
+            );
+          })}
+          <text fg={ui.fgMuted} marginTop={1}>All options include git, curl, ripgrep and a shell.</text>
+        </box>
+      ) : null}
+      {step() === "setup" ? (
+        <box flexDirection="column" maxWidth={64}>
+          {logs().slice(-8).map((l) => <text fg={ui.fgMuted}>{"▸ " + l}</text>)}
+          {busy() ? <text fg={ui.primary}>…</text> : null}
+          {err() ? (
+            <box flexDirection="column" marginTop={1}>
+              <text fg={ui.error}>{err()}</text>
+              <text fg={ui.fgMuted}>press enter to retry, esc to close</text>
+            </box>
+          ) : null}
+          {!busy() && !err() ? <text fg={ui.success}>done</text> : null}
+        </box>
+      ) : null}
+    </ModalFrame>
+  );
+}
+
 // Palette modal (ctrl+p) - proper popup window
 export function PaletteModal(props: { onPick: (cmd: string) => void }) {
   const items = SLASH_LIST.map(c => ({ label: "/" + c.cmd, value: c.cmd, sub: c.desc }));

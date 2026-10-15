@@ -10,6 +10,9 @@ process.env.LOOM_NO_CLIPBOARD = "1";
 // No one-time session-start prompt on mount — tests drive it explicitly via
 // askSessionPermissions() (see test 36i).
 process.env.LOOM_NO_SESSION_PROMPT = "1";
+// Never route bash through the Docker sandbox in the suite (the real user
+// config may have it enabled).
+process.env.LOOM_SANDBOX = "0";
 import "./suite-home.ts";
 import { testRender } from "@opentui/solid";
 import { App } from "./App.tsx";
@@ -2476,6 +2479,41 @@ await sleep(100);
 try { require("../../config/settings.js").saveConfig(Object.assign({}, require("../../config/settings.js").loadConfig(), { statusLine: "" })); } catch {}
 q52.setVimMode(false); q52.setVimNormal(false);
 ok("vim editing + status template");
+
+header("53: /sandbox — guided setup wizard modal (docker check → OS pick → build)");
+setup.mockInput.typeText("/sandbox");
+await sleep(200);
+setup.mockInput.pressEnter();
+await sleep(300);
+console.assert(modal()?.type === "sandbox", "FAIL: /sandbox should open the sandbox wizard, got " + String(modal()?.type));
+frame = strip(setup.captureCharFrame());
+console.assert(frame.includes("Sandbox Setup"), "FAIL: wizard should show its title, got:\n" + frame);
+console.assert(frame.includes("Step 1/3") || frame.includes("Step 2/3"), "FAIL: wizard should show a step marker, got:\n" + frame);
+// Environment-agnostic branch: the harness machine may or may not have
+// Docker. Missing → install-link step; ready → auto-advance to OS pick.
+const sb53 = require("../core/sandbox.js");
+const d53 = sb53.detectDocker();
+if (d53.state === "ready") {
+  await sleep(700); // the modal auto-advances to OS selection ~600ms
+  frame = strip(setup.captureCharFrame());
+  console.assert(frame.includes("Alpine Linux"), "FAIL: OS pick should list Alpine, got:\n" + frame);
+  console.assert(frame.includes("browser") || frame.includes("+browser"), "FAIL: Alpine should advertise browser support, got:\n" + frame);
+} else {
+  console.assert(frame.includes("not installed") || frame.includes("not running") || frame.includes("Step 1/3"), "FAIL: docker-missing step should explain the state, got:\n" + frame);
+  // The download link (or its platform host) must be offered in the guide.
+  console.assert(frame.includes("docs.docker.com") || frame.includes("install") || frame.includes("Install"), "FAIL: missing-docker step should point at the install guide, got:\n" + frame);
+}
+// Esc closes the wizard; /sandbox status still works as a text command.
+setup.mockInput.pressEscape();
+await sleep(150);
+console.assert(modal() === null, "FAIL: esc should close the sandbox wizard");
+setup.mockInput.typeText("/sandbox status");
+await sleep(150);
+setup.mockInput.pressEnter();
+await sleep(200);
+frame = strip(setup.captureCharFrame());
+console.assert(modal() === null && frame.includes("Sandbox:"), "FAIL: /sandbox status should print a status line, got:\n" + frame);
+ok("sandbox wizard modal + status fallback");
 
 console.log("");
 _sessMock.sendUserMessage = _realSendAll;
