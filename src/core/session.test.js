@@ -284,10 +284,10 @@ test("runTurn: drive-to-completion nudges are capped", async () => {
   };
   const res = await s.runTurn({});
   expect(res.type).toBe("text");
-  // 1 tool call + 5 nudged continuations; the 6th premature reply returns.
-  expect(calls).toBe(7);
+  // 1 tool call + 8 nudged continuations; the 9th premature reply returns.
+  expect(calls).toBe(10);
   const nudges = s.messages.filter((m) => m.role === "user" && String(m.content).includes("unfinished work detected"));
-  expect(nudges.length).toBe(5);
+  expect(nudges.length).toBe(8);
   // Every nudge carries the actual last reply and the open todo list.
   expect(String(nudges[0].content)).toContain("premature stop");
   expect(String(nudges[0].content)).toContain("stuck item");
@@ -327,6 +327,131 @@ test("runTurn: empty reply after tools is nudged with the real tool-call count",
   const nudge = s.messages.find((m) => m.role === "user" && String(m.content).includes("empty reply"));
   expect(nudge).toBeTruthy();
   expect(String(nudge.content)).toContain("1 tool call");
+});
+
+test("runTurn: finish_reason=length auto-continues instead of dead-ending (empty content)", async () => {
+  const s = freshSession();
+  let calls = 0;
+  s.getResponse = async () => {
+    calls++;
+    // Two truncated replies (thinking ate the whole output budget), then a
+    // normal one.
+    if (calls <= 2) return { type: "assistant", content: "", toolCalls: [], finishReason: "length" };
+    return { type: "assistant", content: "the actual answer", toolCalls: [], finishReason: "stop" };
+  };
+  const res = await s.runTurn({});
+  expect(res.type).toBe("text");
+  expect(res.content).toBe("the actual answer");
+  expect(calls).toBe(3);
+  const truncs = s.messages.filter((m) => m.role === "user" && String(m.content).includes("cut off by the output-token limit"));
+  expect(truncs.length).toBe(2);
+  // The empty truncated assistant rows are dropped — Anthropic 400s on them.
+  const empties = s.messages.filter((m) => m.role === "assistant" && !String(m.content || "").trim() && !(m.toolCalls || []).length);
+  expect(empties.length).toBe(0);
+});
+
+test("runTurn: finish_reason=length with partial text continues from the cut point", async () => {
+  const s = freshSession();
+  let calls = 0;
+  s.getResponse = async () => {
+    calls++;
+    if (calls === 1) {
+      return { type: "assistant", content: "The fix has two parts. Part one is done,", toolCalls: [], finishReason: "length" };
+    }
+    return { type: "assistant", content: " and part two is the parser update.", toolCalls: [], finishReason: "stop" };
+  };
+  const res = await s.runTurn({});
+  expect(res.type).toBe("text");
+  expect(res.content).toContain("part two");
+  const trunc = s.messages.find((m) => m.role === "user" && String(m.content).includes("cut off by the output-token limit"));
+  expect(trunc).toBeTruthy();
+  // The nudge quotes the actual cut point so the model can resume mid-sentence.
+  expect(String(trunc.content)).toContain("Part one is done");
+});
+
+test("runTurn: truncation continuation is capped — no infinite loop", async () => {
+  const s = freshSession();
+  let calls = 0;
+  s.getResponse = async () => {
+    calls++;
+    return { type: "assistant", content: "", toolCalls: [], finishReason: "length" };
+  };
+  const res = await s.runTurn({});
+  expect(res.type).toBe("text");
+  // 1 initial + 5 truncation continuations, then the placeholder returns.
+  expect(calls).toBe(6);
+  expect(res.content).toContain("max-tokens limit");
+});
+
+test("runTurn: premature short reply with stale todos + tools run is nudged (no todowrite needed)", async () => {
+  const s = freshSession();
+  s.setTodos([{ content: "stale but open item", status: "pending" }]);
+  let calls = 0;
+  s.getResponse = async () => {
+    calls++;
+    if (calls === 1) {
+      return { type: "assistant", content: "", toolCalls: [{ id: "t1", name: "read", input: { filePath: __filename } }] };
+    }
+    if (calls === 2) {
+      // Short promise-style stop WITHOUT calling todowrite this turn.
+      return { type: "assistant", content: "Now I will implement the parser.", toolCalls: [] };
+    }
+    // Finish: mark the item done, then close out.
+    if (calls === 3) {
+      return { type: "assistant", content: "", toolCalls: [{ id: "t3", name: "todowrite", input: { todos: [{ content: "stale but open item", status: "completed" }] } }] };
+    }
+    return { type: "assistant", content: "Parser implemented and item closed.", toolCalls: [] };
+  };
+  const res = await s.runTurn({});
+  expect(res.type).toBe("text");
+  expect(res.content).toContain("Parser implemented");
+  expect(calls).toBe(4);
+  const nudges = s.messages.filter((m) => m.role === "user" && String(m.content).includes("unfinished work detected"));
+  expect(nudges.length).toBe(1);
+  expect(String(nudges[0].content)).toContain("stale but open item");
+});
+
+test("runTurn: a complete-looking final answer is NOT nudged despite stale todos", async () => {
+  const s = freshSession();
+  s.setTodos([{ content: "old leftover", status: "pending" }]);
+  let calls = 0;
+  s.getResponse = async () => {
+    calls++;
+    if (calls === 1) {
+      return { type: "assistant", content: "", toolCalls: [{ id: "t1", name: "read", input: { filePath: __filename } }] };
+    }
+    // Long, closed-out explanation — not a mid-work stop.
+    return {
+      type: "assistant",
+      content: "Here is the full explanation of how the caching layer works, why it was introduced, " +
+        "which call sites benefit from it, what the invalidation strategy is, and how the tests cover " +
+        "the eviction paths. The answer includes every detail a reviewer would ask about, with references " +
+        "to the relevant files and line numbers throughout the discussion.",
+      toolCalls: [],
+    };
+  };
+  const res = await s.runTurn({});
+  expect(res.type).toBe("text");
+  expect(calls).toBe(2);
+  const nudges = s.messages.filter((m) => m.role === "user" && String(m.content).includes("unfinished work detected"));
+  expect(nudges.length).toBe(0);
+  expect(res.openTodos).toBeUndefined();
+});
+
+test("runTurn: empty-reply nudges are capped (3 per turn)", async () => {
+  const s = freshSession();
+  let calls = 0;
+  s.getResponse = async () => {
+    calls++;
+    if (calls <= 3) return { type: "assistant", content: "", toolCalls: [] };
+    return { type: "assistant", content: "finally text", toolCalls: [] };
+  };
+  const res = await s.runTurn({});
+  expect(res.type).toBe("text");
+  expect(res.content).toBe("finally text");
+  expect(calls).toBe(4);
+  const nudges = s.messages.filter((m) => m.role === "user" && String(m.content).includes("was empty"));
+  expect(nudges.length).toBe(3);
 });
 
 test("primary agents: role prompt reaches the system prompt; children are exempt", () => {

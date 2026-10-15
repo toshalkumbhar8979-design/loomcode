@@ -63,6 +63,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Chrome/Edge. The page singleton persists across calls. Permissions: passive
   reads allow, interactive click/fill/press ask.
 
+### Fixed
+- **Agent loop no longer stops in the middle of work** (`src/core/session.js`
+  continuation guards — opencode/Claude-Code parity):
+  - **Truncation auto-continue.** `finish_reason=length` (output budget
+    exhausted — the #1 cause of mid-task stops with reasoning models, where
+    thinking eats max_tokens and the answer never streams) now continues
+    the turn with a "continue exactly from where it stopped" nudge instead
+    of dead-ending with a placeholder — up to 5 continuations per turn.
+    Empty truncated replies also drop the empty assistant row from history
+    (Anthropic 400s on empty assistant messages, which silently killed
+    subsequent calls).
+  - **Empty-reply nudges raised 1 → 3 per turn** (provider hiccups repeat).
+  - **Premature-wrap-up detection broadened.** The drive guard now also
+    fires when tools ran, todos exist, and the reply LOOKS unfinished
+    (short, or ends on a promise like "Now I will…") — catching models that
+    never call todowrite. Drive nudges raised 5 → 8 per turn. Leftover
+    todos are surfaced to the UI whenever the guard engaged.
+
 ### Changed
 - **Slash popup decluttered.** The autocomplete popup and command palette
   now show a short one-line description per command — argument syntax is no

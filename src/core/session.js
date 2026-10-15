@@ -26,10 +26,28 @@ const COMPACT_MIN_MESSAGES = 6;
 // Drive-to-completion: how many continuation nudges one turn may spend when
 // the model stops with todos still unfinished (the "stops between tasks"
 // failure). Capped so a model that refuses to update its todos cannot spin.
-const MAX_DRIVE_NUDGES = 5;
+const MAX_DRIVE_NUDGES = 8;
+// Empty-reply nudges per turn (provider hiccup / reasoning-only stop).
+const MAX_EMPTY_NUDGES = 3;
+// finish_reason=length (output budget exhausted) auto-continues the turn
+// this many times before surfacing the truncation placeholder. This is the
+// #1 cause of "stops in the middle" with reasoning models: thinking eats
+// the whole max_tokens budget and the answer never streams.
+const MAX_TRUNCATION_CONTINUES = 5;
 // Transient provider failures (network blip, 5xx, stream reset) retry the
 // model call this many times before the turn surfaces an error.
 const PROVIDER_RETRIES = 2;
+
+// Does this reply sound like the model stopped in the MIDDLE of working?
+// Used when todos exist but weren't touched this turn: a short reply, or a
+// long one that ends on a continuation promise ("Now I will…", "Next, …"),
+// an open colon, or an ellipsis is unfinished. A full explanation is not.
+function looksUnfinished(text) {
+  const t = String(text || '').trim();
+  if (!t) return true;
+  if (t.length < 320) return true;
+  return /(?:\b(?:now|next|then|let me|i'?ll|going to|proceeding)\b[^.!?]*[.!]?\s*$)|[:…]$|\.\.\.\s*$/i.test(t);
+}
 
 /**
  * @typedef {Object} SpeedStats
@@ -405,6 +423,19 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
     this.messages.push(msg);
   }
 
+  // Remove a trailing empty assistant row (no text, no toolCalls). getResponse
+  // appends the assistant message even when the provider returned nothing —
+  // Anthropic rejects empty assistant content with a 400 on the next call, so
+  // continuation paths drop the row before adding their user nudge.
+  _dropTrailingEmptyAssistant() {
+    const last = this.messages[this.messages.length - 1];
+    if (last && last.role === 'assistant' && !(last.toolCalls || []).length && !String(last.content || '').trim()) {
+      this.messages.pop();
+      return true;
+    }
+    return false;
+  }
+
   // ─── Todo state ───
   // The todowrite tool persists into the session so the sidebar shows the
   // real, up-to-date task list instead of regex-scanning replies.
@@ -568,10 +599,11 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
     // No tool-use cap: the model decides when a turn is finished; the user can
     // always Esc-interrupt a runaway loop.
     let ranTools = false;
-    let nudged = false;
+    let emptyNudges = 0;
     let toolCallsThisTurn = 0;
     // Drive-to-completion state (see the no-toolCalls branch below).
     let driveNudges = 0;
+    let truncContinues = 0;
     let todowroteThisTurn = false;
     // Transient provider-error retry state.
     let providerRetries = 0;
@@ -644,13 +676,36 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
 
       if (!toolCalls.length) {
         const text = String(resp.content || '');
+
+        // Truncation auto-continue: finish_reason=length means the reply was
+        // CUT OFF by maxTokens — common with reasoning models (thinking eats
+        // the budget, the final answer never streams). Instead of dead-ending
+        // with a placeholder (the classic "stops in the middle"), continue the
+        // turn. Empty-content truncations also drop the empty assistant row
+        // from history — Anthropic 400s on empty assistant messages.
+        if (!this.interrupted && resp.finishReason === 'length' && truncContinues < MAX_TRUNCATION_CONTINUES) {
+          truncContinues++;
+          if (!text.trim()) this._dropTrailingEmptyAssistant();
+          const at = text.trim() ? text.replace(/\s+/g, ' ').trim().slice(-160) : null;
+          this.addMessage({
+            role: 'user',
+            content: '(your reply was cut off by the output-token limit' +
+              (at ? ' right after: \u2026' + at : ' before any text streamed') +
+              ' \u2014 continue exactly from there and finish the task. Keep the remaining reply compact so it fits.)',
+          });
+          continue;
+        }
+
         // Silent-stop guard: models occasionally end a turn with an EMPTY
         // reply — right after running tools (truncation / provider hiccup)
         // or even on a plain first reply (reasoning-only stop, content
-        // filter). One automatic continuation instead of dead-ending with
-        // a placeholder. `nudged` caps it at one per turn.
-        if (!text.trim() && !nudged && !this.interrupted) {
-          nudged = true;
+        // filter). Automatic continuation instead of dead-ending with a
+        // placeholder — up to MAX_EMPTY_NUDGES per turn (hiccups repeat).
+        // finish_reason=length skips this: the truncation block above already
+        // spent its budget, and the placeholder below explains why.
+        if (!text.trim() && emptyNudges < MAX_EMPTY_NUDGES && !this.interrupted && resp.finishReason !== 'length') {
+          emptyNudges++;
+          this._dropTrailingEmptyAssistant();
           this.addMessage({
             role: 'user',
             content: ranTools
@@ -661,16 +716,18 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
           continue;
         }
         // Drive-to-completion guard: the model stopped calling tools in the
-        // middle of tracked work (todos written this turn still
-        // pending/in_progress). Inject one continuation that quotes the
-        // model's ACTUAL last message and lists the unfinished items — up to
-        // MAX_DRIVE_NUDGES times — so a premature summary does not strand the
-        // task. The model can stop cleanly by completing or cancelling the
-        // items via todowrite. Plan/chat modes are excluded (plan drafts are
-        // meant to end with pending steps).
-        if (!this.interrupted && this.mode === 'build' && ranTools && todowroteThisTurn && driveNudges < MAX_DRIVE_NUDGES) {
+        // middle of tracked work. Two triggers:
+        //  1. todos written THIS turn are still pending/in_progress (the
+        //     strong signal — always nudge), or
+        //  2. tools ran this turn, todos exist, and the reply LOOKS
+        //     unfinished (short / ends on a promise) — catches premature
+        //     wrap-ups from models that never call todowrite.
+        // Up to MAX_DRIVE_NUDGES continuations. Plan/chat modes are excluded
+        // (plan drafts are meant to end with pending steps).
+        if (!this.interrupted && this.mode === 'build' && ranTools && driveNudges < MAX_DRIVE_NUDGES) {
           const unfinished = (this.todos || []).filter((t) => t.status === 'pending' || t.status === 'in_progress');
-          if (unfinished.length) {
+          const gated = todowroteThisTurn || looksUnfinished(text);
+          if (unfinished.length && gated) {
             driveNudges++;
             const list = unfinished.slice(0, 20).map((t) => '- [' + t.status + '] ' + t.content).join('\n');
             // Quote what the model actually said — a canned nudge alone gives
@@ -688,16 +745,15 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
             continue;
           }
         }
-        // Surface WHAT is still open when a build-mode turn that WROTE todos
-        // ends with work remaining (same signal as the nudge above), so the
-        // UI can show the real leftovers instead of a generic "stopped"
-        // placeholder. Stale todos from older turns stay silent.
-        const openTodos = (this.mode === 'build' && todowroteThisTurn)
+        // Surface WHAT is still open when a build-mode turn engaged the drive
+        // guard (or wrote todos) and ends with work remaining, so the UI can
+        // show the real leftovers instead of a generic "stopped" placeholder.
+        const openTodos = (this.mode === 'build' && (todowroteThisTurn || driveNudges > 0))
           ? (this.todos || []).filter((t) => t.status === 'pending' || t.status === 'in_progress')
           : [];
-        // finish_reason=length means the reply was CUT OFF by maxTokens —
-        // common with reasoning models (thinking eats the budget, the final
-        // answer never streams). Name it instead of a mystery placeholder.
+        // Safety net: after all continuation budgets are spent, a
+        // finish_reason=length reply still gets the explanatory placeholder
+        // instead of mystery silence.
         const truncHint = resp.finishReason === 'length'
           ? '(the reply hit the max-tokens limit mid-stream — the model ran out of output budget before writing any text. Raise maxTokens in config, or /think off to free the thinking budget)'
           : '(the model ended the turn without any text)';
