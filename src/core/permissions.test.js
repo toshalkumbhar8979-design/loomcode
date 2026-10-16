@@ -129,3 +129,27 @@ test("resolveKey: doom_loop defaults to ask; config can allow/deny it", () => {
   const p3 = pm({ permission: { external_directory: "allow" } });
   expect(p3.resolveKey("external_directory", "C:/elsewhere")).toBe("allow");
 });
+
+// ─── v1.5.0: MCP tool gate + todoread mapping ───
+
+test("mcp__* tools default to ask; patterns can allow one server/tool", () => {
+  const p = pm({});
+  // The session passes the FULL tool name as the pattern arg for mcp__* calls.
+  expect(p.resolve("mcp__github__search_repos", "mcp__github__search_repos")).toBe("ask");
+  expect(p.resolve("mcp__gmail__send_email", "mcp__gmail__send_email")).toBe("ask");
+  // Precise allow: one server wildcard.
+  const p2 = pm({ permission: { mcp: { "mcp__github__*": "allow" } } });
+  expect(p2.resolve("mcp__github__search_repos", "mcp__github__search_repos")).toBe("allow");
+  expect(p2.resolve("mcp__gmail__send_email", "mcp__gmail__send_email")).toBe("ask");
+  // Exact tool allow + explicit deny.
+  const p3 = pm({ permission: { mcp: { "mcp__fs__read_file": "allow", "mcp__fs__delete_*": "deny" } } });
+  expect(p3.resolve("mcp__fs__read_file", "mcp__fs__read_file")).toBe("allow");
+  expect(p3.resolve("mcp__fs__delete_all", "mcp__fs__delete_all")).toBe("deny");
+});
+
+test("todoread maps to read; tasks never prompts", () => {
+  expect(TOOL_TO_PERMISSION.todoread).toBe("read");
+  expect(TOOL_TO_PERMISSION.tasks).toBe(null);
+  const p = pm({});
+  expect(p.resolve("todoread", "/abs/anything.md")).toBe("allow");
+});

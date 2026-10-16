@@ -110,27 +110,43 @@ function sanitizeErrBody(msg) {
 function wrapErr(err, modelId, envKeyHint, baseURL) {
   const raw = err.message || 'Unknown error';
   const msg = sanitizeErrBody(raw);
-  if (!err.status) return new Error(`${envKeyHint || 'API'} error: ${msg}`);
-  const status = Number(err.status);
-  const hint = String(envKeyHint || 'api').toLowerCase();
-  if (status === 401) {
-    return new Error(`${envKeyHint || 'API'} 401 Unauthorized: the API key is invalid or expired. Run /connect ${hint} and paste a new key.`);
+  // Carry the HTTP status + Retry-After onto the wrapped error so the
+  // session loop can tell a rate-limit (wait+retry) from a quota switch.
+  const out = /** @type {any} */ (!err.status ? new Error(`${envKeyHint || 'API'} error: ${msg}`) : (() => {
+    const status = Number(err.status);
+    const hint = String(envKeyHint || 'api').toLowerCase();
+    if (status === 401) {
+      return new Error(`${envKeyHint || 'API'} 401 Unauthorized: the API key is invalid or expired. Run /connect ${hint} and paste a new key.`);
+    }
+    if (status === 403) {
+      return new Error(`${envKeyHint || 'API'} 403 Forbidden: the API key is not authorized for ${modelId || 'this model'}. You may need to accept the model's terms on the provider site or use a key with access. Run /connect ${hint} to change the key.`);
+    }
+    if (status === 402) return new Error(`${envKeyHint || 'API'} quota exceeded (${err.status}). The model may not be available on your billing tier for model ${(modelId || '?')}.`);
+    if (status === 404) {
+      const modelHint = modelId ? ` ${modelId}` : '';
+      return new Error(`${envKeyHint || 'API'} 404: model${modelHint} does not exist (or was removed) on this provider. Try /models and pick a listed model, or /model ${modelId ? 'to switch' : ''}.`);
+    }
+    if (err.error && err.error.message) return new Error(`${envKeyHint || 'API'} error ${status}: ${sanitizeErrBody(err.error.message)}`);
+    if (err.body && err.body.message) return new Error(`${envKeyHint || 'API'} error ${status}: ${sanitizeErrBody(err.body.message)}`);
+    if (!msg || msg.indexOf('no body') >= 0) {
+      const modelHint = modelId ? ` (model: ${modelId})` : '';
+      return new Error(`${envKeyHint || 'API'} error ${status}${modelHint}. Check model name or URL:\n${baseURL || '(default)'}`);
+    }
+    return new Error(`${envKeyHint || 'API'} error ${status}: ${msg}`);
+  })());
+  out.status = err.status ? Number(err.status) : undefined;
+  // Retry-After from the openai SDK error headers (seconds or HTTP-date).
+  const hdrs = err.headers;
+  const ra = hdrs && (typeof hdrs.get === 'function' ? hdrs.get('retry-after') : hdrs['retry-after']);
+  if (ra) {
+    const secs = Number(ra);
+    if (Number.isFinite(secs) && secs >= 0) out.retryAfterMs = Math.min(secs * 1000, 60000);
+    else {
+      const t = Date.parse(ra);
+      if (Number.isFinite(t)) out.retryAfterMs = Math.min(Math.max(0, t - Date.now()), 60000);
+    }
   }
-  if (status === 403) {
-    return new Error(`${envKeyHint || 'API'} 403 Forbidden: the API key is not authorized for ${modelId || 'this model'}. You may need to accept the model's terms on the provider site or use a key with access. Run /connect ${hint} to change the key.`);
-  }
-  if (status === 402) return new Error(`${envKeyHint || 'API'} quota exceeded (${err.status}). The model may not be available on your billing tier for model ${(modelId || '?')}.`);
-  if (status === 404) {
-    const modelHint = modelId ? ` ${modelId}` : '';
-    return new Error(`${envKeyHint || 'API'} 404: model${modelHint} does not exist (or was removed) on this provider. Try /models and pick a listed model, or /model ${modelId ? 'to switch' : ''}.`);
-  }
-  if (err.error && err.error.message) return new Error(`${envKeyHint || 'API'} error ${status}: ${sanitizeErrBody(err.error.message)}`);
-  if (err.body && err.body.message) return new Error(`${envKeyHint || 'API'} error ${status}: ${sanitizeErrBody(err.body.message)}`);
-  if (!msg || msg.indexOf('no body') >= 0) {
-    const modelHint = modelId ? ` (model: ${modelId})` : '';
-    return new Error(`${envKeyHint || 'API'} error ${status}${modelHint}. Check model name or URL:\n${baseURL || '(default)'}`);
-  }
-  return new Error(`${envKeyHint || 'API'} error ${status}: ${msg}`);
+  return out;
 }
 
 async function retryWithBackoff(fn, maxTries, envKeyHint) {
@@ -142,10 +158,20 @@ async function retryWithBackoff(fn, maxTries, envKeyHint) {
       lastErr = err;
       if (isAbortError(err)) throw err;
       const status = err.status || err.code;
-      if (status !== 429 && status !== 503 && status !== 502) throw lastErr;
-      if (attempt > 0) {
-        const delay = Math.min(1000 * Math.pow(3, attempt - 1), 30000);
-        await new Promise((resolve) => setTimeout(resolve, delay));
+      if (status !== 429 && status !== 503 && status !== 502 && status !== 529) throw lastErr;
+      {
+        // Honor Retry-After when the provider sends one (even on the first
+        // retry); otherwise the first retry is immediate (transient blip)
+        // and later ones back off exponentially. Jitter avoids a thundering
+        // herd of parallel retries.
+        let delay = attempt > 0 ? Math.min(1000 * Math.pow(3, attempt - 1), 30000) : 0;
+        const hdrs = err.headers;
+        const ra = hdrs && (typeof hdrs.get === 'function' ? hdrs.get('retry-after') : hdrs['retry-after']);
+        if (ra) {
+          const secs = Number(ra);
+          if (Number.isFinite(secs) && secs >= 0) delay = Math.min(secs * 1000, 60000);
+        }
+        await new Promise((resolve) => setTimeout(resolve, delay + (delay > 0 ? Math.floor(Math.random() * 250) : 0)));
       }
     }
   }

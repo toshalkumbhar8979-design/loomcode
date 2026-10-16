@@ -75,13 +75,21 @@ test("setTodos normalizes statuses, priorities, dedupes by content", () => {
   expect(s.setTodos("nope")).toEqual([]);
 });
 
-test("estimateTokens: chars/4 incl. tool call inputs", () => {
+test("estimateTokens: chars/4 incl. tool call inputs, system prompt and schema", () => {
   const s = freshSession();
   s.addMessage({ role: "user", content: "0123456789" }); // 10 chars
   s.addMessage({ role: "assistant", content: "0123456789", toolCalls: [{ input: { filePath: "abcd" } }] }); // 10 + ~18 JSON chars
+  // Zero the system prompt / schema so the base assertion isolates messages.
+  s.systemPrompt = "";
+  s._toolSchemaChars = 0;
   const est = s.estimateTokens();
   const expected = Math.ceil((10 + 10 + JSON.stringify({ filePath: "abcd" }).length) / 4);
   expect(est).toBe(expected);
+  // System prompt and tool schema size are included (parity with real
+  // context accounting — a big system prompt is real context).
+  s.systemPrompt = "0".repeat(400);
+  s._toolSchemaChars = 200;
+  expect(s.estimateTokens()).toBe(expected + 150);
 });
 
 test("shouldCompact: short conversations never compact", () => {
@@ -586,15 +594,30 @@ test("recordUsage: anthropic-style usage + null usage no-ops", () => {
   expect(s.sessionCost).toBe(before.cost);
 });
 
-test("isQuotaError: 429/402/rate-limit messages are quota errors", () => {
-  const { isQuotaError } = require("./session.js");
-  expect(isQuotaError({ status: 429 })).toBe(true);
+test("isQuotaError / isRateLimitError: quota switches models, rate limits wait", () => {
+  const { isQuotaError, isRateLimitError, isContextOverflowError } = require("./session.js");
+  // Quota/billing: switch triggers.
   expect(isQuotaError({ status: 402 })).toBe(true);
-  expect(isQuotaError({ status: 500 })).toBe(false);
-  expect(isQuotaError({ message: "rate limit exceeded, retry later" })).toBe(true);
   expect(isQuotaError({ message: "You have insufficient balance. Please add a payment method." })).toBe(true);
+  expect(isQuotaError({ message: "quota exceeded for the month" })).toBe(true);
+  // Rate limits are NOT quota errors anymore — they wait+retry instead.
+  expect(isQuotaError({ status: 429 })).toBe(false);
+  expect(isQuotaError({ message: "rate limit exceeded, retry later" })).toBe(false);
+  expect(isQuotaError({ status: 500 })).toBe(false);
   expect(isQuotaError({ message: "model not found" })).toBe(false);
   expect(isQuotaError(null)).toBe(false);
+  // Rate-limit detection: 429/529 + wording.
+  expect(isRateLimitError({ status: 429 })).toBe(true);
+  expect(isRateLimitError({ status: 529 })).toBe(true);
+  expect(isRateLimitError({ message: "Too many requests, slow down" })).toBe(true);
+  expect(isRateLimitError({ status: 400, message: "bad request" })).toBe(false);
+  expect(isRateLimitError(null)).toBe(false);
+  // Context overflow: compact-and-retry triggers.
+  expect(isContextOverflowError({ status: 400, message: "prompt is too long: 250000 tokens > 200000 maximum" })).toBe(true);
+  expect(isContextOverflowError({ status: 400, message: "This model's maximum context length is 128000 tokens" })).toBe(true);
+  expect(isContextOverflowError({ message: '{"error":{"type":"context_length_exceeded"}}' })).toBe(true);
+  expect(isContextOverflowError({ status: 400, message: "invalid tool input" })).toBe(false);
+  expect(isContextOverflowError(null)).toBe(false);
 });
 
 test("isAbortError: AbortError / APIUserAbortError / cancel messages", () => {
@@ -619,4 +642,87 @@ test("reset: clears session state and rotates conversation id", () => {
   expect(s.turnCount).toBe(0);
   expect(s.tokensUsed).toBe(0);
   expect(s.conversationId).not.toBe(oldId);
+});
+
+// ─── v1.5.0 harness-parity additions ───
+
+test("_normalizeHistory: leading assistant/tool rows are dropped (Anthropic-safe shape)", () => {
+  const s = freshSession();
+  s.messages = [
+    { role: "assistant", content: "orphan from a restored session" },
+    { role: "tool", toolCallId: "t1", content: "orphan result" },
+    { role: "user", content: "real question" },
+    { role: "assistant", content: "answer" },
+  ];
+  s._normalizeHistory();
+  expect(s.messages[0].role).toBe("user");
+  expect(s.messages[0].content).toBe("real question");
+  expect(s.messages.length).toBe(2);
+  // Already-normalized histories are untouched.
+  const before = s.messages.slice();
+  s._normalizeHistory();
+  expect(s.messages).toEqual(before);
+});
+
+test("compact: summary is stored as a USER-role row (survives openai-compat)", async () => {
+  const s = freshSession();
+  for (let i = 0; i < 12; i++) {
+    s.addMessage({ role: "user", content: "Question " + i });
+    s.addMessage({ role: "assistant", content: "Answer " + i });
+  }
+  // Mock the active provider's chat() to return a summary without network.
+  s.provider.active = { name: "mock" };
+  s.provider.providers["mock"] = { chat: async () => ({ content: "## Summary\n- did things" }) };
+  const res = await s.compact();
+  expect(res.compacted).toBe(true);
+  expect(res.method).toBe("summary");
+  // The summary row must be role 'user': openai-compat drops history rows
+  // with role 'system', which used to silently discard it.
+  expect(s.messages[0].role).toBe("user");
+  expect(s.messages[0].content).toContain("## Summary");
+  // And the kept tail follows it.
+  expect(s.messages.length).toBeGreaterThan(1);
+});
+
+test("contextEstimate: tokens/window/pct reflect the live conversation", () => {
+  const s = freshSession();
+  s.systemPrompt = "";
+  s._toolSchemaChars = 0;
+  s.addMessage({ role: "user", content: "0".repeat(4000) }); // ~1000 tokens
+  const ce = s.contextEstimate();
+  expect(ce.window).toBe(200000);
+  expect(ce.tokens).toBeGreaterThanOrEqual(1000);
+  expect(ce.pct).toBe(Math.min(100, Math.round((ce.tokens / ce.window) * 100)));
+});
+
+test("runTurn: failed tool outcomes are marked isError on the history row", async () => {
+  const s = freshSession();
+  let calls = 0;
+  s.getResponse = async () => {
+    calls++;
+    if (calls === 1) {
+      return { type: "assistant", content: "", toolCalls: [{ id: "t1", name: "read", input: { filePath: "/nope-missing.txt" } }] };
+    }
+    return { type: "assistant", content: "done", toolCalls: [] };
+  };
+  await s.runTurn({});
+  const toolRow = s.messages.find((m) => m.role === "tool" && m.toolCallId === "t1");
+  expect(toolRow).toBeTruthy();
+  expect(toolRow.isError).toBe(true);
+  expect(toolRow.content).toContain("Error:");
+});
+
+test("runTurn: isError is false for successful tool outcomes", async () => {
+  const s = freshSession();
+  let calls = 0;
+  s.getResponse = async () => {
+    calls++;
+    if (calls === 1) {
+      return { type: "assistant", content: "", toolCalls: [{ id: "t2", name: "todowrite", input: { todos: [{ content: "ok", status: "completed" }] } }] };
+    }
+    return { type: "assistant", content: "done", toolCalls: [] };
+  };
+  await s.runTurn({});
+  const toolRow = s.messages.find((m) => m.role === "tool" && m.toolCallId === "t2");
+  expect(toolRow.isError).toBe(false);
 });

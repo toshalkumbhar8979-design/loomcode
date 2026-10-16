@@ -76,3 +76,33 @@ test("stop hook fires without blocking semantics", async () => {
   expect(r.blocked).toBe(false);
   expect(r.ran).toBe(true);
 });
+
+// ─── v1.5.0: userPromptSubmit + additionalContext + subagentStop ───
+
+test("userPromptSubmit deny JSON blocks the prompt", async () => {
+  writeConfig({ userPromptSubmit: 'bun -e "console.log(JSON.stringify({decision:\'block\',reason:\'nope\'}))"' });
+  const r = await hooks.runHook("userPromptSubmit", { prompt: "delete everything" });
+  expect(r.blocked).toBe(true);
+  expect(r.reason).toBe("nope");
+});
+
+test("userPromptSubmit additionalContext is surfaced on the result", async () => {
+  writeConfig({ userPromptSubmit: 'bun -e "console.log(JSON.stringify({hookSpecificOutput:{hookEventName:\'UserPromptSubmit\',additionalContext:\'lint says 3 errors\'}}))"' });
+  const r = await hooks.runHook("userPromptSubmit", { prompt: "fix the lint" });
+  expect(r.blocked).toBe(false);
+  expect(r.additionalContext).toBe("lint says 3 errors");
+});
+
+test("userPromptSubmit non-zero exit blocks (like preToolUse)", async () => {
+  writeConfig({ userPromptSubmit: process.platform === "win32" ? "cmd /c exit 3" : "exit 3" });
+  const r = await hooks.runHook("userPromptSubmit", { prompt: "hi" });
+  expect(r.blocked).toBe(true);
+  expect(r.reason).toContain("3");
+});
+
+test("subagentStop fires without blocking even on failure", async () => {
+  writeConfig({ subagentStop: process.platform === "win32" ? "cmd /c exit 1" : "exit 1" });
+  const r = await hooks.runHook("subagentStop", { agent: "explore", runId: "r1", reason: "end" });
+  expect(r.blocked).toBe(false);
+  expect(r.ran).toBe(true);
+});

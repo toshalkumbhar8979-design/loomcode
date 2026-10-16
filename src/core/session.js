@@ -71,15 +71,34 @@ function isAbortError(err) {
   return /aborted|cancel(led|ed)/i.test(String(err.message || ''));
 }
 
+// Rate-limit errors — transient (429 / overloaded): wait and retry rather
+// than switching models. Checked BEFORE isQuotaError so a 429 never triggers
+// a spurious model switch.
+function isRateLimitError(err) {
+  if (!err) return false;
+  const status = Number(err.status || err.code || err.error?.status || 0);
+  if (status === 429 || status === 529) return true;
+  const msg = String(err.message || err.error?.message || '');
+  return /rate.?limit|too many requests|overloaded/i.test(msg);
+}
+
 // Quota/credits exhausted errors — the model is out of tokens (free tiers,
 // daily limits, billing caps). These are switch-to-another-model triggers.
+// Rate-limit wording is deliberately NOT matched here (see isRateLimitError).
 function isQuotaError(err) {
   if (!err) return false;
   const status = Number(err.status || err.code || err.error?.status || 0);
   if (status === 402) return true;
-  if (status === 429) return true;
   const msg = String(err.message || err.error?.message || err.body?.error?.message || '');
-  return /quota|exhausted|insufficient.{0,20}(balance|credits|quota)|out of (tokens|credits|balance)|no (more )?(tokens|credits|balance)|rate.?limit|billing limit|payment required|max.?quota|limit reached/i.test(msg);
+  return /quota|exhausted|insufficient.{0,20}(balance|credits|quota)|out of (tokens|credits|balance)|no (more )?(tokens|credits|balance)|billing limit|payment required|max.?quota|limit reached/i.test(msg);
+}
+
+// Context-overflow errors — the prompt exceeded the model window. Compacting
+// the conversation and retrying is the correct recovery (not a model switch).
+function isContextOverflowError(err) {
+  if (!err) return false;
+  const msg = String(err.message || err.error?.message || err.body?.error?.message || '');
+  return /prompt is too long|context_length_exceeded|input length.{0,40}maximum length|request_too_large|too many tokens|maximum context length|reduce the length/i.test(msg);
 }
 
 class Session {
@@ -381,6 +400,9 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
     // trigger a refresh. Re-reading disk and re-init'ing the provider on every
     // message was noticeable overhead per turn.
     this.interrupted = false;
+    // Restored/compacted sessions may carry a history whose first row isn't
+    // a user message — Anthropic rejects that shape. Normalize once here.
+    this._normalizeHistory();
 
     // Skill auto-trigger: if the user's message mentions a skill keyword
     // (e.g. "slice", "gcode", "cad"), load the matched skill's instructions
@@ -404,6 +426,18 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
     } else {
       this._skillBlock = '';
     }
+
+    // userPromptSubmit hook: may veto the prompt outright, or inject extra
+    // context (lint output, ticket data) appended to the user's message.
+    try {
+      const gate = await hooks.runHook('userPromptSubmit', { prompt: text });
+      if (gate.blocked) {
+        return { type: 'error', content: 'Prompt blocked by userPromptSubmit hook.' + (gate.reason ? ' ' + gate.reason : '') };
+      }
+      if (gate.additionalContext) {
+        text = text + '\n\n<user-prompt-submit-hook>\n' + gate.additionalContext + '\n</user-prompt-submit-hook>';
+      }
+    } catch {}
 
     this.addMessage({ role: 'user', content: text });
     this.turnCount++;
@@ -481,13 +515,17 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
 
   // ─── Compaction ───
   // Rough token estimate from message text (chars/4) — used to decide when
-  // the context window is getting full.
+  // the context window is getting full. Includes the system prompt and the
+  // serialized tool schemas: with many MCP tools those can be tens of
+  // thousands of tokens that a messages-only estimate ignores.
   estimateTokens() {
     let chars = 0;
     for (const m of this.messages) {
       chars += String(m.content || '').length;
       for (const tc of m.toolCalls || []) chars += JSON.stringify(tc.input || {}).length;
     }
+    chars += String(this.systemPrompt || '').length;
+    chars += this._toolSchemaChars || 0;
     return Math.ceil(chars / 4);
   }
 
@@ -496,15 +534,39 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
     return meta?.context || 200000;
   }
 
+  // Live context estimate for the /context TUI command: tokens (messages +
+  // system prompt + tool schemas), window size, and percent used. Recomputed
+  // on every call so it reflects the CURRENT conversation, not a startup
+  // snapshot.
+  contextEstimate() {
+    const tokens = this.estimateTokens();
+    const window = this.getContextWindow();
+    return { tokens, window, pct: Math.min(100, Math.round((tokens / window) * 100)) };
+  }
+
   shouldCompact() {
     if (this.messages.length < COMPACT_MIN_MESSAGES) return false;
     const threshold = this.config.compactThreshold ?? COMPACT_DEFAULT_THRESHOLD;
     return this.estimateTokens() > this.getContextWindow() * threshold;
   }
 
+  // Ensure a compacted/resumed history starts with a user message — Anthropic
+  // rejects conversations whose first row is assistant/tool. Called after
+  // compaction and at the start of each user turn (covers restored sessions).
+  _normalizeHistory() {
+    if (!this.messages.length || this.messages[0].role === 'user') return;
+    let start = 0;
+    while (start < this.messages.length && this.messages[start].role !== 'user') start++;
+    if (start >= this.messages.length) return; // no user row — leave alone
+    this.messages = this.messages.slice(start);
+  }
+
   // Real compaction: summarize the older messages with the model and keep the
   // most recent COMPACT_KEEP_MESSAGES verbatim. Falls back to truncation when
-  // no provider/key is available or the summary call fails.
+  // no provider/key is available or the summary call fails. The summary is
+  // stored as a USER-role row (not system): openai-compat drops history rows
+  // with role 'system', which silently discarded the summary on every
+  // non-Anthropic provider.
   async compact(callbacks = {}) {
     if (this.messages.length <= COMPACT_KEEP_MESSAGES + 2) {
       return { compacted: false, reason: 'conversation too short', removed: 0, method: 'none' };
@@ -536,9 +598,10 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
 
     if (summary) {
       this.messages = [
-        { role: 'system', content: '[Compacted — earlier conversation summarized. Ask for details if you need specifics.]\n\n' + summary.slice(0, 8000) },
+        { role: 'user', content: '[Compacted — earlier conversation summarized. Ask for details if you need specifics.]\n\n' + summary.slice(0, 8000) },
         ...keep,
       ];
+      this._normalizeHistory();
       this.compactCount = (this.compactCount || 0) + 1;
       this.lastCompact = { at: Date.now(), method: 'summary', removed: head.length };
       if (callbacks.onCompact) callbacks.onCompact({ method: 'summary', removed: head.length, summary });
@@ -547,9 +610,10 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
 
     // Fallback: drop the oldest messages, keep the recent tail verbatim.
     this.messages = [
-      { role: 'system', content: `[Compacted — ${head.length} earlier messages truncated. Ask for details if you need specifics.]` },
+      { role: 'user', content: `[Compacted — ${head.length} earlier messages truncated. Ask for details if you need specifics.]` },
       ...keep,
     ];
+    this._normalizeHistory();
     this.compactCount = (this.compactCount || 0) + 1;
     this.lastCompact = { at: Date.now(), method: 'truncate', removed: head.length };
     if (callbacks.onCompact) callbacks.onCompact({ method: 'truncate', removed: head.length, summary: null });
@@ -621,9 +685,24 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
     let todowroteThisTurn = false;
     // Transient provider-error retry state.
     let providerRetries = 0;
+    // Reactive compaction already fired this turn (context-overflow 400).
+    let compactedThisTurn = false;
+    // Mid-turn compaction already fired this turn.
+    let compactedMidTurn = false;
     while (true) {
       if (this.interrupted) {
         return finishInterrupted();
+      }
+
+      // Mid-turn compaction: a long tool loop can fill the window well past
+      // the threshold — compact before the next model call instead of dying
+      // with a context-overflow error.
+      if (ranTools && !compactedMidTurn && !this.interrupted && this.shouldCompact()) {
+        compactedMidTurn = true;
+        try {
+          const res = await this.compact(callbacks);
+          if (res.compacted && callbacks.onAutoCompact) callbacks.onAutoCompact(res);
+        } catch {}
       }
 
       let resp;
@@ -632,9 +711,28 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
       speed._liveTokens = 0;
       try {
         resp = await this.getResponse(cb);
+        // Success: reset the transient-retry budget so one slow tool step
+        // doesn't consume a retry reserved for real failures.
+        providerRetries = 0;
       } catch (err) {
         if (isAbortError(err)) {
           return finishInterrupted();
+        }
+        // Rate limit / overload: WAIT and retry (honor Retry-After when the
+        // provider sent one). Model switching on a 429 wastes the wait — the
+        // same limit usually applies across the account.
+        if (isRateLimitError(err)) {
+          if (providerRetries < PROVIDER_RETRIES) {
+            providerRetries++;
+            const waitMs = Math.min(
+              (err && err.retryAfterMs) || 1000 * Math.pow(2, providerRetries - 1),
+              30000
+            );
+            await new Promise((resolve) => setTimeout(resolve, waitMs));
+            if (this.interrupted) return finishInterrupted();
+            continue;
+          }
+          // Waited enough — fall through to a model switch as a last resort.
         }
         // Model ran out of tokens → auto-switch to another model and retry once.
         if (isQuotaError(err)) {
@@ -646,6 +744,19 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
             }
             continue;
           }
+        }
+        // Context overflow (prompt too long): compact and retry once per
+        // turn. This is the recovery path when the auto-compact threshold
+        // was missed (huge tool results, MCP schema growth mid-session).
+        if (isContextOverflowError(err) && !compactedThisTurn && this.messages.length > 10) {
+          compactedThisTurn = true;
+          try {
+            const res = await this.compact(callbacks);
+            if (res.compacted) {
+              if (callbacks.onAutoCompact) callbacks.onAutoCompact(res);
+              continue;
+            }
+          } catch {}
         }
         // Transient provider failure (network blip, 5xx, stream reset): retry
         // the model call a couple of times instead of killing the turn
@@ -818,10 +929,14 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
         // are checked separately where they apply.
         const permKey = { read:'read', edit:'edit', write:'edit', glob:'glob', grep:'grep', bash:'bash',
                           sandbox:'bash', task:'task', skill:'skill', lsp:'lsp', question:'question', ask:'question', webfetch:'webfetch',
-                          websearch:'websearch', browser:'browser' }[tc.name];
+                          websearch:'websearch', browser:'browser', todoread:'read' }[tc.name]
+                          || (tc.name.indexOf('mcp__') === 0 ? 'mcp' : undefined);
         const isMcpAdd = tc.name === 'mcp' && tc.input && tc.input.action === 'add';
         if (permKey || isMcpAdd) {
-          const arg = this.permissions.permissionArg(tc.name, tc.input || {});
+          // MCP tool calls are gated by the 'mcp' permission key with the
+          // FULL tool name as the pattern arg (mcp__github__search), so the
+          // user can allow exactly one server/tool.
+          const arg = permKey === 'mcp' ? tc.name : this.permissions.permissionArg(tc.name, tc.input || {});
           let action = this.permissions.resolve(tc.name, arg);
           // mcp add spawns arbitrary stdio servers with optional env secrets —
           // always ask unless the user saved a rule for the exact command.
@@ -883,14 +998,21 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
             try { if (callbacks.onToolOutput) callbacks.onToolOutput(tc, chunk, kind); } catch {}
           },
         });
-        // postToolUse hook (informational — never blocks).
-        try { await hooks.runHook('postToolUse', { tool: tc.name, input: tc.input }); } catch {}
+        // postToolUse hook (informational — never blocks). tool_response lets
+        // audit hooks see what the tool actually returned (truncated to keep
+        // the hook's stdin small).
+        try {
+          const respText = outcome.error ? `Error: ${outcome.error}` : String(outcome.result ?? '');
+          await hooks.runHook('postToolUse', { tool: tc.name, input: tc.input, tool_response: respText.slice(0, 4000) });
+        } catch {}
         return { tc, outcome };
       }));
 
       for (const { tc, outcome } of outcomes) {
         const text = outcome.error ? `Error: ${outcome.error}` : String(outcome.result ?? '');
-        this.addMessage({ role: 'tool', toolCallId: tc.id, content: text });
+        // isError marks failed tool calls so Anthropic tool_results carry
+        // is_error:true (the model treats the text as an error report).
+        this.addMessage({ role: 'tool', toolCallId: tc.id, content: text, isError: !!outcome.error });
         // Persist real todo state when the model uses the todowrite tool.
         if (tc.name === 'todowrite' && !outcome.error) {
           todowroteThisTurn = true;
@@ -908,6 +1030,9 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
     const tools = await getAllToolDefinitions(this.mode);
     // Agent-scoped turns (delegation) see only their agent's tool list.
     const toolDefs = this.agent ? filterToolDefs(this.agent, tools) : tools;
+    // Track schema size for estimateTokens — many MCP tools can add tens of
+    // thousands of tokens that a messages-only estimate ignores.
+    this._toolSchemaChars = toolDefs && toolDefs.length ? JSON.stringify(toolDefs).length : 0;
 
     // Budget router: when a level is active (free/cheap/best), pick the model
     // for THIS call without rewriting the user's saved provider/model. "Free"
@@ -1070,4 +1195,4 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
   }
 }
 
-module.exports = { Session, MEMORY_TEMPLATE, isQuotaError, isAbortError };
+module.exports = { Session, MEMORY_TEMPLATE, isQuotaError, isAbortError, isRateLimitError, isContextOverflowError };

@@ -32,7 +32,7 @@ test("registry: built-in primaries and subagents with tool filters", () => {
   expect(all.scout.mode).toBe("subagent");
   // subagent defaults: everything except delegation (no recursion)
   expect(all.general.tools).toContain("!task");
-  expect(all.explore.tools).toEqual(["read", "glob", "grep", "webfetch", "websearch", "todowrite"]);
+  expect(all.explore.tools).toEqual(["read", "glob", "grep", "webfetch", "websearch", "todowrite", "todoread"]);
 });
 
 test("tool patterns: last-match-wins with wildcards and denies", () => {
@@ -66,7 +66,7 @@ test("filterToolDefs: schema list is filtered per agent", async () => {
   const explore = agents.resolveAgent("explore");
   const filtered = agents.filterToolDefs(explore, all);
   const names = filtered.map((d) => d.name).sort();
-  expect(names).toEqual(["glob", "grep", "read", "todowrite", "webfetch", "websearch"]);
+  expect(names).toEqual(["glob", "grep", "read", "todoread", "todowrite", "webfetch", "websearch"]);
   const general = agents.resolveAgent("general");
   const gNames = agents.filterToolDefs(general, all).map((d) => d.name);
   expect(gNames).toContain("bash");

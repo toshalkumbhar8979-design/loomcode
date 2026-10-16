@@ -21,11 +21,11 @@ An AI-powered coding agent for the terminal with multi-provider support and a fu
 - Full OpenTUI interface with slash commands, autocomplete, and ESC-to-interrupt
 - Build / Plan / Chat modes 
 - OpenCode-style agents — primary agents (`build`/`plan`/`chat`) plus delegating subagents (`explore`, `scout`, `general`) invoked automatically via the `task` tool or manually via `@agent` mentions
-- LOOM.md project memory file 
-- Multi-provider: Anthropic, OpenAI, NVIDIA, Google Gemini, OpenRouter, Local (Ollama)
-- Built-in tools: read, write, edit, bash, grep, glob, webfetch, todowrite
+- LOOM.md / AGENTS.md project memory (cwd + parent directories) 
+- Multi-provider: Anthropic, OpenAI, NVIDIA, Google Gemini, OpenRouter, Local (Ollama) — with automatic retries (Retry-After aware), rate-limit waits, quota-driven model switching, and compact-and-retry on context overflow
+- Built-in tools: read, write, edit (multi-edit), bash (timeouts + interrupt), grep, glob, webfetch, todowrite, todoread, tasks — results capped at 100k chars
 - Agentic tool loop (multiple tool calls per turn)
-- MCP (Model Context Protocol) server integration
+- MCP (Model Context Protocol) server integration — MCP tools are permission-gated (`mcp` rule, default ask)
 - Drag-to-copy selections, paste support
 - Session memory, /undo, /redo, /compact, /reset, /fork
 - One-shot print mode: `loom -p "query"`
@@ -33,6 +33,7 @@ An AI-powered coding agent for the terminal with multi-provider support and a fu
 - OpenCode-style agent harness: main orchestrator agent delegates to specialist subagents (`research`, `coder`, `reviewer`, `tester`, `web`, `explore`, `scout`) via the `task` tool, and a drive-to-completion loop keeps working while todos are still open
 - Headless browser tool (`browser`) — navigate, click, fill, read the DOM, and screenshot real pages from the `web` agent
 - Usage & billing tracking per session + lifetime
+- Hooks: `userPromptSubmit` (block or inject context before a prompt runs) and `subagentStop` in `.loom/hooks.json`
 
 ## Prerequisites
 
@@ -128,7 +129,7 @@ Zed (add to `~/.config/zed/settings.json`, then Command Palette → `agent: new 
 Full transport spec, JetBrains/Neovim configs, the protocol walkthrough, and a
 self-test client (`node scripts/acp-smoke.js`) live in **[docs/acp.md](docs/acp.md)**.
 
-## Slash Commands (36 total)
+## Slash Commands (37 total)
 
 | Command | Args | Description |
 |---------|------|-------------|
@@ -157,7 +158,8 @@ self-test client (`node scripts/acp-smoke.js`) live in **[docs/acp.md](docs/acp.
 | `/connectors` | `add\|remove\|toggle` | Manage connectors — presets (supabase, railway, vercel, …) or one-liners; also `loom add connector` |
 | `/permissions` | `reset\|auto` | Permission rules |
 | `/subagents` | — | Subagent runs |
-| `/context` | — | Context window usage |
+| `/context` | — | Context window usage (live estimate) |
+| `/compact` | — | Summarize older messages to free context |
 | `/think` | `off\|low\|medium\|high` | Thinking budget |
 | `/approve` | — | Approve plan → Build |
 | `/tasks` | — | Background tasks |

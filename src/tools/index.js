@@ -89,7 +89,7 @@ const MODES = ['build', 'plan', 'chat'];
 // Tools that never mutate the filesystem/state — safe to expose in plan mode.
 // task delegates to a read-only-or-not subagent, so from the CALLER's side it
 // is safe in plan mode (the subagent's own tool list gates what it may do).
-const READ_ONLY_TOOLS = ['read', 'glob', 'grep', 'webfetch', 'websearch', 'todowrite', 'task'];
+const READ_ONLY_TOOLS = ['read', 'glob', 'grep', 'webfetch', 'websearch', 'todowrite', 'todoread', 'task'];
 
 // Optional path sandbox: when config.sandbox.paths is set, filesystem tools
 // only operate inside those roots (defense in depth on top of permissions).
@@ -126,7 +126,30 @@ const TOOLS = {
       const filePath = path.resolve(params.filePath);
       if (!pathAllowed(filePath)) return { error: sandboxDenied('read', filePath) };
       if (!fsSync.existsSync(filePath)) return { error: `File not found: ${filePath}` };
-      const content = await fs.readFile(filePath, 'utf8');
+      // Binary detection: a NUL byte in the first 8 KB means this isn't text —
+      // reading it as utf8 produces garbage that poisons the context.
+      const stat = fsSync.statSync(filePath);
+      if (stat.size > 0) {
+        const fd = fsSync.openSync(filePath, 'r');
+        try {
+          const head = Buffer.alloc(Math.min(8192, stat.size));
+          fsSync.readSync(fd, head, 0, head.length, 0);
+          if (head.includes(0)) {
+            return `[binary file: ${filePath} — ${stat.size} bytes, content omitted]`;
+          }
+        } catch {
+          // Unreadable head (device/fifo?) — fall through and try normally.
+        } finally {
+          fsSync.closeSync(fd);
+        }
+      }
+      // Size cap: huge files are read up to 2000 lines (or the requested
+      // window) instead of slurping megabytes into the context.
+      const MAX_FILE_BYTES = 512 * 1024;
+      const content = stat.size > MAX_FILE_BYTES && !params.offset && !params.limit
+        ? (await fs.readFile(filePath, 'utf8')).split('\n').slice(0, 2000).join('\n') +
+          `\n[file truncated at 2000 lines (${stat.size} bytes total) — pass offset/limit to read more]`
+        : await fs.readFile(filePath, 'utf8');
       const lines = content.split('\n');
       const start = (params.offset || 1) - 1;
       const end = params.limit ? start + params.limit : lines.length;
@@ -154,11 +177,12 @@ const TOOLS = {
   },
   edit: {
     name: 'edit',
-    description: 'Performs exact string replacements in files.',
+    description: 'Performs exact string replacements in files. Pass either oldString/newString for one replacement, or an edits array of {oldString, newString, replaceAll?} entries applied in order (multi-edit — prefer this over several edit calls on the same file).',
     parameters: {
       filePath: { type: 'string', required: true, description: 'Absolute path to the file' },
-      oldString: { type: 'string', required: true, description: 'Text to replace' },
-      newString: { type: 'string', required: true, description: 'Replacement text' },
+      oldString: { type: 'string', required: false, description: 'Text to replace (single edit)' },
+      newString: { type: 'string', required: false, description: 'Replacement text (single edit)' },
+      edits: { type: 'array', required: false, description: 'Multiple edits applied in order: [{oldString, newString, replaceAll?}, ...]' },
       replaceAll: { type: 'boolean', required: false, description: 'Replace all occurrences' },
       dryRun: { type: 'boolean', required: false, description: 'Preview the edit without writing' },
     },
@@ -167,21 +191,47 @@ const TOOLS = {
       if (!pathAllowed(filePath)) return { error: sandboxDenied('edit', filePath) };
       if (!fsSync.existsSync(filePath)) return { error: `File not found: ${filePath}` };
       let content = await fs.readFile(filePath, 'utf8');
-      const count = content.split(params.oldString).length - 1;
-      if (count === 0) return { error: 'oldString not found in content' };
-      if (params.replaceAll) {
-        content = content.split(params.oldString).join(params.newString);
-      } else {
-        content = content.replace(params.oldString, params.newString.replace(/\$/g, '$$$$'));
+      // Multi-edit path: apply each {oldString, newString} in order against
+      // the in-memory copy, then write once. Sequential application means a
+      // later edit can target text an earlier edit inserted. Entries enforce
+      // uniqueness (a multi-edit that silently hits 2+ matches is how files
+      // get corrupted); the classic single oldString path keeps its
+      // replace-first-occurrence semantics for back-compat.
+      const multi = Array.isArray(params.edits) && params.edits.length > 0;
+      const edits = multi
+        ? params.edits
+        : (params.oldString != null || params.newString != null
+          ? [{ oldString: params.oldString, newString: params.newString, replaceAll: params.replaceAll }]
+          : []);
+      if (!edits.length) return { error: 'edit needs oldString/newString or an edits array' };
+      const applied = [];
+      for (let i = 0; i < edits.length; i++) {
+        const e = edits[i] || {};
+        const oldStr = e.oldString;
+        const newStr = e.newString;
+        if (typeof oldStr !== 'string' || typeof newStr !== 'string') {
+          return { error: `edits[${i}]: oldString and newString must be strings` };
+        }
+        const count = content.split(oldStr).length - 1;
+        if (count === 0) return { error: multi ? `edits[${i}]: oldString not found in content` : 'oldString not found in content' };
+        if (e.replaceAll) {
+          content = content.split(oldStr).join(newStr);
+          applied.push(`replaced ${count} occurrences`);
+        } else {
+          if (multi && count > 1) {
+            return { error: `edits[${i}]: found ${count} matches for oldString — provide more context to make it unique` };
+          }
+          content = content.replace(oldStr, newStr.replace(/\$/g, '$$$$'));
+          applied.push('replaced 1 occurrence');
+        }
       }
       if (params.dryRun) {
-        const changed = params.replaceAll ? `replaced ${count} occurrences` : 'replaced 1 occurrence';
-        return `Dry run — would edit ${filePath}: ${changed} (file not modified).\n${content.slice(0, 4000)}`;
+        return `Dry run — would edit ${filePath}: ${applied.join('; ')} (file not modified).\n${content.slice(0, 4000)}`;
       }
       await fs.writeFile(filePath, content, 'utf8');
       let extra = '';
       try { extra = await require('../core/format').formatAfterWrite(filePath); } catch {}
-      return `Edited ${filePath}: ${params.replaceAll ? `replaced ${count} occurrences` : 'replaced 1 occurrence'}${extra}`;
+      return `Edited ${filePath}: ${applied.join('; ')}${extra}`;
     }
   },
   bash: {
@@ -190,7 +240,8 @@ const TOOLS = {
     parameters: {
       command: { type: 'string', required: true, description: 'The command to execute' },
       workdir: { type: 'string', required: false, description: 'Working directory' },
-      background: { type: 'boolean', required: false, description: 'Run without waiting (dev servers, long builds). Returns a task id immediately; check with the /tasks panel.' },
+      timeoutMs: { type: 'number', required: false, description: 'Kill the command after this many ms (default 60000, max 600000)' },
+      background: { type: 'boolean', required: false, description: 'Run without waiting (dev servers, long builds). Returns a task id immediately; check with the /tasks panel or the tasks tool.' },
       sandbox: { type: 'boolean', required: false, description: 'Run this command inside the Docker sandbox container (docker exec) instead of on the host. Use when the user asked for the sandbox or isolation is needed; defaults to the host.' },
     },
     async execute(params, ctx) {
@@ -204,7 +255,7 @@ const TOOLS = {
         const stream = ctx && typeof ctx.stream === 'function' ? ctx.stream : null;
         const res = await sandbox.runInSandbox(params.command, {
           workdir: params.workdir || cwd,
-          timeoutMs: 120000,
+          timeoutMs: typeof params.timeoutMs === 'number' && params.timeoutMs > 0 ? Math.min(params.timeoutMs, 600000) : 120000,
           onChunk: stream ? (text, which) => stream(text, which) : undefined,
         });
         if ('error' in res) return { error: res.error };
@@ -237,13 +288,29 @@ const TOOLS = {
           const child = isWin
             ? spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', '[Console]::OutputEncoding=[Text.Encoding]::UTF8;' + params.command], opts)
             : spawn('/bin/sh', ['-c', params.command], opts);
-          const killTimer = setTimeout(() => {
+          // Kill after timeoutMs (default 60s, cap 600s) so a hung command
+          // can never wedge the turn forever.
+          const timeoutMs = Math.min(Math.max(Number(params.timeoutMs) || 60000, 1000), 600000);
+          let timedOut = false;
+          let aborted = false;
+          const killChild = () => {
             if (isWin) {
               try { execSync('taskkill /PID ' + child.pid + ' /T /F', { stdio: 'ignore', windowsHide: true }); } catch {}
             }
             child.kill('SIGKILL');
-          }, 60000);
+          };
+          const killTimer = setTimeout(() => { timedOut = true; killChild(); }, timeoutMs);
           child.on('close', () => clearTimeout(killTimer));
+          // ESC/interrupt: the session's abort signal kills the running
+          // command so the user isn't left waiting on a zombie process.
+          const sig = ctx && ctx.signal;
+          if (sig) {
+            if (sig.aborted) { aborted = true; clearTimeout(killTimer); killChild(); }
+            else {
+              const onAbort = () => { aborted = true; clearTimeout(killTimer); killChild(); };
+              try { sig.addEventListener('abort', onAbort, { once: true }); child.on('close', () => { try { sig.removeEventListener('abort', onAbort); } catch {} }); } catch {}
+            }
+          }
           let stdout = '';
           let stderr = '';
           let truncated = false;
@@ -273,7 +340,9 @@ const TOOLS = {
             let result = '';
             if (stdout) result += stdout;
             if (stderr) result += `\n[stderr]\n${stderr}`;
-            if (code !== 0) result += `\n[exit code: ${code}]`;
+            if (timedOut) result += `\n[timed out after ${Math.round(timeoutMs / 1000)}s — killed]`;
+            else if (aborted) result += '\n[aborted by user]';
+            else if (code !== 0) result += `\n[exit code: ${code}]`;
             if (truncated) result += '\n[output truncated at 10 MB]';
             resolve(result || 'command completed');
           });
@@ -364,7 +433,7 @@ const TOOLS = {
     parameters: {
       url: { type: 'string', required: true, description: 'URL to fetch' },
     },
-    async execute(params) {
+    async execute(params, ctx) {
       let u;
       try {
         u = new URL(String(params.url || ''));
@@ -378,7 +447,10 @@ const TOOLS = {
         // Follow redirects manually so every hop passes the SSRF guard — a
         // public URL may legitimately bounce into an internal address.
         let current = u;
-        const signal = AbortSignal.timeout(15000);
+        // ESC/interrupt kills the in-flight fetch (ctx.signal) alongside the
+        // 15s timeout so the turn never hangs on a stalled connection.
+        const timeoutSignal = AbortSignal.timeout(15000);
+        const signal = (ctx && ctx.signal) ? AbortSignal.any([ctx.signal, timeoutSignal]) : timeoutSignal;
         for (let hop = 0; hop < 5; hop++) {
           if (!(await urlIsPublic(current))) {
             return { error: `Blocked by webfetch policy: ${current.hostname} resolves to a private/reserved address (SSRF guard)` };
@@ -468,6 +540,59 @@ const TOOLS = {
       lines.push('');
       lines.push(`Summary: ${statuses.completed} done, ${statuses.in_progress} in-progress, ${statuses.pending} pending, ${statuses.cancelled} cancelled`);
       return lines.join('\n');
+    }
+  },
+  todoread: {
+    name: 'todoread',
+    description: 'Read the current session todo list (the same list todowrite maintains). Use to check task progress without overwriting it.',
+    parameters: {},
+    async execute(params, ctx) {
+      const todos = (ctx && ctx.parentSession && ctx.parentSession.todos) || [];
+      if (!todos.length) return '(no todos yet)';
+      const statuses = { pending: 0, in_progress: 0, completed: 0, cancelled: 0 };
+      const lines = ['## Todo List', ''];
+      for (const t of todos) {
+        const status = t.status || 'pending';
+        statuses[status] = (statuses[status] || 0) + 1;
+        const icon = status === 'completed' ? '[x]' : status === 'in_progress' ? '[>]' : status === 'cancelled' ? '[-]' : '[ ]';
+        const priority = t.priority ? ` [${t.priority}]` : '';
+        lines.push(`${icon}${priority} ${t.content || '(unnamed)'}`);
+      }
+      lines.push('');
+      lines.push(`Summary: ${statuses.completed} done, ${statuses.in_progress} in-progress, ${statuses.pending} pending, ${statuses.cancelled} cancelled`);
+      return lines.join('\n');
+    }
+  },
+  tasks: {
+    name: 'tasks',
+    description: 'Inspect and manage background tasks started with bash background:true. Actions: list (all tasks with status), output (recent output of one task by id), kill (stop a running task). Use when a background command may have finished, or the user asks about dev servers/builds running in the background.',
+    parameters: {
+      action: { type: 'string', required: true, description: '"list" | "output" | "kill"' },
+      id: { type: 'string', required: false, description: 'Task id (for output/kill), e.g. bt-1-abc' },
+      tailLines: { type: 'number', required: false, description: 'How many trailing lines of output to return (default 80)' },
+    },
+    async execute(params) {
+      const bt = require('../core/background-tasks');
+      const action = String(params.action || 'list').toLowerCase();
+      if (action === 'list') {
+        const rows = bt.listBackgroundTasks();
+        if (!rows.length) return 'No background tasks. Start one with bash {background: true}.';
+        return rows.map((t) => `${t.id}  [${t.status}]${t.exitCode != null ? ' exit ' + t.exitCode : ''}  ${String(t.command).slice(0, 120)}`).join('\n');
+      }
+      if (action === 'output') {
+        const t = bt.getBackgroundTask(String(params.id || ''));
+        if (!t) return { error: 'Unknown task id. Use action="list" to see ids.' };
+        const lines = String(t.output || '').split('\n');
+        const n = Math.min(Math.max(Number(params.tailLines) || 80, 1), 500);
+        const tail = lines.slice(-n).join('\n');
+        return `[${t.id} — ${t.status}${t.exitCode != null ? ', exit ' + t.exitCode : ''}]\n` + (tail || '(no output yet)');
+      }
+      if (action === 'kill') {
+        const ok = bt.killBackgroundTask(String(params.id || ''));
+        if (!ok) return { error: 'Task not found or not running: ' + (params.id || '(none)') };
+        return 'Killed ' + params.id + '.';
+      }
+      return { error: 'Unknown action "' + action + '". Use list, output, or kill.' };
     }
   },
   ask: {
@@ -623,6 +748,22 @@ function getToolDefinitions(mode = 'build') {
   });
 }
 
+// Session-level tool-result cap: a tool that returns megabytes (huge bash
+// output, MCP payloads, giant file reads) poisons the context window and can
+// even break the provider request. Cap at 100k chars, head+tail so both the
+// start AND the error tail survive.
+const TOOL_RESULT_CAP = 100 * 1000;
+
+function truncateToolText(text) {
+  const s = String(text);
+  if (s.length <= TOOL_RESULT_CAP) return s;
+  const head = Math.floor(TOOL_RESULT_CAP * 0.6);
+  const tail = TOOL_RESULT_CAP - head - 100;
+  return s.slice(0, head) +
+    `\n\n[…truncated ${s.length - head - tail} chars — full output was ${s.length} chars; re-run with narrower scope]\n\n` +
+    s.slice(-tail);
+}
+
 /** Execute one tool. `ctx` is passed through to tool executors that need
  *  session context (parent session, abort signal, subagent progress relay).
  *  @param {string} [toolName]
@@ -648,19 +789,22 @@ async function executeTool(toolName, params, mode = 'build', ctx = null) {
       if (idx < 0) return { error: 'Malformed MCP tool name: ' + toolName };
       const server = toolName.slice(5, idx);
       const tool = toolName.slice(idx + 2);
-      return await mcp.callTool(server, tool, params || {});
+      const res = await mcp.callTool(server, tool, params || {});
+      if (res && typeof res === 'object' && res.error) return { error: truncateToolText(res.error) };
+      if (res && typeof res === 'object' && typeof res.result === 'string') return { result: truncateToolText(res.result) };
+      return res;
     } catch (e) {
-      return { error: 'MCP error: ' + e.message };
+      return { error: truncateToolText('MCP error: ' + e.message) };
     }
   }
   const tool = TOOLS[toolName];
   if (!tool) return { error: `Unknown tool: ${toolName}` };
   try {
     const result = await tool.execute(params, ctx);
-    if (result && typeof result === 'object' && result.error) return { error: result.error };
-    return { result };
+    if (result && typeof result === 'object' && result.error) return { error: truncateToolText(result.error) };
+    return { result: typeof result === 'string' ? truncateToolText(result) : result };
   } catch (e) {
-    return { error: e.message };
+    return { error: truncateToolText(e.message) };
   }
 }
 
@@ -696,4 +840,4 @@ async function getAllToolDefinitions(mode = 'build') {
   }
 }
 
-module.exports = { TOOLS, MODES, READ_ONLY_TOOLS, getToolDefinitions, getAllToolDefinitions, executeTool, isPrivateAddress };
+module.exports = { TOOLS, MODES, READ_ONLY_TOOLS, getToolDefinitions, getAllToolDefinitions, executeTool, isPrivateAddress, truncateToolText };

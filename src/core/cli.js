@@ -304,8 +304,14 @@ class LoomCLI {
   }
 
   async cmdCompact() {
-    this.session.messages = this.session.messages.slice(-10);
-    console.log('Conversation compacted - keeping last 10 messages.');
+    // Real compaction: summarize the older messages with the model (falls
+    // back to head-truncation when no provider/key is available).
+    const res = await this.session.compact();
+    if (res.compacted) {
+      console.log(`Compacted (${res.method}): removed ${res.removed} messages, ~${res.tokensAfter} tokens remain.`);
+    } else {
+      console.log('Nothing to compact — the conversation is still short.');
+    }
   }
 
   cmdUndo() {

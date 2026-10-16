@@ -539,6 +539,7 @@ export const SLASH_LIST: SlashCmd[] = [
   { cmd: "style", desc: "Output style preset" },
   { cmd: "vim", desc: "Toggle vim editing" },
   { cmd: "remember", desc: "Save a fact to LOOM.md", args: "<fact>" },
+  { cmd: "compact", desc: "Summarize older messages to free context" },
 ];
 
 // ─── TUI prefs ───

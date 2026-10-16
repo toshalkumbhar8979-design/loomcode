@@ -325,3 +325,57 @@ test("stream: provider errors surface wrapped messages", async () => {
   const p = openaiCompat.createOpenAICompatProvider({ getKey: () => "k", providerId: "openai", envKeyHint: "OPENAI", clientFactory: () => client });
   await expect(p.stream([{ role: "user", content: "hi" }], { model: "gpt-5" })).rejects.toThrow("401");
 });
+
+// ─── v1.5.0 harness-parity additions ───
+
+test("anthropic buildBody: isError tool rows carry is_error; orphans still skipped", () => {
+  const body = anthropic.buildBody([
+    { role: "user", content: "go" },
+    { role: "assistant", content: "", toolCalls: [{ id: "t1", name: "bash", input: { command: "ls" } }] },
+    { role: "tool", toolCallId: "t1", content: "Error: boom", isError: true },
+    { role: "tool", content: "lost result" }, // no tool_use_id — skipped
+  ], { model: "claude-sonnet-4-20250514" });
+  const toolResults = [];
+  for (const m of body.messages) {
+    if (Array.isArray(m.content)) {
+      for (const b of m.content) if (b.type === "tool_result") toolResults.push(b);
+    }
+  }
+  expect(toolResults).toHaveLength(1);
+  expect(toolResults[0].tool_use_id).toBe("t1");
+  expect(toolResults[0].is_error).toBe(true);
+  // Successful tool rows carry no is_error flag.
+  const body2 = anthropic.buildBody([
+    { role: "tool", toolCallId: "t2", content: "ok" },
+  ], { model: "claude-sonnet-4-20250514" });
+  const tr2 = body2.messages[0].content[0];
+  expect(tr2.is_error).toBeUndefined();
+});
+
+test("openai-compat formatMessages: user-role compaction summaries survive", () => {
+  // openai-compat DROPS history rows with role 'system' — the session stores
+  // compaction summaries as user rows precisely so they reach the model.
+  const msgs = openaiCompat.formatMessages([
+    { role: "system", content: "old-style summary (dropped)" },
+    { role: "user", content: "[Conversation so far, summarized.]\n- did things" },
+    { role: "assistant", content: "ok" },
+  ], { system: "the real system prompt" });
+  const roles = msgs.map((m) => m.role);
+  expect(roles).toEqual(["system", "user", "assistant"]);
+  expect(msgs[0].content).toBe("the real system prompt");
+  expect(msgs[1].content).toContain("summarized");
+});
+
+test("wrapErr: attaches status and Retry-After-derived retryAfterMs", () => {
+  const err = Object.assign(new Error("slow down"), {
+    status: 429,
+    headers: { get: (h) => (h === "retry-after" ? "2" : null) },
+  });
+  const wrapped = openaiCompat.wrapErr(err, "gpt-5", "OPENAI", "http://x");
+  expect(wrapped.status).toBe(429);
+  expect(wrapped.retryAfterMs).toBe(2000);
+  // No headers -> status only.
+  const plain = openaiCompat.wrapErr(Object.assign(new Error("x"), { status: 500 }), "m", "OPENAI", "http://x");
+  expect(plain.status).toBe(500);
+  expect(plain.retryAfterMs).toBeUndefined();
+});

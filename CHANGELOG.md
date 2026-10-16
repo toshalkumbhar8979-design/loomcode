@@ -24,6 +24,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `npm audit fix`) — fixes the DoS/recursion advisories.
 
 ### Added
+- **Provider resilience — retries with backoff and honest error classes
+  (`src/providers/anthropic.js`, `openai-compat.js`).** Anthropic requests
+  retry 429/529/5xx up to 4 tries with jitter, honoring `Retry-After`;
+  openai-compat retries 429/502/503/529 exponentially (first retry is
+  immediate unless `Retry-After` says otherwise). Provider errors now carry
+  `.status`/`.retryAfterMs` so the session loop can act on them: rate limits
+  **wait and retry** (honoring `Retry-After`, capped 30s) before falling back
+  to model switching, `isQuotaError` (402/insufficient balance) still
+  auto-switches models, and `isContextOverflowError` **compacts and retries
+  once per turn**. Mid-stream SSE `error` events and fully-truncated streams
+  now throw instead of silently yielding an empty answer; Anthropic
+  `stop_reason` maps through to `finish_reason` (`max_tokens`→`length`,
+  `tool_use`→`tool_calls`) and tool results carry `is_error` on both the wire
+  and the history row (`isError`).
+- **Session-loop resilience + context hygiene (`src/core/session.js`).**
+  `_normalizeHistory()` slices every provider call from the first user row
+  (no more leading orphan assistant/tool rows), compaction summaries are
+  stored as **user-role rows** — openai-compat drops `role:'system'` history
+  rows, so the summary used to silently vanish before the model ever saw it —
+  `estimateTokens()` counts the system prompt and tool schemas,
+  `contextEstimate()` backs a live `/context` window, and auto-compaction
+  triggers at the context threshold mid-turn (once per turn). Failed tool
+  outcomes are marked `isError` in history.
+- **Two new tools — `todoread` and `tasks`** — read the current todo list,
+  and list/output/kill background tasks (`bg:*` handles, auto-gone after
+  10min finished). Tool results are capped at **100k chars** (head + tail
+  with a `[…truncated N chars…]` marker) across text, errors, and MCP
+  payloads; `read` detects binaries and caps at 512KB / 2000 lines; `bash`
+  takes `timeoutMs` (default 60s) and is killed by Ctrl-C; `webfetch`
+  aborts with the session; `edit` gains a multi-edit `edits` array (each
+  entry enforces a unique match — the single `oldString` path keeps its
+  replace-first behavior).
+- **MCP tools are permission-gated** — new `mcp` permission key (default
+  `ask`); patterns match the full tool name (`mcp__github__*`, exact names,
+  denies), and `todoread` maps to the `read` rule.
+- **Project steering reads `AGENTS.md` (`src/core/memory.js`)** — global
+  LOOM.md plus cwd `LOOM.md`/`.loom/LOOM.md`/`AGENTS.md` and up to 3 parent
+  directories (per-file 12k, project-section 24k caps), with `CLAUDE.md` as
+  a fallback when no LOOM/AGENTS file exists.
+- **Hooks: `userPromptSubmit` and `subagentStop` (`src/core/hooks.js`).**
+  `userPromptSubmit` runs before a prompt hits the model and can block the
+  prompt (`decision:"block"` or a non-zero exit with stderr) or inject
+  `<user-prompt-submit-hook>` context; `subagentStop` fires after a
+  subagent finishes; `postToolUse` now receives `tool_response` (capped 4k).
+- **TUI/CLI:** a `/compact` slash command (also Ctrl+X c), `/context` shows
+  a live context-window estimate (tokens / window / %), background-task
+  completions surface as toasts, and per-turn autosave keeps saved sessions
+  current. `loom`'s `/compact` now uses the real `session.compact()`.
 - **Easier connector installs — `loom add connector` + a visible "+ Add
   connector…" row (`src/mcp/connector-presets.js`, `connectorAddLineCmd`).**
   The connector preset catalog moved from the TUI into the core layer so the

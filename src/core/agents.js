@@ -335,6 +335,19 @@ async function runSubagent(opts) {
   const durationMs = Date.now() - t0;
   const interrupted = !!resp.interrupted;
 
+  // subagentStop hook — fires when a subagent turn ends (success, error,
+  // interrupt). Fire-and-forget: a slow/broken hook must never wedge the
+  // parent turn.
+  try {
+    const hooks = require('./hooks');
+    Promise.resolve(hooks.runHook('subagentStop', {
+      agent: agent.id,
+      runId,
+      reason: resp.type || 'end',
+      interrupted,
+    })).catch(() => {});
+  } catch {}
+
   if (parent) {
     parent.tokensIn += child.tokensIn;
     parent.tokensOut += child.tokensOut;

@@ -34,7 +34,7 @@ const DANGER_PATTERNS = [
 // user config).
 const PERMISSION_KEYS = [
   'read', 'edit', 'glob', 'grep', 'bash', 'task', 'skill', 'lsp', 'question',
-  'webfetch', 'websearch', 'browser',
+  'webfetch', 'websearch', 'browser', 'mcp',
   'external_directory', 'doom_loop',
 ];
 
@@ -45,6 +45,11 @@ const DEFAULT_PERMISSIONS = {
   task: 'ask',
   skill: 'ask',
   question: 'ask',
+  // MCP tools can do anything their server exposes (send emails, modify
+  // cloud infra, run queries) — prompt by default. Patterns match the full
+  // tool name (mcp__<server>__<tool>), so the user can allow one server or
+  // tool precisely: {"permission": {"mcp": {"mcp__github__*": "allow"}}}.
+  mcp: 'ask',
   doom_loop: 'ask',
   external_directory: 'ask',
   read: {
@@ -83,7 +88,9 @@ const TOOL_TO_PERMISSION = {
   websearch: 'websearch',
   browser: 'browser',
   todowrite: null,   // never prompts
-  mcp: null,         // wired by the session (only the "add" action prompts)
+  todoread: 'read',  // read-only todo inspection
+  tasks: null,       // list/output/kill of the session's own background tasks
+  mcp: null,         // wired by the session (mcp__* tools + the "add" action prompt)
 };
 
 function expandHome(p, home) {
@@ -214,7 +221,11 @@ class PermissionManager {
    * 'allow' | 'ask' | 'deny'.
    */
   resolve(toolName, arg) {
-    const key = TOOL_TO_PERMISSION[toolName] !== undefined ? TOOL_TO_PERMISSION[toolName] : toolName;
+    // mcp__<server>__<tool> names resolve through the 'mcp' permission key
+    // (patterns match the full tool name).
+    const key = (toolName && toolName.indexOf('mcp__') === 0)
+      ? 'mcp'
+      : (TOOL_TO_PERMISSION[toolName] !== undefined ? TOOL_TO_PERMISSION[toolName] : toolName);
     if (!key) return 'allow';
 
     // Safety heuristics always run for dangerous shell commands — even when

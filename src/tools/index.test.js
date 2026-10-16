@@ -25,9 +25,9 @@ function tmpFile(name, content) {
   return p;
 }
 
-test("getToolDefinitions: build exposes all 14 base tools", () => {
+test("getToolDefinitions: build exposes all base tools", () => {
   const defs = tools.getToolDefinitions("build");
-  expect(defs.map((d) => d.name).sort()).toEqual(["ask", "bash", "browser", "edit", "glob", "grep", "lsp", "mcp", "read", "sandbox", "task", "todowrite", "webfetch", "websearch", "write"]);
+  expect(defs.map((d) => d.name).sort()).toEqual(["ask", "bash", "browser", "edit", "glob", "grep", "lsp", "mcp", "read", "sandbox", "task", "tasks", "todoread", "todowrite", "webfetch", "websearch", "write"]);
   for (const d of defs) {
     expect(d.description).toBeTruthy();
     expect(d.input_schema).toBeTruthy();
@@ -37,7 +37,7 @@ test("getToolDefinitions: build exposes all 14 base tools", () => {
 
 test("getToolDefinitions: plan exposes read-only tools + task, chat none", () => {
   const plan = tools.getToolDefinitions("plan");
-  expect(plan.map((d) => d.name).sort()).toEqual(["glob", "grep", "read", "task", "todowrite", "webfetch", "websearch"]);
+  expect(plan.map((d) => d.name).sort()).toEqual(["glob", "grep", "read", "task", "todoread", "todowrite", "webfetch", "websearch"]);
   expect(tools.getToolDefinitions("chat")).toEqual([]);
 });
 
@@ -240,4 +240,108 @@ test("mode gating: chat blocks everything, plan blocks writers and MCP", async (
   expect(planRead.result).toContain("1: x");
   const planMcp = await tools.executeTool("mcp__server__tool", {}, "plan");
   expect(planMcp.error).toContain("not available outside Build mode");
+});
+
+// ─── v1.5.0 harness-parity additions ───
+
+test("truncateToolText: small text passes through, huge text is head+tail capped", () => {
+  const small = "hello";
+  expect(tools.truncateToolText(small)).toBe(small);
+  const big = "A".repeat(60000) + "MIDDLE-MARKER" + "B".repeat(60000);
+  const out = tools.truncateToolText(big);
+  expect(out.length).toBeLessThan(big.length);
+  expect(out.length).toBeLessThanOrEqual(100 * 1000 + 200);
+  expect(out).toContain("A".repeat(100)); // head survives
+  expect(out).toContain("B".repeat(100)); // tail survives
+  expect(out).toContain("truncated");
+});
+
+test("executeTool: result strings above the cap are truncated at the boundary", async () => {
+  // grep over a generated file yields a long string result — easiest way to
+  // exercise the executeTool-level cap without a 100k bash run.
+  const lines = [];
+  for (let i = 0; i < 12000; i++) lines.push("hit-" + i + " alpha");
+  tmpFile("big.txt", lines.join("\n"));
+  const res = await tools.executeTool("grep", { pattern: "alpha", path: tmpDir, include: "big.txt" });
+  expect(String(res.result).length).toBeLessThanOrEqual(100 * 1000 + 200);
+  expect(String(res.result)).toContain("truncated");
+});
+
+test("edit: edits array applies sequentially; entries require unique matches", async () => {
+  const p = tmpFile("multi.txt", "one two three");
+  const r = await tools.executeTool("edit", {
+    filePath: p,
+    edits: [
+      { oldString: "one", newString: "1" },
+      { oldString: "two", newString: "2" },
+    ],
+  });
+  expect(r.result).toContain("replaced 1 occurrence");
+  expect(r.result).toContain("replaced 1 occurrence");
+  expect(fs.readFileSync(p, "utf8")).toBe("1 2 three");
+  // Sequential: the second edit sees the first edit's output.
+  const p2 = tmpFile("seq.txt", "aaa");
+  await tools.executeTool("edit", { filePath: p2, edits: [
+    { oldString: "aaa", newString: "bbb" },
+    { oldString: "bbb", newString: "ccc" },
+  ] });
+  expect(fs.readFileSync(p2, "utf8")).toBe("ccc");
+  // Ambiguous entry fails and writes nothing.
+  const p3 = tmpFile("ambig.txt", "dup dup");
+  const amb = await tools.executeTool("edit", { filePath: p3, edits: [{ oldString: "dup", newString: "x" }] });
+  expect(amb.error).toContain("2 matches");
+  expect(fs.readFileSync(p3, "utf8")).toBe("dup dup");
+});
+
+test("read: binary files are detected and skipped", async () => {
+  const p = path.join(tmpDir, "bin.dat");
+  fs.writeFileSync(p, Buffer.from([0x89, 0x50, 0x00, 0x01, 0x02, 0x00, 0x03]));
+  const res = await tools.executeTool("read", { filePath: p });
+  expect(String(res.result)).toContain("binary file");
+});
+
+test("bash: timeoutMs kills a hung command and reports the timeout", async () => {
+  const res = await tools.executeTool("bash", {
+    command: process.platform === "win32" ? "powershell -NoProfile -Command Start-Sleep -Seconds 30" : "sleep 30",
+    timeoutMs: 800,
+  });
+  expect(String(res.result)).toContain("timed out");
+}, 15000);
+
+test("bash: ctx.signal abort kills the running command", async () => {
+  const ac = new AbortController();
+  setTimeout(() => ac.abort(), 400);
+  const res = await tools.executeTool("bash", {
+    command: process.platform === "win32" ? "powershell -NoProfile -Command Start-Sleep -Seconds 30" : "sleep 30",
+    timeoutMs: 60000,
+  }, "build", { signal: ac.signal });
+  expect(String(res.result)).toContain("aborted by user");
+}, 15000);
+
+test("tasks: list/output/kill round-trip a background task", async () => {
+  const bt = require("../core/background-tasks.js");
+  const start = bt.startBackgroundTask("echo tasks-tool-ok");
+  expect(start.id).toBeTruthy();
+  // Wait for the echo to finish.
+  for (let i = 0; i < 50; i++) {
+    const t = bt.getBackgroundTask(start.id);
+    if (t && t.status !== "running") break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  const list = await tools.executeTool("tasks", { action: "list" });
+  expect(String(list.result)).toContain(start.id);
+  const out = await tools.executeTool("tasks", { action: "output", id: start.id, tailLines: 10 });
+  expect(String(out.result)).toContain("tasks-tool-ok");
+  const missing = await tools.executeTool("tasks", { action: "output", id: "bt-nope" });
+  expect(missing.error).toContain("Unknown task id");
+});
+
+test("todoread: returns the parent session todo list", async () => {
+  const parent = { todos: [{ content: "alpha", status: "in_progress", priority: "high" }, { content: "beta", status: "pending" }] };
+  const res = await tools.executeTool("todoread", {}, "build", { parentSession: parent });
+  expect(String(res.result)).toContain("alpha");
+  expect(String(res.result)).toContain("[>] [high] alpha");
+  expect(String(res.result)).toContain("1 in-progress, 1 pending");
+  const empty = await tools.executeTool("todoread", {}, "build", { parentSession: { todos: [] } });
+  expect(String(empty.result)).toContain("no todos");
 });

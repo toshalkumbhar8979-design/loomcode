@@ -54,9 +54,17 @@ function buildBody(messages, options) {
       // resumed/hand-edited sessions rather than failing the whole turn.
       const tcid = m.toolCallId || m.tool_call_id;
       if (tcid) {
+        // is_error marks a failed tool call so the model treats the string
+        // content as an error report, not a successful result (parity with
+        // the OpenAI-compat is_error/tool-result semantics).
         out.push({
           role: 'user',
-          content: [{ type: 'tool_result', tool_use_id: tcid, content: String(m.content) }],
+          content: [{
+            type: 'tool_result',
+            tool_use_id: tcid,
+            content: String(m.content),
+            ...(m.isError ? { is_error: true } : {}),
+          }],
         });
       }
       continue;
@@ -156,29 +164,69 @@ function normalizeBlocks(contentBlocks) {
   return { content: textParts.join(''), toolCalls };
 }
 
+// Retry-After header (seconds) or rate-limit reset timestamps → wait ms.
+function retryAfterMs(resp) {
+  const ra = resp && resp.headers && resp.headers.get('retry-after');
+  if (ra) {
+    const secs = Number(ra);
+    if (Number.isFinite(secs) && secs >= 0) return Math.min(secs * 1000, 60000);
+  }
+  return null;
+}
+
+// Retryable: rate limits (429) and transient server errors (5xx/529).
+function isRetryableStatus(status) {
+  return status === 429 || status === 529 || (status >= 500 && status < 600);
+}
+
 async function post(body, options) {
   const key = getKey();
   if (!key) throw new Error("Anthropic API key not set. Use /connect anthropic or set ANTHROPIC_API_KEY.");
   const apiUrl = getApiUrl();
-  const resp = await fetch(apiUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': key,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify(body),
-    signal: options.signal,
-  });
-  if (!resp.ok) {
-    /** @type {any} */
-    const err = await resp.json().catch(() => ({}));
-    const detail = err.error?.message || resp.statusText;
-    if (resp.status === 401) throw new Error("Anthropic 401 Unauthorized: the API key is invalid or expired. Run /connect anthropic and paste a new key.");
-    if (resp.status === 403) throw new Error("Anthropic 403 Forbidden: the API key is not authorized for this model. Check the model name and your account access.");
-    throw new Error(`Anthropic API error ${resp.status}: ${detail}`);
+  const maxTries = 4;
+  let resp = null;
+  for (let attempt = 0; attempt < maxTries; attempt++) {
+    resp = await fetch(apiUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': key,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify(body),
+      signal: options.signal,
+    });
+    if (resp.ok) return resp;
+    if (!isRetryableStatus(resp.status) || attempt === maxTries - 1) break;
+    // Honor the provider's Retry-After (seconds); else exponential backoff
+    // with jitter so parallel retries don't stampede.
+    const waitMs = retryAfterMs(resp) ?? Math.min(1000 * Math.pow(2, attempt), 30000);
+    const jitter = Math.floor(Math.random() * 250);
+    await new Promise((r) => setTimeout(r, waitMs + jitter));
+    if (options.signal && options.signal.aborted) {
+      const abortErr = new Error('Request aborted');
+      abortErr.name = 'AbortError';
+      throw abortErr;
+    }
   }
-  return resp;
+  if (!resp) throw new Error('Anthropic API error: no response');
+  /** @type {any} */
+  const err = await resp.json().catch(() => ({}));
+  const detail = err.error?.message || resp.statusText;
+  if (resp.status === 401) throw new Error("Anthropic 401 Unauthorized: the API key is invalid or expired. Run /connect anthropic and paste a new key.");
+  if (resp.status === 403) throw new Error("Anthropic 403 Forbidden: the API key is not authorized for this model. Check the model name and your account access.");
+  const e = new Error(`Anthropic API error ${resp.status}: ${detail}`);
+  /** @type {any} */ (e).status = resp.status;
+  /** @type {any} */ (e).retryAfterMs = retryAfterMs(resp);
+  throw e;
+}
+
+// Anthropic stop_reason → the finishReason vocabulary the session loop knows
+// ('length' drives truncation auto-continue; 'tool_use'/'end_turn' are no-ops).
+function mapStopReason(stopReason) {
+  if (stopReason === 'max_tokens') return 'length';
+  if (stopReason === 'tool_use') return 'tool_calls';
+  return stopReason || undefined;
 }
 
 async function chat(messages, options = {}) {
@@ -186,7 +234,11 @@ async function chat(messages, options = {}) {
   const resp = await post(body, options);
   /** @type {any} */
   const data = await resp.json();
-  return { ...normalizeBlocks(data.content || []), usage: data.usage };
+  return {
+    ...normalizeBlocks(data.content || []),
+    usage: data.usage,
+    finishReason: mapStopReason(data.stop_reason),
+  };
 }
 
 async function stream(messages, options = {}, onDelta, onReasoning) {
@@ -198,6 +250,8 @@ async function stream(messages, options = {}, onDelta, onReasoning) {
   let content = '';
   let reasoning = '';
   let usage = null;
+  let finishReason;
+  let sawEnd = false;
   const toolAcc = new Map();
 
   for await (const chunk of resp.body) {
@@ -210,7 +264,25 @@ async function stream(messages, options = {}, onDelta, onReasoning) {
       if (raw === '[DONE]') continue;
       let evt;
       try { evt = JSON.parse(raw); } catch { continue; }
-      if (evt.type === 'message_delta' && evt.usage) usage = evt.usage;
+      // Mid-stream error events (content filter, overloaded after start)
+      // previously vanished — the turn dead-ended with empty content. Throw
+      // so the session retry/error path handles it.
+      if (evt.type === 'error') {
+        const emsg = evt.error?.message || 'unknown stream error';
+        const e = new Error(`Anthropic stream error: ${emsg}`);
+        /** @type {any} */ (e).status = evt.error?.type === 'overloaded_error' ? 529 : undefined;
+        throw e;
+      }
+      if (evt.type === 'message_start' && evt.message?.usage) {
+        // message_start carries input_tokens (prompt) — without it, a turn
+        // that ends in message_delta only undercounts input to zero.
+        usage = { ...evt.message.usage };
+      }
+      if (evt.type === 'message_delta') {
+        if (evt.usage) usage = { ...(usage || {}), ...evt.usage };
+        if (evt.delta && evt.delta.stop_reason) finishReason = mapStopReason(evt.delta.stop_reason);
+        sawEnd = true;
+      }
       if (evt.type === 'content_block_start' && evt.content_block?.type === 'tool_use') {
         toolAcc.set(evt.index, { id: evt.content_block.id, name: evt.content_block.name, input: '' });
       } else if (evt.type === 'content_block_delta') {
@@ -229,6 +301,14 @@ async function stream(messages, options = {}, onDelta, onReasoning) {
     }
   }
 
+  // A stream that never delivered message_delta AND produced nothing was
+  // truncated (network reset mid-body). Surface it as an error instead of a
+  // silent empty reply. Partial content with no trailing message_delta is
+  // kept (the session can continue from it).
+  if (!sawEnd && !usage && !content && !toolAcc.size) {
+    throw new Error('Anthropic stream truncated: connection ended before message_delta');
+  }
+
   const toolCalls = [];
   for (const acc of toolAcc.values()) {
     let input = {};
@@ -236,7 +316,7 @@ async function stream(messages, options = {}, onDelta, onReasoning) {
     toolCalls.push({ id: acc.id, name: acc.name, input });
   }
 
-  return { content, reasoning, toolCalls, usage };
+  return { content, reasoning, toolCalls, usage, finishReason };
 }
 
 const models = [

@@ -536,6 +536,9 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
       clearInterval(speedTimer);
       if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
       if (offTodos) { offTodos(); offTodos = null; }
+      // Per-turn autosave: persist after every turn so a crash/exit never
+      // loses more than the last exchange (previously only /exit saved).
+      try { saveSession(syncSessionForSave()); } catch {}
       // Freeze the subagent panel at its final state ("finished").
       if (subAcc.agent) patchMessageAt(idx, { subagent: { agent: subAcc.agent, text: subAcc.text, log: subAcc.log, status: subAcc.status, done: true } });
       // Let the settled assistant message render before the global turn state
@@ -708,6 +711,13 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
           if (m.role === "user") user += t; else if (m.role === "assistant") asst += t; else if (m.role === "tool") tool += t; else sys += t;
         }
         const total = sys + user + asst + tool;
+        // Live window estimate from the session (messages + system + tool
+        // schemas) — the percent is recomputed now, not a startup snapshot.
+        let winLine = "";
+        try {
+          const ce = getSession().contextEstimate();
+          winLine = "Window:  ~" + ce.tokens.toLocaleString() + " / " + ce.window.toLocaleString() + " tokens (" + ce.pct + "% used)";
+        } catch {}
         appendMessage({ role: "system", content: [
           "=== Context (~tokens, chars/4 estimate) ===",
           "System+memory: " + sys,
@@ -715,8 +725,23 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
           "Assistant:     " + asst,
           "Tool results:  " + tool,
           "TOTAL:         " + total + "  (" + msgs.length + " messages)",
+          winLine,
           "", "Tip: /compact frees context when this grows large.",
         ].join("\n") });
+        return;
+      }
+      case "compact": {
+        appendMessage({ role: "system", content: "Compacting…" });
+        getSession().compact({
+          onCompact: (r: any) => {
+            appendMessage({ role: "system", content: r.compacted
+              ? "Compacted (" + r.method + "): summarized/truncated " + r.removed + " earlier messages; ~" + (r.tokensAfter ?? "?") + " tokens remain."
+              : "Nothing to compact — the conversation is still short." });
+          },
+        }).then((r: any) => {
+          if (!r.compacted && !r.reason) appendMessage({ role: "system", content: "Compaction failed — try again." });
+          try { saveSession(syncSessionForSave()); } catch {}
+        }).catch((e: any) => appendMessage({ role: "system", content: "Compaction failed: " + String(e?.message || e) }));
         return;
       }
       case "think": {
@@ -1606,6 +1631,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
   // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• Lifecycle â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   let _skillToastOff: (() => void) | null = null;
   let _skillDoneOff: (() => void) | null = null;
+  let _taskToastOff: (() => void) | null = null;
   onMount(function() {
     // Keep the renderer's frame pump alive. The engine only runs its
     // frame callback while there's a non-complete timeline registered;
@@ -1655,9 +1681,27 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
     _skillDoneOff = on("turn:end", function(d: any) {
       if (d?.skills?.length) showToast("skill handled: " + d.skills.join(", "), "ok");
     });
+    // Background-task completion toasts: bash background:true tasks finishing
+    // (done/error/killed) surface immediately so the model's "started a
+    // server" isn't silent forever.
+    var taskStatuses: Record<string, string> = {};
+    _taskToastOff = on("tasks:changed", function() {
+      try {
+        var bt = require("../core/background-tasks.js");
+        var rows = bt.listBackgroundTasks();
+        for (var i = 0; i < rows.length; i++) {
+          var t = rows[i];
+          var prev = taskStatuses[t.id];
+          taskStatuses[t.id] = t.status;
+          if (prev === "running" && t.status !== "running") {
+            showToast("Task " + t.id + " " + t.status + (t.exitCode != null ? " (exit " + t.exitCode + ")" : "") + " \u2014 /tasks for output", t.status === "done" ? "ok" : "error", 6000);
+          }
+        }
+      } catch {}
+    });
     (globalThis as any).__loomTrace?.("onMount-done", new Error("mount complete"));
   });
-  onCleanup(function() { persistUi(); if (_skillToastOff) _skillToastOff(); if (_skillDoneOff) _skillDoneOff(); });
+  onCleanup(function() { persistUi(); if (_skillToastOff) _skillToastOff(); if (_skillDoneOff) _skillDoneOff(); if (_taskToastOff) _taskToastOff(); });
 
   var showSplash = createMemo(function() { return messages().length === 0; });
 
