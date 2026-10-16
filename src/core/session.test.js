@@ -9,6 +9,11 @@ import path from "path";
 
 const USAGE_TMP = path.join(os.tmpdir(), "loom-session-" + process.pid + "-" + Date.now() + ".json");
 process.env.LOOM_USAGE_FILE = USAGE_TMP;
+// Hermetic config: never read the developer's real ~/.loom (its provider —
+// possibly a dynamic models.dev one — isn't merged under the test process's
+// registry state, which made every `new Session()` throw "Unknown provider").
+const CFG_TMP = path.join(os.tmpdir(), "loom-session-cfg-" + process.pid + "-" + Date.now());
+process.env.LOOM_CONFIG_DIR = CFG_TMP;
 
 let Session, events;
 let savedEnv = {};
@@ -23,6 +28,8 @@ beforeAll(() => {
 
 afterAll(() => {
   try { fs.rmSync(USAGE_TMP, { force: true }); } catch {}
+  try { fs.rmSync(CFG_TMP, { recursive: true, force: true }); } catch {}
+  delete process.env.LOOM_CONFIG_DIR;
   for (const k of Object.keys(savedEnv)) {
     if (savedEnv[k] === undefined) delete process.env[k];
     else process.env[k] = savedEnv[k];
@@ -475,6 +482,47 @@ test("runTurn: model errors surface as error responses", async () => {
   const res = await s.runTurn({});
   expect(res.type).toBe("error");
   expect(res.content).toContain("boom");
+});
+
+test("_sandboxBlock: empty until sandbox enabled, then routes via docker exec", () => {
+  const cfgDir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-cfg-"));
+  const prevCfg = process.env.LOOM_CONFIG_DIR;
+  const prevKill = process.env.LOOM_SANDBOX;
+  process.env.LOOM_CONFIG_DIR = cfgDir;
+  delete process.env.LOOM_SANDBOX;
+  try {
+    const s = freshSession();
+    // Fresh config (no sandbox) → no docker line, no config read of note.
+    expect(s._sandboxBlock()).toBe("");
+    // Enabled in config → the block names the exact docker exec shape.
+    fs.writeFileSync(path.join(cfgDir, "config.json"), JSON.stringify({ sandbox: { enabled: true } }), "utf8");
+    const blk = s._sandboxBlock();
+    expect(blk).toContain("docker exec loom-sandbox");
+    expect(blk).toContain("/workspace");
+    // Kill-switch wins even when enabled.
+    process.env.LOOM_SANDBOX = "0";
+    expect(s._sandboxBlock()).toBe("");
+    process.env.LOOM_SANDBOX = "";
+    delete process.env.LOOM_SANDBOX;
+    // Non-build modes never get it.
+    s.setMode("plan");
+    expect(s._sandboxBlock()).toBe("");
+    s.setMode("build");
+    expect(s._sandboxBlock()).toContain("docker exec loom-sandbox");
+  } finally {
+    if (prevCfg === undefined) delete process.env.LOOM_CONFIG_DIR;
+    else process.env.LOOM_CONFIG_DIR = prevCfg;
+    if (prevKill === undefined) delete process.env.LOOM_SANDBOX;
+    else process.env.LOOM_SANDBOX = prevKill;
+    try { fs.rmSync(cfgDir, { recursive: true, force: true }); } catch {}
+  }
+});
+
+test("build system prompt documents sandbox routing via docker exec", () => {
+  const s = freshSession();
+  s.setMode("build");
+  expect(s.systemPrompt).toContain("docker exec loom-sandbox");
+  expect(s.systemPrompt).toContain("sandbox:true");
 });
 
 test("sendUserMessage: appends user message, emits turn events", async () => {

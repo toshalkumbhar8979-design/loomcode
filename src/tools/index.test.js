@@ -165,11 +165,25 @@ test("sandbox tool: opt-in only — helpful error when never set up (no auto-rou
     // Host bash keeps working regardless of the sandbox state.
     const bash = await tools.executeTool("bash", { command: "echo host-still-works" });
     expect(String(bash.result)).toContain("host-still-works");
+    // bash sandbox:true must take the docker exec path — an unset sandbox
+    // yields the setup error, never a silent host execution of the command.
+    const marker = path.join(cfgDir, "must-not-exist.txt");
+    const routed = await tools.executeTool("bash", { command: `echo leak > "${marker}"`, sandbox: true });
+    expect(routed.error).toContain("/sandbox");
+    expect(fs.existsSync(marker)).toBe(false);
   } finally {
     delete process.env.LOOM_SANDBOX;
     delete process.env.LOOM_CONFIG_DIR;
     try { fs.rmSync(cfgDir, { recursive: true, force: true }); } catch {}
   }
+});
+
+test("bash tool schema advertises the sandbox routing param", () => {
+  const defs = tools.getToolDefinitions("build");
+  const bash = defs.find((d) => d.name === "bash");
+  expect(bash.input_schema.properties.sandbox).toBeTruthy();
+  const sb = defs.find((d) => d.name === "sandbox");
+  expect(sb.description).toContain("docker exec");
 });
 test("glob: finds files, ignores node_modules", async () => {
   tmpFile("gdir/a.txt", "x");

@@ -73,6 +73,7 @@ const TOOL_TO_PERMISSION = {
   glob: 'glob',
   grep: 'grep',
   bash: 'bash',
+  sandbox: 'bash',   // same command gate as bash (danger heuristics apply)
   task: 'task',
   skill: 'skill',
   lsp: 'lsp',
@@ -298,7 +299,8 @@ class PermissionManager {
     const cwd = cwdOverride || this.cwd || process.cwd();
     const inp = input || {};
     switch (toolName) {
-      case 'bash': return String(inp.command ?? inp.args ?? '');
+      case 'bash':
+      case 'sandbox': return String(inp.command ?? inp.args ?? '');
       case 'read': return normPathArg(inp.filePath || inp.path || '', cwd);
       case 'edit':
       case 'write': return normPathArg(inp.filePath || inp.path || '', cwd);

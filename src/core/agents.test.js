@@ -94,7 +94,10 @@ test("config merge: custom agents, overrides and disable", () => {
     expect(agents.agentToolAllowed(all["code-reviewer"], "write")).toBe(false);
     expect(agents.agentToolAllowed(all["code-reviewer"], "read")).toBe(true);
   } finally {
-    delete process.env.LOOM_CONFIG_DIR;
+    // Restore THIS file's temp config dir — deleting the var would leak the
+    // developer's real ~/.loom config (with its provider/model/apiKeys) into
+    // the remaining tests in this file and every file after it.
+    process.env.LOOM_CONFIG_DIR = CFG_TMP;
   }
 });
 

@@ -186,13 +186,32 @@ const TOOLS = {
   },
   bash: {
     name: 'bash',
-    description: 'Execute a shell command on the user\'s machine.',
+    description: 'Execute a shell command on the user\'s machine. Pass sandbox:true to run it INSIDE the Docker sandbox instead (docker exec into loom-sandbox, project at /workspace) — required for anything the user asks to run "in the sandbox".',
     parameters: {
       command: { type: 'string', required: true, description: 'The command to execute' },
       workdir: { type: 'string', required: false, description: 'Working directory' },
       background: { type: 'boolean', required: false, description: 'Run without waiting (dev servers, long builds). Returns a task id immediately; check with the /tasks panel.' },
+      sandbox: { type: 'boolean', required: false, description: 'Run this command inside the Docker sandbox container (docker exec) instead of on the host. Use when the user asked for the sandbox or isolation is needed; defaults to the host.' },
     },
     async execute(params, ctx) {
+      // Sandbox opt-in: the SAME command goes through docker exec into the
+      // loom-sandbox container — never a silent host fallback if the
+      // container is unavailable (the error tells the model what to do).
+      if (params.sandbox && !params.background) {
+        const sandbox = require('../core/sandbox');
+        const risk = params._approved ? null : commandRiskLabel(params.command);
+        if (risk) return { error: `Blocked by safety filter: ${risk}. Approve it via the permission prompt to run it anyway.` };
+        const stream = ctx && typeof ctx.stream === 'function' ? ctx.stream : null;
+        const res = await sandbox.runInSandbox(params.command, {
+          workdir: params.workdir || cwd,
+          timeoutMs: 120000,
+          onChunk: stream ? (text, which) => stream(text, which) : undefined,
+        });
+        if ('error' in res) return { error: res.error };
+        let out = res.output;
+        if (res.code !== 0) out += `\n[exit code: ${res.code}]`;
+        return out || 'command completed';
+      }
       // Background mode: fire-and-forget via the task registry.
       if (params.background) {
         const bt = require('../core/background-tasks');
@@ -267,7 +286,7 @@ const TOOLS = {
   },
   sandbox: {
     name: 'sandbox',
-    description: 'Run a shell command INSIDE the Docker sandbox (isolated Linux container, project mounted at /workspace). Use ONLY when isolation is needed: the user asked for the sandbox, the command is risky (installs, deletions, untrusted scripts), or a Linux-only environment is required. For ordinary commands use bash (host). One command per call; the container idles in the background between calls.',
+    description: 'Run a shell command INSIDE the Docker sandbox via `docker exec loom-sandbox sh -lc "<command>"` (isolated Linux container, project mounted at /workspace). Use when isolation is needed: the user asked for the sandbox, the command is risky (installs, deletions, untrusted scripts), or a Linux-only environment is required. Equivalent to bash with sandbox:true. One command per call; the container idles in the background between calls.',
     parameters: {
       command: { type: 'string', required: true, description: 'The Linux shell command to run inside the container' },
       workdir: { type: 'string', required: false, description: 'Working directory inside the container (host paths under the project map to /workspace/...)' },

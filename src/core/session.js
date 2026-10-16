@@ -263,7 +263,7 @@ ${this.loadSkills()}
 ## Mode
 You are in ${this.mode === 'build' ? 'BUILD MODE (full agent)' : this.mode === 'plan' ? 'PLAN MODE (read-only analysis)' : 'CHAT MODE (conversation only)'}.
 ${this.mode === 'build' ? `- You have all tools available: read, write, edit, bash, glob, grep, webfetch, and MCP tools.
-- bash runs on the user's machine. Only use the sandbox tool when isolation is genuinely needed (the user asked for it, or the command is risky/Linux-only); never for ordinary commands.
+- bash runs on the user's machine. When isolation is genuinely needed (the user asked for the sandbox, or the command is risky/Linux-only), run it INSIDE Docker instead: the \`sandbox\` tool, or bash with sandbox:true — both execute via \`docker exec loom-sandbox sh -lc "<command>"\`. Never run a sandbox-intended command on the host, and never for ordinary commands.
 - Inspect, edit, and verify the result yourself end-to-end.
 - When done, summarize in 1-2 sentences.` : ''}${this.mode === 'plan' ? `- Read-only tools only: read, glob, grep, webfetch, todowrite. No MCP tools.
 - Investigate thoroughly, then output a "## Plan" with ordered steps (exact file path + what changes each step makes). No narration.` : ''}${this.mode === 'chat' ? `- No tools available; answer conversationally.
@@ -281,6 +281,19 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
     try { agent = require('./agents').resolveAgent(this.mode); } catch { return ''; }
     if (!agent || !agent.prompt) return '';
     return '\n\n## Acting as the "' + agent.name + '" agent\n' + agent.prompt + '\n';
+  }
+
+  // Dynamic Docker-sandbox line, resolved lazily per turn (like _primaryBlock)
+  // so /sandbox setup / on / off apply to the NEXT turn without rebuilding the
+  // base prompt. Config-only read — never spawns docker (no TUI freezes).
+  _sandboxBlock() {
+    if (this.mode !== 'build') return '';
+    let ready = false;
+    try { ready = require('./sandbox').shouldUseSandbox(); } catch { return ''; }
+    if (!ready) return '';
+    return '\n\n## Sandbox (Docker, ready)\n'
+      + '- The loom-sandbox container is set up. When the user asks to run something "in the sandbox", or isolation is genuinely needed, run the command through `docker exec loom-sandbox sh -lc "<command>"` (workdir /workspace) — i.e. the `sandbox` tool, or bash with sandbox:true. NEVER run a sandbox-intended command directly on the host instead.\n'
+      + '- Ordinary commands stay on the host via plain bash (or bash with sandbox omitted).\n';
   }
 
   // Create ./LOOM.md with a template when missing, so memory exists from the
@@ -804,7 +817,7 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
         // results flow through the TUI popup; doom_loop/external_directory
         // are checked separately where they apply.
         const permKey = { read:'read', edit:'edit', write:'edit', glob:'glob', grep:'grep', bash:'bash',
-                          task:'task', skill:'skill', lsp:'lsp', question:'question', ask:'question', webfetch:'webfetch',
+                          sandbox:'bash', task:'task', skill:'skill', lsp:'lsp', question:'question', ask:'question', webfetch:'webfetch',
                           websearch:'websearch', browser:'browser' }[tc.name];
         const isMcpAdd = tc.name === 'mcp' && tc.input && tc.input.action === 'add';
         if (permKey || isMcpAdd) {
@@ -850,7 +863,7 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
         // The permission gate above is the interactive check; mark the command
         // as approved so the tool-layer safety filter doesn't double-block
         // commands the user explicitly allowed.
-        const input = (tc.name === 'bash' || isMcpAdd) ? { ...tc.input, _approved: true } : tc.input;
+        const input = (tc.name === 'bash' || tc.name === 'sandbox' || isMcpAdd) ? { ...tc.input, _approved: true } : tc.input;
         // preToolUse hook: a user-configured command may veto this call.
         try {
           const gate = await hooks.runHook('preToolUse', { tool: tc.name, input: tc.input });
@@ -952,7 +965,7 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
       maxTokens: this.config.maxTokens || 8192,
       temperature: this.config.temperature ?? 0.7,
       tools: toolDefs,
-      system: this.systemPrompt + (this._skillBlock || '') + (this._agentBlock || '') + this._primaryBlock(),
+      system: this.systemPrompt + (this._skillBlock || '') + (this._agentBlock || '') + this._primaryBlock() + this._sandboxBlock(),
       signal: this.abortController?.signal,
       // Extended thinking: models tagged 'reasoning' reason BEFORE every
       // reply — including after each tool result — so complex tasks get

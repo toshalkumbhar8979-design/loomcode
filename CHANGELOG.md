@@ -68,6 +68,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reads allow, interactive click/fill/press ask.
 
 ### Fixed
+- **Unit tests no longer read the developer's real `~/.loom` config**
+  (`src/core/session.test.js`, `agents.test.js`). `session.test.js` never set
+  `LOOM_CONFIG_DIR`, and the config-merge test in `agents.test.js` DELETED
+  the variable instead of restoring its temp dir — so once the local config
+  picked a dynamic models.dev provider (or any provider the test process
+  hadn't merged), every `new Session()` failed with `Unknown provider` and
+  the whole `bun run test:unit` stage went red (36 failures). Both files now
+  run hermetically against a temp config dir (restored/cleaned in
+  `afterAll`).
 - **Agent loop no longer stops in the middle of work** (`src/core/session.js`
   continuation guards — opencode/Claude-Code parity):
   - **Truncation auto-continue.** `finish_reason=length` (output budget
@@ -86,6 +95,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     todos are surfaced to the UI whenever the guard engaged.
 
 ### Changed
+- **Sandbox commands are now routed through Docker when the agent decides it
+  needs the sandbox** — instead of quietly running on the host:
+  - `bash` gained an opt-in **`sandbox: true`** parameter; the same command
+    then runs via `docker exec loom-sandbox sh -lc "<command>"`
+    (`workdir /workspace`). If the sandbox isn't set up the call FAILS with
+    the `/sandbox` setup hint — it never silently falls back to the host.
+  - The system prompt now states the exact routing (build-mode tool list +
+    a per-turn **"Sandbox (Docker, ready)"** block, resolved lazily so
+    `/sandbox setup|on|off` applies from the next turn): sandbox-intended
+    commands go through the `sandbox` tool or `bash {sandbox:true}`, ordinary
+    commands stay on the host.
+  - The `sandbox` tool description spells out the `docker exec … sh -lc`
+    shape, and the tool now flows through the same permission gate as bash
+    (dangerous commands prompt; user-approved calls carry `_approved`).
 - **Sandbox is now opt-in per command, not a global router.** Enabling the
   sandbox no longer hijacks the bash tool — every host command keeps running
   on your machine (Windows included) exactly as before. Instead, a dedicated
