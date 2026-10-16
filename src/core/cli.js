@@ -540,6 +540,7 @@ if (args.includes('--help') || args.includes('-h')) {
     console.log('  loom --auto             Auto-approve permission prompts');
     console.log('  loom acp                ACP server (JSON-RPC over stdio, for editor plugins)');
     console.log('  loom add mcp <spec>     Add an MCP server (same syntax as /mcp add)');
+    console.log('  loom add connector <spec>  Add a connector (preset like supabase, or one-liner)');
     console.log('  loom -s <session-id>    Resume a saved session');
     console.log('  loom --version           Show version');
     console.log('  loom --help              Show this help');
@@ -571,6 +572,27 @@ if (args.includes('--help') || args.includes('-h')) {
     }
     const { mcpAddLineCmd } = require('./plugin-cmd');
     const msg = mcpAddLineCmd(spec.join(' '));
+    const ok = typeof msg === 'string' && msg.startsWith('Added');
+    console.log(ok ? msg : 'Error: ' + msg);
+    process.exit(ok ? 0 : 1);
+  }
+
+  // loom add connector <spec> — same engine as /connectors add. A preset name
+  // (supabase, nextjs, railway, vercel, netlify, cloudflare) expands with
+  // -e KEY=V flags; anything else is the generic one-liner form. Exits 0 on
+  // success.
+  if (args[0] === 'add' && (args[1] === 'connector' || args[1] === 'connectors')) {
+    const spec = args.slice(2);
+    if (!spec.length) {
+      const { CONNECTOR_PRESETS } = require('../mcp/connector-presets');
+      console.log('Usage: loom add connector <preset> [-e KEY=V]...');
+      console.log('   or: loom add connector [-e KEY=V] <name> [--] <command> [args...]');
+      console.log('Presets: ' + CONNECTOR_PRESETS.map(p => p.id).join(', '));
+      console.log('Example: loom add connector supabase -e SUPABASE_ACCESS_TOKEN=xxx');
+      process.exit(1);
+    }
+    const { connectorAddLineCmd } = require('./plugin-cmd');
+    const msg = connectorAddLineCmd(spec.join(' '));
     const ok = typeof msg === 'string' && msg.startsWith('Added');
     console.log(ok ? msg : 'Error: ' + msg);
     process.exit(ok ? 0 : 1);

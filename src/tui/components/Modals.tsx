@@ -441,7 +441,8 @@ export function showAgentsText() {
 
 // ── MCP server / connector browser popup ──
 // Lists every configured server (seeded defaults + user-added) with on/off
-// state; Enter toggles, A opens the add flow, Esc closes.
+// state; Enter toggles a server (or opens the add flow on the pinned "+ Add"
+// row at the end of the list), A opens the add flow, Esc closes.
 // `kind` decides which preset list the "A" flow offers: "mcp" (dev tools) or
 // "connector" (hosting/cloud services). Both share the same underlying
 // mcp-manager — a connector IS an MCP server, just surfaced separately.
@@ -470,11 +471,15 @@ function presetAddLine(p: any, envValues?: Record<string, string>): string {
 function openPresetPicker(presets: any[], kind: "mcp" | "connector") {
   const addLabel = kind === "connector" ? "Add connector" : "Add MCP server";
   const backType = kind === "connector" ? "connectors" : "mcp";
+  // Connector adds run through the preset-aware engine: a bare preset name
+  // plus -e KEY=V flags expands to the full one-liner; full one-liners (with
+  // "--") pass through unchanged.
+  const addLine = kind === "connector" ? plugin.connectorAddLineCmd : plugin.mcpAddLineCmd;
 
   // Build the server from collected env + optional args and land it; reopen
   // the browser on success, toast the error otherwise.
   const submitLine = (line: string, reopenOnError: boolean) => {
-    const msg = plugin.mcpAddLineCmd(line);
+    const msg = addLine(line);
     if (msg.startsWith("Added")) {
       showToast(msg, "ok");
       closeModal();
@@ -547,7 +552,7 @@ const openLine = function(line: string) {
       caretStart: line ? line.lastIndexOf("=") + 1 : 0,
       onCancel: function() { closeModal(); setTimeout(function() { openModal({ type: backType as any }); }, 10); },
       onPick: function(line2: string) {
-        const msg = plugin.mcpAddLineCmd(line2);
+        const msg = addLine(line2);
         if (msg.startsWith("Added")) {
           showToast(msg, "ok");
           closeModal();
@@ -592,9 +597,11 @@ function ServerBrowser(props: { kind: "mcp" | "connector" }) {
     const ks = kbs.keyString(key);
     if (kbs.is("modal_cancel", ks)) { closeModal(); return; }
     if (kbs.dialogIs("dialog_select_prev", ks)) { setSel(i => Math.max(0, i - 1)); return; }
-    if (kbs.dialogIs("dialog_select_next", ks)) { setSel(i => Math.min(servers().length - 1, i + 1)); return; }
+    // One past the last server is the pinned "+ Add" row.
+    if (kbs.dialogIs("dialog_select_next", ks)) { setSel(i => Math.min(servers().length, i + 1)); return; }
     if (key.name === "a" || key.name === "A") { openPresetPicker(presets, kind); return; }
     if (kbs.dialogIs("dialog_select_submit", ks)) {
+      if (sel() >= servers().length) { openPresetPicker(presets, kind); return; }
       const s = servers()[sel()];
       if (!s) return;
       const res = toggleServer(s.name);
@@ -605,7 +612,7 @@ function ServerBrowser(props: { kind: "mcp" | "connector" }) {
     }
   });
 
-  const scrollBy = (e: any) => { setSel(i => Math.max(0, Math.min(servers().length - 1, i + wheelStep(e, 1)))); };
+  const scrollBy = (e: any) => { setSel(i => Math.max(0, Math.min(servers().length, i + wheelStep(e, 1)))); };
   let winStart = 0;
   const win = () => {
     const total = servers().length;
@@ -626,7 +633,7 @@ function ServerBrowser(props: { kind: "mcp" | "connector" }) {
   const cmdW = () => Math.max(22, 60 - nameW());
 
   return (
-    <ModalFrame title={title} subtitle={"Enter toggles a server" + rangeSub()} footer={kbNav().submit + " toggle  ·  A add  ·  " + kbNav().cancel + " close"}>
+    <ModalFrame title={title} subtitle={"Enter toggles, + Add row adds" + rangeSub()} footer={kbNav().submit + " toggle/add  ·  A add  ·  " + kbNav().cancel + " close"}>
       <box onMouseScroll={scrollBy} flexDirection="column" flexShrink={0}>
         {win().items.map((s, i) => {
           const abs = win().start + i;
@@ -648,6 +655,25 @@ function ServerBrowser(props: { kind: "mcp" | "connector" }) {
             </box>
           );
         })}
+        {/* Pinned add row — always visible under the list; Enter (or a click)
+            opens the preset picker, same as the A shortcut. */}
+        {(() => {
+          const addActive = sel() >= servers().length;
+          const addLabel2 = "+ Add " + (kind === "connector" ? "connector" : "MCP server") + "…";
+          return (
+            <box
+              flexDirection="row" paddingY={0} height={1} flexShrink={0}
+              paddingLeft={1}
+              backgroundColor={addActive ? ui.bgPanelAlt : undefined}
+              onMouseDown={() => setSel(servers().length)}
+              onMouseUp={() => { if (sel() >= servers().length) openPresetPicker(presets, kind); }}
+            >
+              <text fg={addActive ? ui.primary : ui.fgMuted} height={1}>
+                {(addActive ? "▸ " : "  ") + addLabel2}
+              </text>
+            </box>
+          );
+        })()}
       </box>
     </ModalFrame>
   );

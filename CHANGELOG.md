@@ -24,6 +24,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `npm audit fix`) — fixes the DoS/recursion advisories.
 
 ### Added
+- **Easier connector installs — `loom add connector` + a visible "+ Add
+  connector…" row (`src/mcp/connector-presets.js`, `connectorAddLineCmd`).**
+  The connector preset catalog moved from the TUI into the core layer so the
+  shell and the TUI picker share one source. From the shell (or
+  `/connectors add`), a preset name plus `-e KEY=V` flags expands to the full
+  one-liner — `loom add connector supabase -e SUPABASE_ACCESS_TOKEN=xxx` —
+  and missing keys fail with the exact `-e` flag and where to get the token
+  instead of persisting a broken server. Leftover tokens append as trailing
+  args (`… supabase --project-ref abcdef`), and anything that is not a preset
+  name falls through to the generic `[-e KEY=V] <name> [--] <command>
+  [args...]` form. The `/connectors` and `/mcp` browsers now pin a "+ Add …"
+  row under the list (Enter opens the preset picker; `A` still works), and
+  the one-line add editor accepts a bare preset name.
 - **Docker sandbox with a guided `/sandbox` wizard (`src/core/sandbox.js`,
   `SandboxModal`).** `/sandbox` (or `/sandbox setup`) opens a three-step
   modal: (1) Docker check — if missing, shows the platform install link with

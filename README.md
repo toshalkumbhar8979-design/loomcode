@@ -154,7 +154,7 @@ self-test client (`node scripts/acp-smoke.js`) live in **[docs/acp.md](docs/acp.
 | `/graph` | — | Memory graph |
 | `/skills` | `install\|remove` | Manage skills |
 | `/mcp` | `add\|remove\|toggle` | Manage MCP servers |
-| `/connectors` | `add\|remove\|toggle` | Manage connectors |
+| `/connectors` | `add\|remove\|toggle` | Manage connectors — presets (supabase, railway, vercel, …) or one-liners; also `loom add connector` |
 | `/permissions` | `reset\|auto` | Permission rules |
 | `/subagents` | — | Subagent runs |
 | `/context` | — | Context window usage |

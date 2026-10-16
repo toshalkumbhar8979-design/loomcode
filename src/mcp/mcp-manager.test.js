@@ -134,3 +134,88 @@ test("mcpAddLineCmd: quoted paths with spaces survive the round-trip", () => {
   expect(loaded.command).toBe("C:\\Program Files\\python\\python.exe");
   mgr.removeServer("qtest");
 });
+
+// ── connectorAddLineCmd: preset-aware one-line add ──
+
+test("connectorAddLineCmd: preset name + -e flags expands and persists", () => {
+  const msg = plugin.connectorAddLineCmd("supabase -e SUPABASE_ACCESS_TOKEN=tok123");
+  expect(msg.startsWith("Added connector \"supabase\"")).toBe(true);
+  const loaded = mgr.loadServers().servers["supabase"];
+  const npxPrefix = process.platform === "win32" ? ["/c", "npx"] : ["npx"];
+  expect(loaded.command).toBe(process.platform === "win32" ? "cmd" : "npx");
+  expect(loaded.args.slice(0, npxPrefix.length)).toEqual(npxPrefix);
+  expect(loaded.args.slice(npxPrefix.length)).toEqual(["-y", "@supabase/mcp-server-supabase", "--access-token", "tok123"]);
+  expect(loaded.env).toEqual({ SUPABASE_ACCESS_TOKEN: "tok123" });
+  mgr.removeServer("supabase");
+});
+
+test("connectorAddLineCmd: leading -e flags before the preset name work", () => {
+  const msg = plugin.connectorAddLineCmd("-e RAILWAY_API_TOKEN=rtok railway");
+  expect(msg.startsWith("Added connector \"railway\"")).toBe(true);
+  const loaded = mgr.loadServers().servers["railway"];
+  expect(loaded.env).toEqual({ RAILWAY_API_TOKEN: "rtok" });
+  mgr.removeServer("railway");
+});
+
+test("connectorAddLineCmd: leftover tokens are appended as trailing args", () => {
+  const msg = plugin.connectorAddLineCmd("supabase -e SUPABASE_ACCESS_TOKEN=tok --project-ref abcdef");
+  expect(msg.startsWith("Added connector \"supabase\"")).toBe(true);
+  const loaded = mgr.loadServers().servers["supabase"];
+  const npxPrefix = process.platform === "win32" ? ["/c", "npx"] : ["npx"];
+  expect(loaded.args.slice(npxPrefix.length)).toEqual(["-y", "@supabase/mcp-server-supabase", "--access-token", "tok", "--project-ref", "abcdef"]);
+  mgr.removeServer("supabase");
+});
+
+test("connectorAddLineCmd: no-env presets (vercel, nextjs) expand directly", () => {
+  expect(plugin.connectorAddLineCmd("vercel").startsWith("Added connector \"vercel\"")).toBe(true);
+  const loaded = mgr.loadServers().servers["vercel"];
+  const npxPrefix = process.platform === "win32" ? ["/c", "npx"] : ["npx"];
+  expect(loaded.args.slice(npxPrefix.length)).toEqual(["-y", "mcp-remote", "https://mcp.vercel.com"]);
+  mgr.removeServer("vercel");
+  expect(plugin.connectorAddLineCmd("nextjs").startsWith("Added connector \"nextjs\"")).toBe(true);
+  mgr.removeServer("nextjs");
+});
+
+test("connectorAddLineCmd: missing required env errors and adds nothing", () => {
+  const msg = plugin.connectorAddLineCmd("supabase");
+  expect(msg).not.toContain("Added");
+  expect(msg).toContain("Missing key");
+  expect(msg).toContain("SUPABASE_ACCESS_TOKEN");
+  expect(mgr.loadServers().servers["supabase"]).toBeUndefined();
+  // Two-key preset: every missing key is listed.
+  const msg2 = plugin.connectorAddLineCmd("cloudflare");
+  expect(msg2).toContain("CLOUDFLARE_API_TOKEN");
+  expect(msg2).toContain("CLOUDFLARE_ACCOUNT_ID");
+  expect(mgr.loadServers().servers["cloudflare"]).toBeUndefined();
+});
+
+test("connectorAddLineCmd: a -- form skips preset expansion (custom command)", () => {
+  const msg = plugin.connectorAddLineCmd("supabase -- node custom.js");
+  expect(msg.startsWith("Added connector \"supabase\"")).toBe(true);
+  const loaded = mgr.loadServers().servers["supabase"];
+  expect(loaded.command).toBe("node");
+  expect(loaded.args).toEqual(["custom.js"]);
+  mgr.removeServer("supabase");
+});
+
+test("connectorAddLineCmd: custom one-liners pass through with connector wording", () => {
+  const msg = plugin.connectorAddLineCmd("mytool -- node s.js");
+  expect(msg.startsWith("Added connector \"mytool\"")).toBe(true);
+  mgr.removeServer("mytool");
+});
+
+test("connectorAddLineCmd: add / connector add / connectors add prefixes are forgiven", () => {
+  expect(plugin.connectorAddLineCmd("add nextjs").startsWith("Added connector \"nextjs\"")).toBe(true);
+  mgr.removeServer("nextjs");
+  expect(plugin.connectorAddLineCmd("connector add nextjs2 -- node s.js").startsWith("Added connector \"nextjs2\"")).toBe(true);
+  mgr.removeServer("nextjs2");
+  expect(plugin.connectorAddLineCmd("connectors vercel").startsWith("Added connector \"vercel\"")).toBe(true);
+  mgr.removeServer("vercel");
+});
+
+test("connectorAddLineCmd: empty input returns the usage listing presets", () => {
+  const msg = plugin.connectorAddLineCmd("");
+  expect(msg).toContain("Usage");
+  expect(msg).toContain("supabase");
+  expect(msg).toContain("cloudflare");
+});

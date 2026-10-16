@@ -523,7 +523,7 @@ export const SLASH_LIST: SlashCmd[] = [
   { cmd: "graph", desc: "Memory graph" },
   { cmd: "skills", desc: "Manage skills", args: "install <dir|git> | remove <name>" },
   { cmd: "mcp", desc: "Manage MCP servers", args: "add <name> <cmd> | remove | toggle" },
-  { cmd: "connectors", desc: "Manage connectors", args: "add <name> <cmd> | remove | toggle" },
+  { cmd: "connectors", desc: "Manage connectors", args: "add <preset|spec> | remove | toggle" },
   { cmd: "permissions", desc: "Permission rules", args: "reset | auto" },
   { cmd: "exit", desc: "Quit Loom Code" },
   // Newer commands sit at the END so early rows (help/connect/…) keep their

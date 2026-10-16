@@ -1096,7 +1096,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
       }
       case "connectors": {
         var sub3 = args[0];
-        if (sub3 === "add") { appendMessage({ role: "system", content: plugin.mcpAddCmd(args.slice(1)) }); return; }
+        if (sub3 === "add") { appendMessage({ role: "system", content: plugin.connectorAddCmd(args.slice(1)) }); return; }
         if (sub3 === "remove") { appendMessage({ role: "system", content: plugin.mcpRemoveCmd(args.slice(1)) }); return; }
         if (sub3 === "toggle") { appendMessage({ role: "system", content: plugin.mcpToggleCmd(args.slice(1)) }); return; }
         if (sub3 === "help") { appendMessage({ role: "system", content: plugin.mcpHelp() }); return; }

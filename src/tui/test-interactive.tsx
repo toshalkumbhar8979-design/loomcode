@@ -2519,6 +2519,51 @@ frame = strip(setup.captureCharFrame());
 console.assert(modal() === null && frame.includes("Sandbox:"), "FAIL: /sandbox status should print a status line, got:\n" + frame);
 ok("sandbox wizard modal + status fallback");
 
+header("54: /connectors — the + Add row and preset-name one-liners");
+setup.mockInput.typeText("/connectors");
+await sleep(200);
+setup.mockInput.pressEnter();
+await sleep(300);
+console.assert(modal()?.type === "connectors", "FAIL: /connectors should open the connector browser, got " + String(modal()?.type));
+frame = strip(setup.captureCharFrame());
+console.assert(frame.includes("+ Add connector"), "FAIL: the connectors browser should show a pinned + Add row, got:\n" + frame);
+// Walk down to the add row (server count varies with seeded defaults).
+for (let n = 0; n < 40 && !frame.includes("\u25B8 + Add connector"); n++) {
+  setup.mockInput.pressArrow("down");
+  await sleep(40);
+  frame = strip(setup.captureCharFrame());
+}
+console.assert(frame.includes("\u25B8 + Add connector"), "FAIL: down-arrow should reach the + Add row, got:\n" + frame);
+setup.mockInput.pressEnter();
+await sleep(300);
+console.assert(modal()?.type === "select", "FAIL: Enter on the + Add row should open the preset picker, got " + String(modal()?.type));
+frame = strip(setup.captureCharFrame());
+console.assert(frame.includes("Supabase"), "FAIL: the picker should list Supabase, got:\n" + frame);
+setup.mockInput.pressEscape();
+await sleep(150);
+console.assert(modal() === null, "FAIL: esc should close the picker (modals replace, not stack)");
+// Text-command path: a bare preset name + -e flags expands via the core engine.
+setup.mockInput.typeText("/connectors add supabase -e SUPABASE_ACCESS_TOKEN=it54tok");
+await sleep(150);
+setup.mockInput.pressEnter();
+await sleep(400);
+const mcp54 = require("../mcp/mcp-manager.js");
+const sb54 = mcp54.loadServers().servers["supabase"];
+console.assert(sb54, "FAIL: /connectors add supabase should expand the preset");
+console.assert(sb54 && sb54.env && sb54.env.SUPABASE_ACCESS_TOKEN === "it54tok", "FAIL: -e env should land");
+console.assert(sb54 && sb54.args.join(" ").includes("it54tok"), "FAIL: $KEY should resolve into args, got " + String(sb54 && sb54.args));
+console.assert(sb54 && sb54.args.join(" ").includes("@supabase/mcp-server-supabase"), "FAIL: the preset package should be the command, got " + String(sb54 && sb54.command + " " + sb54.args));
+mcp54.removeServer("supabase");
+// Missing required key -> helpful error naming the -e flag, nothing persisted.
+setup.mockInput.typeText("/connectors add cloudflare");
+await sleep(150);
+setup.mockInput.pressEnter();
+await sleep(300);
+frame = strip(setup.captureCharFrame());
+console.assert(frame.includes("Missing key"), "FAIL: a missing-env add should error helpfully, got:\n" + frame);
+console.assert(!mcp54.loadServers().servers["cloudflare"], "FAIL: nothing should be persisted on missing keys");
+ok("connectors + Add row + preset one-liner");
+
 console.log("");
 _sessMock.sendUserMessage = _realSendAll;
 testTimings.push({ name: curTest, ms: Date.now() - curTestStart });

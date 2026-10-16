@@ -1,5 +1,6 @@
 const { listSkills, installSkill, removeSkill } = require('../skills/skills-manager');
 const { loadServers, addServer, parseMcpAddArgs, removeServer, listServers, toggleServer, seedDefaults } = require('../mcp/mcp-manager');
+const { CONNECTOR_PRESETS } = require('../mcp/connector-presets');
 const sessionStore = require('./session-store');
 
 // Quote-aware CLI tokenizer for slash commands, so paths with spaces survive:
@@ -124,8 +125,9 @@ function mcpHelp() {
     'Example (claude-compatible): /mcp add stm32 -- "C:\\stm32-mcp\\.venv\\Scripts\\python.exe" -m stm32_mcp.server',
     'Example with env: /mcp add -e BRAVE_API_KEY=x brave-search -- npx -y @modelcontextprotocol/server-brave-search',
     'From the shell (same syntax): loom add mcp [-e KEY=V] <name> [--] <command> [args...]',
+    'Connectors from the shell: loom add connector <preset> [-e KEY=V]...  (or the same one-liner form)',
     'The "--" separator is optional; quote any path with spaces. Env keys are usable as $KEY in args.',
-    'In the /mcp and /connectors browsers, press A to add with the same one-liner syntax.',
+    'In the /mcp and /connectors browsers, press A (or Enter on the "+ Add" row) to add with the same one-liner syntax.',
   ].join('\n');
 }
 
@@ -170,6 +172,89 @@ function mcpAddLineCmd(line) {
   if (argv[0] === 'add') argv = argv.slice(1);
   else if (argv[0] === 'mcp' && argv[1] === 'add') argv = argv.slice(2);
   return addServerFromArgv(argv);
+}
+
+function connectorUsage() {
+  return [
+    'Usage: /connectors add <preset> [-e KEY=V]...   (presets: ' + CONNECTOR_PRESETS.map(p => p.id).join(', ') + ')',
+    '   or: /connectors add [-e KEY=V] <name> [--] <command> [args...]',
+    'Example: /connectors add supabase -e SUPABASE_ACCESS_TOKEN=xxx',
+  ].join('\n');
+}
+
+// /connectors add + `loom add connector` — preset-aware one-line add. A bare
+// preset name expands to the full one-liner (env from -e flags anywhere, any
+// leftover tokens appended as trailing args, e.g. --project-ref X); anything
+// else falls through to the generic mcp one-liner. A connector IS an MCP
+// server — only the wording differs. A missing required key is an error, not
+// a silently broken server.
+function connectorAddFromArgv(argvIn) {
+  let argv = argvIn.slice();
+  if (argv[0] === 'add') argv = argv.slice(1);
+  else if ((argv[0] === 'connector' || argv[0] === 'connectors') && argv[1] === 'add') argv = argv.slice(2);
+  else if (argv[0] === 'connector' || argv[0] === 'connectors') argv = argv.slice(1);
+  if (!argv.length) return connectorUsage();
+
+  // Collect -e/--env KEY=V pairs from the front while looking for a name.
+  const env = /** @type {Record<string, string>} */ ({});
+  let i = 0;
+  while (i + 1 < argv.length && (argv[i] === '-e' || argv[i] === '--env')) {
+    const kv = String(argv[i + 1]);
+    const eq = kv.indexOf('=');
+    if (eq > 0) env[kv.slice(0, eq)] = kv.slice(eq + 1);
+    i += 2;
+  }
+  const name = i < argv.length ? String(argv[i]) : '';
+  // Explicit "--" means the user wrote a full custom one-liner — never expand.
+  const preset = argv.indexOf('--') === -1 ? CONNECTOR_PRESETS.find(p => p.id === name) : undefined;
+  if (!preset) {
+    const msg = addServerFromArgv(argv);
+    return typeof msg === 'string' ? msg.replace('Added MCP server', 'Added connector') : msg;
+  }
+
+  // Preset form: env flags anywhere, leftover tokens appended as extra args.
+  const extras = /** @type {string[]} */ ([]);
+  for (let j = i + 1; j < argv.length; j++) {
+    const a = argv[j];
+    if ((a === '-e' || a === '--env') && j + 1 < argv.length) {
+      const kv = String(argv[j + 1]);
+      const eq = kv.indexOf('=');
+      if (eq > 0) env[kv.slice(0, eq)] = kv.slice(eq + 1);
+      j++;
+      continue;
+    }
+    extras.push(String(a));
+  }
+  // Required keys = every prompt the guided TUI flow would ask for.
+  const missing = (preset.prompts || []).map(p => p.key).filter(k => !env[k]);
+  if (missing.length) {
+    const hints = (preset.prompts || [])
+      .filter(p => missing.indexOf(p.key) !== -1)
+      .map(p => '  -e ' + p.key + '=...    ' + p.label);
+    const firstKey = (preset.prompts.find(p => p.key === missing[0]) || { key: missing[0] }).key;
+    return 'Missing key for ' + preset.label + ':\n' + hints.join('\n') +
+      '\nExample: /connectors add ' + preset.id + ' -e ' + firstKey + '=...';
+  }
+  // Build the claude-style one-liner argv and reuse the shared engine
+  // ($KEY resolution, npx wrapping, persistence).
+  const out = /** @type {string[]} */ ([]);
+  for (const k of Object.keys(env)) out.push('-e', k + '=' + env[k]);
+  out.push(preset.id, '--');
+  if (preset.command) out.push(preset.command, ...(preset.args || []));
+  else out.push('npx', '-y', String(preset.package), ...(preset.args || []));
+  for (const x of extras) out.push(x);
+  const msg = addServerFromArgv(out);
+  return typeof msg === 'string' ? msg.replace('Added MCP server', 'Added connector') : msg;
+}
+
+// argv-array flavor for /connectors add (App.tsx slash args).
+function connectorAddCmd(args) {
+  return connectorAddFromArgv(args);
+}
+
+// Single-raw-line flavor for `loom add connector` and the one-line add input.
+function connectorAddLineCmd(line) {
+  return connectorAddFromArgv(tokenizeCli(String(line || '').trim()));
 }
 
 function mcpRemoveCmd(args) {
@@ -365,6 +450,8 @@ module.exports = {
   listMcpText,
   mcpAddCmd,
   mcpAddLineCmd,
+  connectorAddCmd,
+  connectorAddLineCmd,
   mcpRemoveCmd,
   mcpToggleCmd,
   diffCmd,

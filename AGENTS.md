@@ -15,7 +15,7 @@
 
 Exactly: `bun run test` — must exit 0. It runs three stages:
 
-1. `bun run src/tui/test-interactive.tsx` — 71 keyboard-interaction tests of
+1. `bun run src/tui/test-interactive.tsx` — 72 keyboard-interaction tests of
    the OpenTUI interface (splash, slash popup, paste, busy-submit hold, caret
    editing, markdown rendering, permission popup, /budget, /skills, /mcp,
    /connectors, /sandbox wizard, keybind rebinds, welcome tips …).
