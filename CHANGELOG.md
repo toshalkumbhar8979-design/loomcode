@@ -24,6 +24,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `npm audit fix`) — fixes the DoS/recursion advisories.
 
 ### Added
+- **Full model-catalog refresh across every built-in provider (verified
+  2026-10-17).** NVIDIA rebuilt from the live authenticated
+  `GET /v1/models` registry (81 live endpoints, chat-capable IDs only —
+  embeddings/guard/parse/video models excluded): **54 models** including
+  Nemotron 3.5 Lightning/Super VL, DeepSeek V4.1 Flash, GLM-5.3/Flash,
+  Gemma 4, DiffusionGemma, Kimi K2.6, Step 5 Preview, Palmyra (creative/
+  fin/med), Riva Translate and GPT-OSS 20B; 14 stale IDs (Llama 3.1/3.2/3.3
+  instruct, Nemotron Super 49B, GLM-5.2, GPT-OSS 120B, MiniMax M3, …) removed.
+  Anthropic 3 → **14 models** (Opus 5.5/5/4.8/4.5, Fable 5.1, Sonnet
+  5.5/5/4.6/4.5, Haiku 5.5/4.5 + legacy dated snapshots). OpenAI 12 →
+  **31** (GPT-6 Astra/Sol/Luna, GPT-5.6/5.5/5.4 families incl. Pro and
+  Codex, o3/o4 legacy, GPT-4.1/4o). Google 7 → **15** (Gemini 4 Argon,
+  3.1 Pro Preview, 3.8→3.5 Flash lines, latest-aliases, Gemma 4 31B/26B
+  A4B). OpenRouter 11 → **42** curated live slugs (Claude 5.5, GPT-6/5.6,
+  Gemini 4/3.x, Kimi K3, Qwen3.5/Coder, GLM-5.3, Grok 4.7, Llama 4,
+  Mistral Large 4, plus verified `:free` tiers). Context windows and
+  $/1M prices cross-checked against models.dev and the OpenRouter public
+  catalog.
 - **Provider resilience — retries with backoff and honest error classes
   (`src/providers/anthropic.js`, `openai-compat.js`).** Anthropic requests
   retry 429/529/5xx up to 4 tries with jitter, honoring `Retry-After`;
