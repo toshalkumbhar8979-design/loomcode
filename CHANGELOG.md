@@ -6,6 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.1] — 2026-10-17
+
+### Fixed
+- **Hanging models can no longer freeze a turn.** NVIDIA NIM deployments for
+  models the account cannot use (or overloaded endpoints) accept the request
+  and then stream *nothing* — measured: 200 OK after ~83s, zero chunks after.
+  The OpenAI-compatible provider now bounds this at three layers: the SDK
+  client runs with `maxRetries: 0` (its default 2 retries stacked on top of
+  Loom's own backoff, multiplying a dead endpoint's wait up to hours), a
+  first-token watchdog (90s) plus a mid-response idle watchdog (120s) guard
+  the stream, and non-stream chat gets a hard 300s cap. Watchdog/timeout
+  errors are marked `permanent`, so the session loop no longer retries them
+  — it auto-switches to a different recent model once (surfacing the switch
+  via the existing `onModelSwitch` path with reason `timeout`) and otherwise
+  returns a clear, actionable error instead of hanging the UI.
+
 ## [1.6.0] — 2026-10-17
 
 ### Added
