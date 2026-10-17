@@ -6,6 +6,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — completion harness, specialist agents, headless browser, TUI refresh
 
+### Changed
+- **Token optimization — prompt caching, cache-accurate pricing, and leaner
+  context (7 changes across the request path):**
+  - **OpenRouter/TokenRouter prompt caching:** the request body now sends
+    top-level `"cache_control": true`, so cache-capable models re-read the
+    cached prefix instead of re-paying full input cost each turn.
+  - **Cache-aware usage accounting + pricing:** `recordUsage` parses
+    `prompt_tokens_details.cached_tokens` / `cache_read_input_tokens` /
+    `cache_creation_input_tokens` / `cachedContentTokenCount` and prices
+    cached reads at **0.1×** and writes at **1.25×** the input rate instead
+    of the full rate. OpenAI/OpenRouter's cached count is treated as a
+    *subset* of the prompt total; Anthropic's is additive. Adds
+    `cacheReadTokens` / `cacheWriteTokens` session counters.
+  - **Cache-stable system prompt:** the per-turn skill block moved out of the
+    system string (injected into the last user message of a wire copy
+    instead), so the system prefix stays byte-identical across turns and
+    Anthropic's cache breakpoint keeps hitting even when the matched skill
+    changes.
+  - **Mode-specific system prompts:** chat and plan modes drop the skills
+    index, the todowrite mandate, and the tool-batching/behavior rules they
+    can't act on, cutting thousands of tokens per turn for tool-less modes.
+  - **Tool-result aging:** tool results older than the last 12 messages are
+    elided to a 2000/400 head/tail slice before they reach the provider
+    (kept verbatim in memory for the TUI), so a huge `read`/`grep` output
+    stops costing full input price every later call.
+  - **Slimmer tool schemas:** `mcp`, `task`, and `sandbox` descriptions
+    trimmed (package catalogs and per-agent rosters removed) — these ship in
+    every request's tool list.
+  - **Accurate `estimateTokens` / `/context`:** the estimate now includes the
+    per-turn agent/primary/sandbox/skill blocks and tool schemas, and the
+    `/context` command gained a `Schemas+turn` line so its total matches the
+    live window estimate.
+
 ### Security
 - **All dependency advisories cleared — `npm audit` reports 0
   vulnerabilities** (was 7: 4 critical, 1 high, 2 low):

@@ -52,7 +52,7 @@ function formatTools(tools) {
   }));
 }
 
-function buildRequest(messages, options) {
+function buildRequest(messages, options, providerId) {
   const body = {
     model: options.model,
     messages: formatMessages(messages, options),
@@ -60,6 +60,12 @@ function buildRequest(messages, options) {
     max_tokens: options.maxTokens || 8192,
     temperature: options.temperature ?? 0.7,
   };
+  // OpenRouter/TokenRouter prompt caching: top-level "cache_control" true
+  // (auto-detects prefix-cache-capable models, ignores it otherwise). Cuts
+  // input cost on cache hits (~10% of full price) after the first turn.
+  if (providerId === 'openrouter' || providerId === 'tokenrouter') {
+    body.cache_control = true;
+  }
   // Reasoning models (o1/o3/o4/gpt-5, tagged 'reasoning' by the session):
   // push the effort to "high" so the model reasons deeply on every step —
   // opencode-style multi-pass thinking. Other reasoning families (DeepSeek
@@ -220,7 +226,7 @@ function createOpenAICompatProvider({ getKey, providerId, envKeyHint, clientFact
 
   async function chat(messages, options = {}) {
     const client = getClient();
-    const req = buildRequest(messages, options);
+    const req = buildRequest(messages, options, providerId);
     const requestOpts = { signal: options.signal };
     try {
       const resp = await retryWithBackoff(() => client.chat.completions.create(req, requestOpts), 4, envKeyHint);
@@ -233,7 +239,7 @@ function createOpenAICompatProvider({ getKey, providerId, envKeyHint, clientFact
 
   async function stream(messages, options = {}, onDelta, onReasoning) {
     const client = getClient();
-    const req = { ...buildRequest(messages, options), stream: true, stream_options: { include_usage: true } };
+    const req = { ...buildRequest(messages, options, providerId), stream: true, stream_options: { include_usage: true } };
     const requestOpts = { signal: options.signal };
     try {
       const s = await retryWithBackoff(() => client.chat.completions.create(req, requestOpts), 4, envKeyHint);

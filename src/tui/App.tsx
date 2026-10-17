@@ -704,13 +704,14 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
       case "context": {
         const msgs = getSession().messages || [];
         const est = (s: any) => Math.ceil(String(s == null ? "" : (typeof s === "object" ? JSON.stringify(s) : s)).length / 4);
-        let sys = 0, user = 0, asst = 0, tool = 0;
+        let sys = 0, user = 0, asst = 0, tool = 0, schemas = 0;
         try { sys += est(getSession().systemPrompt); } catch {}
+        try { schemas += est(getSession()._agentBlock) + est(getSession()._resolvedPrimary) + est(getSession()._resolvedSandbox) + Math.ceil((getSession()._toolSchemaChars || 0) / 4); } catch {}
         for (const m of msgs) {
           const t = est(m.content) + est(m.toolCalls);
           if (m.role === "user") user += t; else if (m.role === "assistant") asst += t; else if (m.role === "tool") tool += t; else sys += t;
         }
-        const total = sys + user + asst + tool;
+        const total = sys + user + asst + tool + schemas;
         // Live window estimate from the session (messages + system + tool
         // schemas) — the percent is recomputed now, not a startup snapshot.
         let winLine = "";
@@ -724,6 +725,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
           "User messages: " + user,
           "Assistant:     " + asst,
           "Tool results:  " + tool,
+          "Schemas+turn:  " + schemas,
           "TOTAL:         " + total + "  (" + msgs.length + " messages)",
           winLine,
           "", "Tip: /compact frees context when this grows large.",

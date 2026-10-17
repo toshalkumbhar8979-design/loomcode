@@ -39,6 +39,11 @@ afterAll(() => {
 function freshSession() {
   const s = new Session();
   s.config = { ...s.config, budgetLevel: "auto", apiKeys: {}, skillDisabled: [] };
+  // estimateTokens counts the cached per-turn blocks; stub them to zero so
+  // tests that assert an exact total only have to reason about messages +
+  // systemPrompt + _toolSchemaChars.
+  s._resolvedPrimary = "";
+  s._resolvedSandbox = "";
   return s;
 }
 

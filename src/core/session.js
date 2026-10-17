@@ -112,6 +112,8 @@ class Session {
     this.tokensUsed = 0;
     this.tokensIn = 0;
     this.tokensOut = 0;
+    this.cacheReadTokens = 0;
+    this.cacheWriteTokens = 0;
     this.sessionCost = 0;
     this.permissions = new PermissionManager();
     // OpenCode-style permission tree (config.permission + config.agent.<id>.permission).
@@ -237,6 +239,7 @@ class Session {
     const plat = require('./platform').detect();
     const shell = plat.platform === 'win32' ? 'PowerShell 5.1' : 'bash/zsh';
     const hasWSL = plat.isWSL ? ' (WSL)' : '';
+    const hasTools = this.mode === 'build' || this.mode === 'plan';
     return `You are Loom, a terminal coding agent: fast, terse, action-first.
 
 ## Environment
@@ -247,38 +250,39 @@ class Session {
 
 ## Memory (from LOOM.md)
 ${memory}
-
+${hasTools ? `
 When the user states a durable preference, correction, or project fact ("we use bun", "never touch X", "deploy via Y"), persist it yourself: append ONE dated bullet under the "## Remembered" heading of ./LOOM.md using the edit tool (create the heading if missing). Keep it terse; don't ask permission for obvious preferences. Don't store secrets or one-off task details.
-
+` : ''}${this.mode === 'build' ? `
 ## Skills
 ${this.loadSkills()}
-
+` : ''}
 ## Behavior
 - Decide before acting: if the answer needs no external data, reply directly with ZERO tool calls. Simple or conversational questions are answered in one message, nothing runs.
-- When tools ARE needed, act first and batch independent calls (e.g., read a file, grep a symbol, glob files at once). Never call tools speculatively or one at a time when they can be batched.
+${hasTools ? `- When tools ARE needed, act first and batch independent calls (e.g., read a file, grep a symbol, glob files at once). Never call tools speculatively or one at a time when they can be batched.
 - Never call a time/date tool or a sequential-thinking tool — today's date is already in Environment, and you never need to "think" via a tool.
 - Extended thinking is ON when your model supports it: reason BEFORE you act and re-evaluate AFTER every tool result. For complex or multi-step tasks, think hard at each stage (plan → act → check) instead of rushing to the answer — this is what separates a good result from a guessed one.
-- Be terse in the final reply: say what changed and nothing else.
+` : ''}- Be terse in the final reply: say what changed and nothing else.
 - Never narrate ("I will now read the file…"). Just call the tool.
-- Prefer edits over full-file writes when the change is small.
+${this.mode === 'build' ? `- Prefer edits over full-file writes when the change is small.
 - After writing code, run any test/bench command the user has relied on if one exists.
-
+` : ''}
 ## Formatting
 - ALWAYS reply in Markdown. The terminal renders it with colors, so make every reply structured and readable:
 - Use **bold** for key terms and important results, \`inline code\` for file paths, symbols and commands, and fenced \`\`\` blocks for any code or config.
 - Use ## headings and - bullet lists to organize longer replies; keep code inside fenced blocks, never inline dumps.
 - Even one-line answers should still use markdown inline styling where it helps (e.g. "Done — **rewrote** \`src/app.ts\`: \`+12 -4\` lines, tests **pass**.").
 - Never reply with a wall of plain unstyled text — the user's UI highlights markdown, and raw text renders as a single flat color.
-- Multi-step work MUST be tracked with the todowrite tool (the UI mirrors it live in a sidebar and in the chat): call it up front with the task list, update item statuses (pending/in_progress/completed/cancelled) as you work, and call it one last time when done. Keep the list items terse ("Fix signup bug", not prose).
-
+${this.mode === 'build' ? `- Multi-step work MUST be tracked with the todowrite tool (the UI mirrors it live in a sidebar and in the chat): call it up front with the task list, update item statuses (pending/in_progress/completed/cancelled) as you work, and call it one last time when done. Keep the list items terse ("Fix signup bug", not prose).
+` : ''}
 ## Hard rules
-- Batch independent tool calls into a single response; never send one tool call at a time.
+${hasTools ? `- Batch independent tool calls into a single response; never send one tool call at a time.
 - You may only issue multiple tool calls if none of them depends on another's result.
 - Never guess a tool result — read it before your next call.
-- Never commit/push without explicit instruction. Never print API keys.
-- When a tool FAILS, do not retry the same call with the same arguments. After the first failure, change the approach: e.g. use read/grep to understand the state before trying an edit again, run a simpler variant of the command, or ask the user for the missing input (API key, path, permission). Three same-goal failures == stop and escalate: say what failed and suggest the fix instead of looping.
-- For long outputs (links, large files), stream whatever the tool gave you in one message — do not emit partial/truncated responses piecemeal.
-
+` : ''}- Never commit/push without explicit instruction. Never print API keys.
+${hasTools ? `- When a tool FAILS, do not retry the same call with the same arguments. After the first failure, change the approach: e.g. use read/grep to understand the state before trying an edit again, run a simpler variant of the command, or ask the user for the missing input (API key, path, permission). Three same-goal failures == stop and escalate: say what failed and suggest the fix instead of looping.
+` : ''}
+${this.mode === 'plan' ? `- For long outputs (links, large files), stream whatever the tool gave you in one message — do not emit partial/truncated responses piecemeal.
+` : ''}
 ## Mode
 You are in ${this.mode === 'build' ? 'BUILD MODE (full agent)' : this.mode === 'plan' ? 'PLAN MODE (read-only analysis)' : 'CHAT MODE (conversation only)'}.
 ${this.mode === 'build' ? `- You have all tools available: read, write, edit, bash, glob, grep, webfetch, and MCP tools.
@@ -357,12 +361,51 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
       if (!skills.length) return '(No skills installed. Run /skills to see options.)';
       // Compact index only — full instructions are injected per-turn by the
       // skill matcher when the user's message matches a skill's keywords.
+      // Descriptions are capped so one verbose skill can't bloat the system
+      // prompt (and its cache prefix) on every turn.
       return skills
-        .map((s) => `- ${s.name} (${s.source}): ${s.description || 'no description'}`)
+        .map((s) => {
+          let d = s.description || 'no description';
+          if (d.length > 80) d = d.slice(0, 77).trimEnd() + '…';
+          return `- ${s.name}: ${d}`;
+        })
         .join('\n');
     } catch (e) {
       return '(Skills unavailable: ' + e.message + ')';
     }
+  }
+
+  // Cache-stable system prompt: the per-turn skill block is the ONLY part of
+  // the system prefix that changes between turns. Keeping it out of the system
+  // string (injected into the last user message instead) means Anthropic's
+  // system-prompt cache_control breakpoint stays byte-identical across turns
+  // even when a different skill matches, so cache reads keep hitting.
+  // Resolves the lazy primary/sandbox blocks once and caches them on
+  // _resolvedPrimary/_resolvedSandbox so estimateTokens sees the same strings
+  // that go out on the request.
+  _systemPrefix() {
+    this._resolvedPrimary = this._primaryBlock();
+    this._resolvedSandbox = this._sandboxBlock();
+    return this.systemPrompt + (this._agentBlock || '') + this._resolvedPrimary + this._resolvedSandbox;
+  }
+
+  // Older tool results are elided to a head+tail slice before they reach the
+  // provider. Kept in-memory verbatim for the TUI; only the payload shrinks.
+  // Keep the most recent TOOL_RESULT_RECENT messages untouched so the cache
+  // prefix and the model's working set stay stable.
+  ageHistory(messages) {
+    const AGE_HEAD = 2000, AGE_TAIL = 400, RECENT = 12;
+    if (!messages || messages.length <= RECENT) return messages;
+    const cutoff = messages.length - RECENT;
+    return messages.map((m, i) => {
+      if (i >= cutoff || m.role !== 'tool') return m;
+      const text = typeof m.content === 'string' ? m.content : (m.content == null ? '' : JSON.stringify(m.content));
+      if (text.length <= AGE_HEAD + AGE_TAIL + 60) return m;
+      return Object.assign({}, m, {
+        content: text.slice(0, AGE_HEAD) + '\n[…older tool result elided — re-read the file if still needed…]\n' + text.slice(-AGE_TAIL),
+        _aged: true,
+      });
+    });
   }
 
   interrupt() {
@@ -526,6 +569,13 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
     }
     chars += String(this.systemPrompt || '').length;
     chars += this._toolSchemaChars || 0;
+    // Per-turn system-prompt suffixes (agent/primary/sandbox) + the skill
+    // block ride on top of this.systemPrompt — include them or the estimate
+    // under-counts exactly the parts that grow the request.
+    chars += (this._agentBlock || '').length;
+    chars += (this._resolvedPrimary || '').length;
+    chars += (this._resolvedSandbox || '').length;
+    chars += (this._skillBlock || '').length;
     return Math.ceil(chars / 4);
   }
 
@@ -1090,7 +1140,7 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
       maxTokens: this.config.maxTokens || 8192,
       temperature: this.config.temperature ?? 0.7,
       tools: toolDefs,
-      system: this.systemPrompt + (this._skillBlock || '') + (this._agentBlock || '') + this._primaryBlock() + this._sandboxBlock(),
+      system: this._systemPrefix(),
       signal: this.abortController?.signal,
       // Extended thinking: models tagged 'reasoning' reason BEFORE every
       // reply — including after each tool result — so complex tasks get
@@ -1109,11 +1159,28 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
     this.abortController = new AbortController();
     opts.signal = this.abortController.signal;
 
+    // Inject the per-turn skill block into the LAST user message of a wire
+    // copy (never this.messages) — keeps the system prompt byte-stable for
+    // prompt caching while still steering this one turn. Then age older tool
+    // results so a huge read/grep output from 20 turns ago stops costing
+    // full input price on every later call.
+    let wire = this.messages;
+    if (this._skillBlock) {
+      wire = wire.slice();
+      for (let i = wire.length - 1; i >= 0; i--) {
+        if (wire[i].role === 'user') {
+          wire[i] = Object.assign({}, wire[i], { content: String(wire[i].content || '') + this._skillBlock });
+          break;
+        }
+      }
+    }
+    wire = this.ageHistory(wire);
+
     let resp;
     if (callbacks.onDelta || callbacks.onReasoning) {
-      resp = await provider.stream(this.messages, opts, callbacks.onDelta, callbacks.onReasoning);
+      resp = await provider.stream(wire, opts, callbacks.onDelta, callbacks.onReasoning);
     } else {
-      resp = await provider.chat(this.messages, opts);
+      resp = await provider.chat(wire, opts);
     }
 
     if (this.interrupted || (opts.signal && opts.signal.aborted)) {
@@ -1131,22 +1198,41 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
 
   // Normalize provider usage (OpenAI: prompt_tokens/completion_tokens, Anthropic: input_tokens/output_tokens)
   // into input/output counts, then add them to the session counters and the persistent lifetime tracker.
+  // Prompt-cache hits/writes are priced at ~0.1x/~1.25x the input rate (Anthropic's
+  // published cache rates; OpenAI/OpenRouter use the same 0.1x read discount).
+  // Anthropic's input_tokens EXCLUDES cached tokens (they arrive as separate
+  // cache_read_input_tokens/cache_creation_input_tokens); OpenAI/OpenRouter's
+  // prompt_tokens_details.cached_tokens is a SUBSET of prompt_tokens.
   recordUsage(usage, modelId, providerName) {
     if (!usage) return;
-    const input = usage.prompt_tokens || usage.input_tokens || usage.promptTokenCount || 0;
+    const rawIn = usage.prompt_tokens || usage.input_tokens || usage.promptTokenCount || 0;
     const output = usage.completion_tokens || usage.output_tokens || usage.candidatesTokenCount || 0;
+    const cacheRead = usage.cache_read_input_tokens
+      || usage.prompt_tokens_details?.cached_tokens
+      || usage.cachedContentTokenCount
+      || 0;
+    const cacheWrite = usage.cache_creation_input_tokens || 0;
+    // Anthropic input excludes cache tokens; OpenAI input includes the cached subset.
+    const input = providerName === 'anthropic' ? rawIn + cacheRead + cacheWrite : rawIn;
+    const uncachedIn = providerName === 'anthropic' ? rawIn : Math.max(0, rawIn - cacheRead - cacheWrite);
     const total = usage.total_tokens || usage.totalTokens || (input + output);
     if (!input && !output && !total) return;
 
     this.tokensIn += input;
     this.tokensOut += output;
     this.tokensUsed += total;
+    this.cacheReadTokens = (this.cacheReadTokens || 0) + cacheRead;
+    this.cacheWriteTokens = (this.cacheWriteTokens || 0) + cacheWrite;
 
     const { getModelMeta } = require('../providers');
     const meta = getModelMeta(providerName, modelId);
     let cost = 0;
     if (meta && (meta.priceIn || meta.priceOut)) {
-      cost = (input / 1e6) * (meta.priceIn || 0) + (output / 1e6) * (meta.priceOut || 0);
+      const priceIn = meta.priceIn || 0;
+      cost = (uncachedIn / 1e6) * priceIn
+        + (cacheRead / 1e6) * priceIn * 0.1
+        + (cacheWrite / 1e6) * priceIn * 1.25
+        + (output / 1e6) * (meta.priceOut || 0);
       this.sessionCost += cost;
     }
     const { recordUsage: persist } = require('./usage');
@@ -1186,6 +1272,8 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
     this.tokensUsed = 0;
     this.tokensIn = 0;
     this.tokensOut = 0;
+    this.cacheReadTokens = 0;
+    this.cacheWriteTokens = 0;
     this.sessionCost = 0;
     this.todos = [];
     this.compactCount = 0;

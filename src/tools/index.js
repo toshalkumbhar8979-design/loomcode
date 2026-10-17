@@ -355,7 +355,7 @@ const TOOLS = {
   },
   sandbox: {
     name: 'sandbox',
-    description: 'Run a shell command INSIDE the Docker sandbox via `docker exec loom-sandbox sh -lc "<command>"` (isolated Linux container, project mounted at /workspace). Use when isolation is needed: the user asked for the sandbox, the command is risky (installs, deletions, untrusted scripts), or a Linux-only environment is required. Equivalent to bash with sandbox:true. One command per call; the container idles in the background between calls.',
+    description: 'Run a shell command INSIDE the Docker sandbox via `docker exec loom-sandbox sh -lc "<command>"` (isolated Linux container, project at /workspace). Use when the user asked for the sandbox, the command is risky (installs, deletions, untrusted scripts), or a Linux-only environment is needed. Equivalent to bash with sandbox:true. One command per call.',
     parameters: {
       command: { type: 'string', required: true, description: 'The Linux shell command to run inside the container' },
       workdir: { type: 'string', required: false, description: 'Working directory inside the container (host paths under the project map to /workspace/...)' },
@@ -610,7 +610,7 @@ const TOOLS = {
   },
   task: {
     name: 'task',
-    description: 'Delegate a self-contained subtask to a subagent that runs fully autonomously and returns its final answer. Use when a piece of work can run independently (parallelizable), needs a focused toolset, or benefits from a different model. Agents: general (full toolset, default), explore (fast read-only code search), scout (quick docs lookups), research (deep multi-source investigation with a sourced report), coder (isolated implementation packages), reviewer (severity-ranked code review), tester (write/run tests until green), web (headless-browser work on live pages). Pick the smallest suitable agent. Pass a COMPLETE, self-contained instruction: the goal, relevant file paths, and exactly what to return. The subagent may run tools autonomously; fold its findings into your own answer afterwards.',
+    description: 'Delegate a self-contained subtask to a subagent that runs fully autonomously and returns its final answer. Use when a piece of work can run independently (parallelizable), needs a focused toolset, or benefits from a different model. Pick the smallest suitable agent (see the agent param). Pass a COMPLETE, self-contained instruction: the goal, relevant file paths, and exactly what to return. The subagent may run tools autonomously; fold its findings into your own answer afterwards.',
     parameters: {
       prompt: { type: 'string', required: true, description: 'Complete instructions for the subagent — goal, relevant file paths, and the exact output to return' },
       agent: { type: 'string', required: false, description: 'Subagent id: general (default), explore, scout, or a custom one from config.agents' },
@@ -650,7 +650,7 @@ const TOOLS = {
   },
   mcp: {
     name: 'mcp',
-    description: 'Manage MCP (tool) servers for this workspace. Use when the user asks to add/remove/enable/disable an MCP server or connector (e.g. github, filesystem, gmail) or when a task requires tools the session does not have yet. In the TUI, hosting/cloud services (supabase, vercel, nextjs, railway, netlify, cloudflare) live under /connectors; dev-tool MCP servers (playwright, github, sentry, figma, postgres, mongodb, linear, slack, brave-search, exa, context7, filesystem, sqlite, puppeteer) live under /mcp. Common packages: Playwright=@playwright/mcp, Sentry=@sentry/mcp-server (needs --access-token TOKEN), Figma=figma-developer-mcp (env FIGMA_API_KEY), Postgres=@modelcontextprotocol/server-postgres (env DATABASE_URL), MongoDB=mongodb-mcp-server (env MONGODB_CONNECTION_STRING), Linear=linear-mcp-server (env LINEAR_API_KEY), Slack=@modelcontextprotocol/server-slack (env SLACK_BOT_TOKEN + SLACK_TEAM_ID), Brave=@modelcontextprotocol/server-brave-search (env BRAVE_API_KEY), Exa=exa-mcp-server (env EXA_API_KEY), Context7=@upstash/context7-mcp, Vercel=vercel-mcp-server (env VERCEL_TOKEN), Railway=@railway/mcp-server (env RAILWAY_API_TOKEN), Netlify=netlify-mcp-server (env NETLIFY_AUTH_TOKEN), Cloudflare=@cloudflare/mcp-server-cloudflare (env CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID), Supabase=@supabase/mcp-server-supabase (needs --access-token TOKEN), GitHub=ghcr.io/github/github-mcp-server (docker). If unsure about an MCP package, verify it exists first with webfetch (e.g. https://registry.npmjs.org/<pkg>) or web search (fetch or bash curl) — never trust an unverified npm package.',
+    description: 'Manage MCP (tool) servers for this workspace: list, add, remove, enable, disable. Use when the user asks to add a connector or when a task needs tools the session lacks yet (a DB, a browser, a ticketing system). Adding a server needs a stdio command (e.g. "npx -y <pkg>"); it stays disabled until enabled. If unsure a package exists, verify it with webfetch on the registry before installing — never run an unverified npm package.',
     parameters: {
       action: { type: 'string', required: true, description: '"list" | "add" | "remove" | "enable" | "disable"' },
       name: { type: 'string', required: false, description: 'MCP server name, letters/digits/-/_ (e.g. supabase)' },
