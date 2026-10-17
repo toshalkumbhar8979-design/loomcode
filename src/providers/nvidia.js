@@ -13,6 +13,15 @@ function getKey() {
 // deepseek-ai/deepseek-v4-flash-0731, z-ai/glm-5.2, openai/gpt-oss-120b —
 // return 404/410 and were removed. Re-verify against /v1/models before
 // adding any ID.
+//
+// NOTE (probed 2026-10-17): GET /v1/models is the GLOBAL catalog — a chat
+// POST can still fail with `Function '<id>': Not found for account '<key>'`,
+// i.e. the model exists but the key's account hasn't enabled it. On one
+// sample key only 9/54 of these IDs answered a chat call (37 account-gated
+// 404s, ~6 hang to timeout, 2 return 503 capacity errors), so the picker
+// may offer models that 404 for a given account. Availability is
+// per-account, so the full curated list stays; NVIDIA's own errors carry
+// the account hint.
 const provider = {
   ...createOpenAICompatProvider({
     getKey,

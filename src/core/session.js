@@ -696,7 +696,16 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
           if (!speed._firstTokenAt) speed._firstTokenAt = now;
           if (callbacks.onDelta) callbacks.onDelta(txt);
         }, onReasoning: (txt) => {
+          const now = Date.now();
           reasoning += txt;
+          // Thinking tokens are still model output: count them toward the
+          // live gauge so first-token latency ticks from the first THINKING
+          // token. Otherwise the sidebar reads "waiting…" for the entire
+          // thinking phase (measured: ~7s to first thinking delta, then +16s
+          // of thought before any visible text on nemotron-3-super) and the
+          // response looks hung while the model is actually working.
+          speed._liveTokens += txt.length / 4;
+          if (!speed._firstTokenAt) speed._firstTokenAt = now;
           if (callbacks.onReasoning) callbacks.onReasoning(txt);
         } }
       : callbacks;
@@ -838,7 +847,7 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
       // Finalize the speed snapshot for this model call (or tool step).
       if (resp && !resp.interrupted) {
         const dur = Date.now() - speed._turnStart;
-        const tokens = (streamed.length || String(resp.content || '').length) / 4;
+        const tokens = ((streamed + reasoning).length || String(resp.content || '').length) / 4;
         speed.lastDurationMs = dur;
         speed.lastTokens = Math.round(tokens);
         speed.lastTokensPerSec = dur > 0 ? Math.round((tokens / dur) * 1000) : 0;

@@ -704,6 +704,28 @@ test("contextEstimate: tokens/window/pct reflect the live conversation", () => {
   expect(ce.pct).toBe(Math.min(100, Math.round((ce.tokens / ce.window) * 100)));
 });
 
+test("speed telemetry: thinking tokens count as first token and in totals", async () => {
+  const s = freshSession();
+  s.getResponse = async (cbs) => {
+    if (cbs && cbs.onReasoning) cbs.onReasoning("y".repeat(400)); // ~100 tok of thought
+    await new Promise((r) => setTimeout(r, 250));
+    if (cbs && cbs.onDelta) cbs.onDelta("answer");
+    return { content: "answer" };
+  };
+  // The telemetry wrapper only activates when a callback is present (the TUI
+  // always passes onDelta).
+  await s.runTurn({ onDelta: () => {} });
+  const sp = s.getSpeed();
+  // First-token latency must land on the THINKING token (t≈0), not on the
+  // content that streams 250ms later — otherwise the sidebar reads
+  // "waiting…" through the whole thinking phase of a reasoning model.
+  expect(sp.last.latencyMs).not.toBeNull();
+  expect(sp.last.latencyMs).toBeLessThan(150);
+  expect(sp.last.durationMs).toBeGreaterThanOrEqual(240);
+  // Finalized token count includes the reasoning tokens (400 chars ≈ 100).
+  expect(sp.last.tokens).toBeGreaterThanOrEqual(100);
+});
+
 test("runTurn: failed tool outcomes are marked isError on the history row", async () => {
   const s = freshSession();
   let calls = 0;

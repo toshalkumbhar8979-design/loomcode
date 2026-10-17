@@ -65,6 +65,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     single `z-ai/glm-5.3-free`) verified live.
   - Usage/context tests now pin a deterministic model/window so future
     default-model changes can't shift their expectations.
+- **Speed telemetry now ticks during the thinking phase.** Reasoning deltas
+  count as first-token + generation tokens, so the sidebar latency gauge
+  starts when the model starts *thinking* instead of reading "waiting…"
+  through the entire thinking phase (measured on nemotron-3-super: ~7s to
+  the first thinking token, then +16s of thought before any visible text —
+  the response looked hung while the model was working). `last.latencyMs`
+  and `last.tokensPerSec` now reflect true time-to-first-model-output and
+  full generation throughput, including reasoning tokens. Regression test
+  in `session.test.js`.
+- **NVIDIA catalog note: `/v1/models` is not account availability.** The
+  endpoint lists NVIDIA's global catalog, but chat POSTs can return
+  `Function '…': Not found for account '…'` when the key's account hasn't
+  enabled that model (probed 2026-10-17: 9/54 curated IDs answered chat on
+  one key — 37 account-gated 404s, ~6 hung to timeout, 2 returned 503).
+  Availability is per-account, so the curated list stays; the caveat is
+  now documented in `nvidia.js`.
 
 ### Changed
 - **Orchestrator now delegates by default.** The build agent's standing
