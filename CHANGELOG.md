@@ -6,6 +6,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — completion harness, specialist agents, headless browser, TUI refresh
 
+### Added
+- **Transcript undo / redo (`/undo`, `/redo`, `/undo-files`).** The
+  conversation-level counterpart to `/restore` (which rewinds the *file
+  tree*): each user turn now pushes a full transcript snapshot — UI messages,
+  session messages, and todos — onto a bounded stack (last 50 turns). `/undo`
+  steps the transcript back one turn and `/redo` steps forward again. When the
+  undone turn also created a restore point, `/undo-files` rolls the *working
+  tree* back to that same point so files match the rewound conversation. The
+  engine (`src/core/transcript-undo.js`) is a pure, unit-tested stack that
+  snapshots-and-clones so later mutation can't corrupt stored state, clears
+  the redo branch on a new action (like any editor), and returns the step
+  *reference* so a restore-point id created in a background `setTimeout` can
+  be stitched onto it without relying on a fragile stack index. Wired into
+  `processSlash` and registered in `SLASH_LIST`; the existing `<leader>u` /
+  `<leader>r` keybinds now resolve to working commands instead of falling
+  through to "Unknown command". Undo/redo persist via the normal
+  `saveSession` path, so a rewind survives restart.
+- **Startup update check.** `updateCheck()` (previously a no-op stub) now
+  probes the npm registry once every 24 hours with a 4s timeout and, when a
+  strictly newer `loom-agent` is published, prints a single stderr notice
+  (`New version available: 1.5.0 → 1.6.0` + the upgrade command) before the
+  TUI starts. Non-blocking and failure-silent by design: offline, slow, or
+  malformed responses never delay startup, the throttle stamp lives in
+  `~/.loom/update-check.json`, and `LOOM_NO_UPDATE_CHECK=1` disables it
+  entirely. Version comparison is a small tuple compare (no new dependency).
+  Unit-tested (`update.test.js`, registered in `test:unit`).
+- **`/export` — transcript as markdown.** Writes the conversation (roles,
+  message text, tool rows, error flags) to `.loom/exports/<session>.md`, the
+  plain-text counterpart to `/share` (HTML). Bound to the existing
+  `<leader>x` keybind, which previously resolved to a slash command with no
+  handler.
+
 ### Changed
 - **Orchestrator now delegates by default.** The build agent's standing
   instructions were rewritten to make fan-out the first move on any broad

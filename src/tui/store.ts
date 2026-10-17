@@ -540,6 +540,10 @@ export const SLASH_LIST: SlashCmd[] = [
   { cmd: "vim", desc: "Toggle vim editing" },
   { cmd: "remember", desc: "Save a fact to LOOM.md", args: "<fact>" },
   { cmd: "compact", desc: "Summarize older messages to free context" },
+  { cmd: "undo", desc: "Undo the last exchange" },
+  { cmd: "redo", desc: "Redo the last undone exchange" },
+  { cmd: "undo-files", desc: "Rewind working tree to last undo point" },
+  { cmd: "export", desc: "Export chat as markdown" },
 ];
 
 // ─── TUI prefs ───

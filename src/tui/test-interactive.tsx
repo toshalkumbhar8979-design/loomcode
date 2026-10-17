@@ -2567,6 +2567,44 @@ console.assert(frame.includes("Missing key"), "FAIL: a missing-env add should er
 console.assert(!mcp54.loadServers().servers["cloudflare"], "FAIL: nothing should be persisted on missing keys");
 ok("connectors + Add row + preset one-liner");
 
+header("55: /undo, /redo, /export dispatch — never Unknown command");
+// The suite has submitted prompts, so the transcript-undo stack is non-empty:
+// /undo should rewind one exchange and toast, /redo should step forward again.
+setup.mockInput.typeText("/undo");
+await sleep(150);
+setup.mockInput.pressEnter();
+await sleep(300);
+const undoToast55 = toasts().map(t => String(t.text)).join("|");
+const undoChat55 = messages().map(m => String(m.content || "")).join("|");
+console.assert(undoToast55.includes("Nothing to undo") || undoChat55.includes("Undone"), "FAIL: /undo should toast Nothing to undo or append an Undone system line, got toast: " + undoToast55);
+console.assert(!undoToast55.includes("Unknown command"), "FAIL: /undo must not fall through to Unknown command");
+setup.mockInput.typeText("/redo");
+await sleep(150);
+setup.mockInput.pressEnter();
+await sleep(300);
+const redoToast55 = toasts().map(t => String(t.text)).join("|");
+const redoChat55 = messages().map(m => String(m.content || "")).join("|");
+console.assert(redoToast55.includes("Nothing to redo") || redoChat55.includes("Redone"), "FAIL: /redo should toast Nothing to redo or append a Redone system line, got toast: " + redoToast55);
+console.assert(!redoToast55.includes("Unknown command"), "FAIL: /redo must not fall through to Unknown command");
+// /export writes a markdown transcript and toasts its path.
+setup.mockInput.typeText("/export");
+await sleep(150);
+setup.mockInput.pressEnter();
+await sleep(300);
+const exportToast55 = toasts().map(t => String(t.text)).join("|");
+console.assert(exportToast55.includes("Exported:"), "FAIL: /export should toast the written path, got: " + exportToast55);
+const fs55 = require("fs"); const path55 = require("path");
+const exportDir55 = path55.join(process.cwd(), ".loom", "exports");
+const exported55 = fs55.existsSync(exportDir55)
+  ? fs55.readdirSync(exportDir55).filter((f: string) => f.endsWith(".md"))
+  : [];
+console.assert(exported55.length > 0, "FAIL: /export should write a .md under .loom/exports");
+if (exported55.length) {
+  const body55 = fs55.readFileSync(path55.join(exportDir55, exported55[0]), "utf8");
+  console.assert(body55.includes("# Loom Code session"), "FAIL: exported markdown should carry the title header");
+}
+ok("undo/redo/export dispatch + markdown file written");
+
 console.log("");
 _sessMock.sendUserMessage = _realSendAll;
 testTimings.push({ name: curTest, ms: Date.now() - curTestStart });

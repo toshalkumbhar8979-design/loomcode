@@ -63,6 +63,7 @@ import { loadConfig, saveConfig, getBaseUrl } from "../config/settings.js";
 import { loadAgents, resolveAgent } from "../core/agents.js";
 import { snapshotBefore, snapshotAfter, snapshotBashBefore, diffBashAfter, clearFileDiffs } from "../core/file-diffs.js";
 import { createRestorePoint, listRestorePoints, restoreTo } from "../core/restore.js";
+import { TranscriptUndo } from "../core/transcript-undo.js";
 import { PROVIDERS, PROVIDER_ORDER, PROVIDER_LABELS } from "../providers/index.js";
 import * as plugin from "../core/plugin-cmd.js";
 import * as sandbox from "../core/sandbox.js";
@@ -70,6 +71,13 @@ import { on } from "../core/events.js";
 import { listSkills } from "../skills/skills-manager.js";
 
 let _vimReg = ""; // vim NORMAL-mode paste register
+
+// Transcript undo/redo — one undoable step per user turn. The engine is pure
+// (src/core/transcript-undo.js); App owns the stacks and clones snapshots.
+const _undo = new TranscriptUndo(50);
+// Restore-point id created for the most recent turn, attached to the snapshot
+// pushed just before that turn so an undo can also roll the working tree back.
+let _lastRestoreId: string | null = null;
 
 const ui = palette("loom");
 
@@ -229,10 +237,28 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
   }
 
   function runPrompt(raw: string, shown: boolean, agentId?: string | null, userText?: string) {
+    // Undo checkpoint: capture the transcript as it is BEFORE this turn so
+    // /undo can step back to it. Done synchronously before any message is
+    // appended; the restore point is created in the background below and its
+    // id is stitched onto the snapshot so undo can also roll files back.
+    var preUi = messages().slice();
+    var preSess = getSession().messages.slice();
+    var preTodos = (getSession().todos || []).slice();
+    var preStep = _undo.push({ ui: preUi, session: preSess, todos: preTodos }, raw);
+
     if (!shown) appendMessage({ role: "user", content: raw });
     // Snapshot the project in the background so /restore always works, without
-    // stalling the first API call.
-    setTimeout(function() { try { createRestorePoint(raw); } catch {} }, 0);
+    // stalling the first API call. The created point's id is bound to the undo
+    // step just pushed, so an undo can rewind both transcript and files.
+    setTimeout(function() {
+      try {
+        var rp = createRestorePoint(raw);
+        if (rp && rp.id) {
+          _lastRestoreId = rp.id;
+          if (preStep) preStep.restoreId = rp.id;
+        }
+      } catch {}
+    }, 0);
     setThinking(true); setThinkStart(Date.now());
     var idx = messages().length;
     appendMessage({ role: "assistant", content: "", thinking: true, agentLabel: agentId || undefined });
@@ -807,6 +833,50 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
         } catch (e: any) { showToast("Share failed: " + String(e?.message || e), "error"); }
         return;
       }
+      case "export": {
+        // Markdown transcript export — the plain-text counterpart to /share
+        // (which writes HTML). One file per session under .loom/exports/.
+        try {
+          const fsx = require("fs"); const pathx = require("path");
+          const dir = pathx.join(process.cwd(), ".loom", "exports");
+          fsx.mkdirSync(dir, { recursive: true });
+          const lines: string[] = [];
+          lines.push("# Loom Code session");
+          lines.push("");
+          lines.push("- Date: " + new Date().toISOString().slice(0, 19).replace("T", " "));
+          lines.push("- Model: " + providerName() + " / " + modelName());
+          lines.push("- Messages: " + messages().length);
+          lines.push("");
+          for (const m of messages()) {
+            const who = m.role === "user" ? "User" : m.role === "assistant" ? "Assistant" : "System";
+            lines.push("## " + who);
+            lines.push("");
+            const text = String(m.content ?? "").trim();
+            if (text) { lines.push(text); lines.push(""); }
+            if (Array.isArray(m.parts)) {
+              for (const p of m.parts) {
+                if (p.type === "tool" && p.tool) {
+                  const t = p.tool;
+                  let row = "- tool `" + t.name + "` " + (t.status || "");
+                  const out = String(t.output || "").trim();
+                  if (out) row += ": " + out.replace(/\s+/g, " ").slice(0, 300);
+                  lines.push(row);
+                } else if (p.type === "text" && String(p.text || "").trim()) {
+                  lines.push(String(p.text).trim());
+                  lines.push("");
+                }
+              }
+            }
+            if (m.isError) lines.push("**(turn ended with an error)**", "");
+            lines.push("---");
+            lines.push("");
+          }
+          const f = pathx.join(dir, (sessionId() || "session") + ".md");
+          fsx.writeFileSync(f, lines.join("\n"));
+          showToast("Exported: " + f, "ok", 6000);
+        } catch (e: any) { showToast("Export failed: " + String(e?.message || e), "error"); }
+        return;
+      }
       case "worktree": {
         const name = String(args[0] || "").replace(/[^\w-]/g, "");
         if (!name) { showToast("Usage: /worktree <name>", "error"); return; }
@@ -1023,6 +1093,63 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
             clearFileDiffs();
           },
         });
+        return;
+      }
+      case "undo": {
+        // Step back one turn: restore the transcript captured before the last
+        // user turn, and (when that step has a restore point) offer to rewind
+        // the working tree too so files match the conversation.
+        if (!_undo.canUndo()) { showToast("Nothing to undo.", "info"); return; }
+        // Current state goes on the redo stack so the undo can be re-done.
+        var curSnap = {
+          ui: messages().slice(),
+          session: getSession().messages.slice(),
+          todos: (getSession().todos || []).slice(),
+          restoreId: _lastRestoreId || undefined,
+        };
+        var target = _undo.undo(curSnap);
+        if (!target) { showToast("Nothing to undo.", "info"); return; }
+        setMessages(target.ui || []);
+        getSession().messages = (target.session || []).slice();
+        getSession().todos = (target.todos || []).slice();
+        var undoLine = "Undone \u2014 transcript restored" + (target.label ? " to before: " + target.label.slice(0, 60) : "") + ".";
+        if (target.restoreId) {
+          _lastRestoreId = target.restoreId;
+          undoLine += "\nAlso rewind the working tree to match? Run /undo-files to restore files from the same point.";
+        }
+        appendMessage({ role: "system", content: undoLine });
+        try { saveSession(syncSessionForSave()); } catch {}
+        refreshUsage();
+        return;
+      }
+      case "redo": {
+        if (!_undo.canRedo()) { showToast("Nothing to redo.", "info"); return; }
+        var curSnap2 = {
+          ui: messages().slice(),
+          session: getSession().messages.slice(),
+          todos: (getSession().todos || []).slice(),
+          restoreId: _lastRestoreId || undefined,
+        };
+        var target2 = _undo.redo(curSnap2);
+        if (!target2) { showToast("Nothing to redo.", "info"); return; }
+        setMessages(target2.ui || []);
+        getSession().messages = (target2.session || []).slice();
+        getSession().todos = (target2.todos || []).slice();
+        if (target2.restoreId) _lastRestoreId = target2.restoreId;
+        appendMessage({ role: "system", content: "Redone \u2014 transcript restored" + (target2.label ? " to: " + target2.label.slice(0, 60) : "") + "." });
+        try { saveSession(syncSessionForSave()); } catch {}
+        refreshUsage();
+        return;
+      }
+      case "undo-files": {
+        // Roll the working tree back to the restore point bound to the most
+        // recent undo, so files match the rewound conversation.
+        if (!_lastRestoreId) { showToast("No file restore point bound to the last undo.", "error"); return; }
+        var rr = restoreTo(_lastRestoreId);
+        if (!rr.ok) { showToast("File restore failed: " + rr.error, "error"); return; }
+        appendMessage({ role: "system", content: "Working tree rewound \u2014 " + rr.restored.length + " files restored, " + rr.deleted.length + " removed." });
+        invalidateFilesCache();
+        clearFileDiffs();
         return;
       }
       case "usage": {

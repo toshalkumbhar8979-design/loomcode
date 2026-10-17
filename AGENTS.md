@@ -15,16 +15,17 @@
 
 Exactly: `bun run test` — must exit 0. It runs three stages:
 
-1. `bun run src/tui/test-interactive.tsx` — 72 keyboard-interaction tests of
+1. `bun run src/tui/test-interactive.tsx` — 73 keyboard-interaction tests of
    the OpenTUI interface (splash, slash popup, paste, busy-submit hold, caret
    editing, markdown rendering, permission popup, /budget, /skills, /mcp,
-   /connectors, /sandbox wizard, keybind rebinds, welcome tips …).
-   **Verify the `ALL 72 TESTS PASSED` line**: `src/tui-preload.js` records
+   /connectors, /sandbox wizard, keybind rebinds, welcome tips,
+   /undo /redo /export …).
+   **Verify the `ALL 73 TESTS PASSED` line**: `src/tui-preload.js` records
    `uncaughtException` into `~/.loom/tui-crash.log` instead of crashing, so an
    import-time error in the TUI layer can make this stage print nothing and
    still exit 0 (silent no-op). If the summary is missing, check that log.
 2. `bun run test:unit` — `bun test` over the core test files
-   (264 pass / 2 skip across 23 files). When you add a test file under `src/`,
+   (280 pass / 2 skip across 25 files). When you add a test file under `src/`,
    register it in the `test:unit` script in `package.json` or it will NOT run
    in CI.
 3. `bun run lint:core` — `tsc -p tsconfig.core.json`: strict typecheck of the
