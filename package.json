@@ -1,6 +1,6 @@
 {
   "name": "loom-agent",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/toshalkumbhar8979-design/loomcode.git"
@@ -9,7 +9,7 @@
   "bugs": {
     "url": "https://github.com/toshalkumbhar8979-design/loomcode/issues"
   },
-  "description": "Loom Code ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â AI-powered coding agent for the terminal. Multi-provider support including NVIDIA. OpenTUI interface.",
+  "description": "Loom Code - AI-powered coding agent for the terminal. Multi-provider support including NVIDIA. OpenTUI interface.",
   "main": "src/index.js",
   "publishConfig": {
     "access": "public",

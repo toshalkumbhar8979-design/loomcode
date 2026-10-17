@@ -62,6 +62,28 @@ npm install -g .
 npm link
 ```
 
+### Install notes (npm warnings)
+
+All of the following are **benign** — Loom runs on its own bundled Bun runtime;
+npm only checks install-time metadata against the Node you ran npm with.
+
+- **`EBADENGINE … @opentui/core … node >=26.4.0`** — the TUI framework's
+  engines field expects a very new Node; Loom executes it under the pinned
+  Bun binary shipped as an optional dependency. Not enforced (npm
+  `engine-strict` is off by default).
+- **`deprecated glob@9.3.5`** — a transitive copy inside `@opentui/solid`'s
+  babel toolchain. npm ignores a *dependency's* `overrides` field, so Loom's
+  own override only applies when developing inside this repository. Cosmetic.
+- **`allow-scripts … loom-agent / esbuild`** (npm ≥ 11) — install scripts
+  are blocked until approved. Nothing breaks: the `loom` shim re-spawns the
+  bundled Bun itself, and esbuild's binary ships inside its platform package.
+  To also run the shim-rewrite optimization and silence the notice once:
+  `npm approve-scripts loom-agent esbuild`.
+- **`EPERM` unlinking `opentui.dll` during an upgrade** — a running
+  `loom`/`loom-tui` holds the DLL. Close it, then reinstall; leftover
+  `.loom-agent-*` temp folders are removed by the next successful
+  postinstall (or delete them manually).
+
 ## Setup
 
 1. **Install bun** (for the full TUI):

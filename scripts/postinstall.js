@@ -107,6 +107,25 @@ function shShim(pkg, script) {
 }
 
 try {
+    // Best-effort: an interrupted/locked previous install can leave npm
+    // staging dirs (".loom-agent-xxxx") behind in the global node_modules —
+    // on Windows their opentui.dll is often still locked. Clear any that
+    // are deletable; never fail the install over leftovers.
+    try {
+        var nmDir = path.resolve(pkgRoot, "..");
+        if (path.basename(nmDir) === "node_modules") {
+            var siblings = fs.readdirSync(nmDir);
+            for (var c = 0; c < siblings.length; c++) {
+                if (/^\.loom-agent-/.test(siblings[c])) {
+                    try {
+                        fs.rmSync(path.join(nmDir, siblings[c]), { recursive: true, force: true, maxRetries: 3 });
+                        console.log("[loom-agent] removed stale staging dir " + siblings[c]);
+                    } catch (cleanupErr) { /* locked - leave for the next install */ }
+                }
+            }
+        }
+    } catch {}
+
     ovenPath = ovenBunPath();
     if (ovenPath) {
         console.log("[loom-agent] bundled bun found: " + ovenPath);

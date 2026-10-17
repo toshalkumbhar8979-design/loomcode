@@ -6,6 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.2] — 2026-10-18
+
+### Fixed
+- **npm package metadata + install notes.** The package `description` shipped
+  with double-encoded mojibake (visible on the npm page) — now plain text.
+  `scripts/postinstall.js` clears stale `.loom-agent-*` npm staging folders
+  from interrupted/locked upgrades (best-effort; the usual cause is a running
+  TUI holding `opentui.dll` on Windows). README gains an "Install notes"
+  section documenting the three benign npm install warnings
+  (`EBADENGINE @opentui/core` — the TUI runs on the bundled Bun, not the
+  Node you ran npm with; the deprecated transitive `glob@9.3.5` inside
+  `@opentui/solid`'s babel toolchain — npm ignores a dependency's
+  `overrides`, so Loom's override only applies in this repo; and npm ≥ 11's
+  `allow-scripts` notice — Loom degrades gracefully without install scripts,
+  or run `npm approve-scripts loom-agent esbuild` once).
+
 ## [1.6.1] — 2026-10-17
 
 ### Fixed
