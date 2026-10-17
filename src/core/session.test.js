@@ -579,21 +579,21 @@ test("skill injection: disabled skills are filtered out", async () => {
 
 test("recordUsage: openai-style usage accrues tokens + cost", () => {
   const s = freshSession();
-  s.recordUsage({ prompt_tokens: 500000, completion_tokens: 100000 }, "claude-sonnet-4-20250514", "anthropic");
+  s.recordUsage({ prompt_tokens: 500000, completion_tokens: 100000 }, "claude-sonnet-5-5", "anthropic");
   expect(s.tokensIn).toBe(500000);
   expect(s.tokensOut).toBe(100000);
   expect(s.tokensUsed).toBe(600000);
-  // sonnet $3/$15 per 1M: 0.5*3 + 0.1*15 = $3.00
-  expect(s.sessionCost).toBeCloseTo(3.0, 5);
+  // sonnet-5-5 $2/$10 per 1M: 0.5*2 + 0.1*10 = $2.00
+  expect(s.sessionCost).toBeCloseTo(2.0, 5);
 });
 
 test("recordUsage: anthropic-style usage + null usage no-ops", () => {
   const s = freshSession();
-  s.recordUsage({ input_tokens: 10, output_tokens: 20 }, "claude-sonnet-4-20250514", "anthropic");
+  s.recordUsage({ input_tokens: 10, output_tokens: 20 }, "claude-sonnet-5-5", "anthropic");
   expect(s.tokensIn).toBe(10);
   expect(s.tokensOut).toBe(20);
   const before = { in: s.tokensIn, out: s.tokensOut, cost: s.sessionCost };
-  s.recordUsage(null, "claude-sonnet-4-20250514", "anthropic");
+  s.recordUsage(null, "claude-sonnet-5-5", "anthropic");
   expect(s.tokensIn).toBe(before.in);
   expect(s.tokensOut).toBe(before.out);
   expect(s.sessionCost).toBe(before.cost);
@@ -693,6 +693,10 @@ test("contextEstimate: tokens/window/pct reflect the live conversation", () => {
   const s = freshSession();
   s.systemPrompt = "";
   s._toolSchemaChars = 0;
+  // Pin the window (same trick as the shouldCompact test above): with no
+  // active provider getContextWindow() falls back to 200k, so the assertion
+  // doesn't shift whenever the default model's context length changes.
+  s.provider.active = null;
   s.addMessage({ role: "user", content: "0".repeat(4000) }); // ~1000 tokens
   const ce = s.contextEstimate();
   expect(ce.window).toBe(200000);

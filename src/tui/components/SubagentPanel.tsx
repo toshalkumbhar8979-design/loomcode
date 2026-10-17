@@ -110,7 +110,7 @@ export function SubagentPanel() {
       const curModel = (cfg.agents[cur.agentId] && cfg.agents[cur.agentId].model) || "";
       openModal({
         type: "input", title: "Default model for " + cur.agent,
-        placeholder: 'e.g. "anthropic/claude-sonnet-4-20250514" — empty clears',
+        placeholder: 'e.g. "anthropic/claude-sonnet-5-5" — empty clears',
         value: curModel,
         onPick(val: string) {
           closeModal();

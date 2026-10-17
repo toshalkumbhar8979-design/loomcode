@@ -30,7 +30,7 @@ afterAll(() => {
   try { fs.rmSync(CFG_TMP, { recursive: true, force: true }); } catch {}
 });
 
-const SONNET = "claude-sonnet-4-20250514";
+const SONNET = "claude-sonnet-5-5";
 
 test("registry: 7 providers, each with chat/stream/models", () => {
   expect(Object.keys(PROVIDERS)).toHaveLength(7);
@@ -58,8 +58,8 @@ test("registry: every model has an id, name, context and prices", () => {
 test("getModelMeta: finds by id, null for unknown", () => {
   const meta = getModelMeta("anthropic", SONNET);
   expect(meta).toBeTruthy();
-  expect(meta.context).toBe(200000);
-  expect(meta.priceIn).toBe(3);
+  expect(meta.context).toBe(1000000);
+  expect(meta.priceIn).toBe(2);
   expect(getModelMeta("anthropic", "does-not-exist")).toBeNull();
   expect(getModelMeta(null, SONNET)).toBeNull();
   expect(getModelMeta("anthropic", null)).toBeNull();
@@ -334,7 +334,7 @@ test("anthropic buildBody: isError tool rows carry is_error; orphans still skipp
     { role: "assistant", content: "", toolCalls: [{ id: "t1", name: "bash", input: { command: "ls" } }] },
     { role: "tool", toolCallId: "t1", content: "Error: boom", isError: true },
     { role: "tool", content: "lost result" }, // no tool_use_id — skipped
-  ], { model: "claude-sonnet-4-20250514" });
+  ], { model: "claude-sonnet-5-5" });
   const toolResults = [];
   for (const m of body.messages) {
     if (Array.isArray(m.content)) {
@@ -347,7 +347,7 @@ test("anthropic buildBody: isError tool rows carry is_error; orphans still skipp
   // Successful tool rows carry no is_error flag.
   const body2 = anthropic.buildBody([
     { role: "tool", toolCallId: "t2", content: "ok" },
-  ], { model: "claude-sonnet-4-20250514" });
+  ], { model: "claude-sonnet-5-5" });
   const tr2 = body2.messages[0].content[0];
   expect(tr2.is_error).toBeUndefined();
 });

@@ -20,12 +20,17 @@ function configFile() {
 const DEFAULTS = {
   provider: 'anthropic',
   model: {
-    anthropic: 'claude-sonnet-4-20250514',
-    openai: 'gpt-5-fast',
-    nvidia: 'meta/llama-3.1-8b-instruct',
+    // claude-sonnet-4-20250514 was retired 2026-06-15 (404); Anthropic's
+    // recommended replacement is claude-sonnet-5-5.
+    anthropic: 'claude-sonnet-5-5',
+    // Defaults must be IDs that exist on the LIVE provider APIs (verified
+    // 2026-10-17): gpt-5-fast and meta/llama-3.1-8b-instruct returned 404,
+    // anthropic/claude-sonnet-4 and moonshotai/kimi-k3-free are gone too.
+    openai: 'gpt-5',
+    nvidia: 'nvidia/nemotron-3-super-120b-a12b',
     google: 'gemini-2.5-flash',
-    openrouter: 'anthropic/claude-sonnet-4',
-    tokenrouter: 'moonshotai/kimi-k3-free',
+    openrouter: 'anthropic/claude-sonnet-5.5',
+    tokenrouter: 'z-ai/glm-5.3-free',
     local: 'llama3.2',
   },
   maxTokens: 16384,

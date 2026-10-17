@@ -328,6 +328,9 @@ const models = [
   { id: 'claude-opus-4-8', name: 'Claude Opus 4.8', provider: 'anthropic', context: 1000000, priceIn: 5, priceOut: 25, tags: ['frontier', 'reasoning'] },
   { id: 'claude-opus-4-5', name: 'Claude Opus 4.5', provider: 'anthropic', context: 200000, priceIn: 5, priceOut: 25, tags: ['frontier', 'reasoning'] },
   { id: 'claude-fable-5-1', name: 'Claude Fable 5.1', provider: 'anthropic', context: 1000000, priceIn: 10, priceOut: 50, tags: ['frontier', 'reasoning'] },
+  { id: 'claude-fable-5', name: 'Claude Fable 5', provider: 'anthropic', context: 1000000, priceIn: 10, priceOut: 50, tags: ['frontier', 'reasoning'] },
+  { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', provider: 'anthropic', context: 1000000, priceIn: 5, priceOut: 25, tags: ['frontier', 'reasoning'] },
+  { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', provider: 'anthropic', context: 1000000, priceIn: 5, priceOut: 25, tags: ['frontier', 'reasoning'] },
   // ── Sonnet ──
   { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', provider: 'anthropic', context: 1000000, priceIn: 2, priceOut: 10, tags: ['reasoning'] },
   { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', provider: 'anthropic', context: 1000000, priceIn: 2, priceOut: 10, tags: ['reasoning'] },
@@ -337,9 +340,11 @@ const models = [
   { id: 'claude-haiku-5-5', name: 'Claude Haiku 5.5', provider: 'anthropic', context: 1000000, priceIn: 0.1, priceOut: 0.5, tags: ['fast', 'cheap', 'reasoning'] },
   { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5', provider: 'anthropic', context: 200000, priceIn: 1, priceOut: 5, tags: ['fast', 'reasoning'] },
   // ── Legacy snapshots ──
-  { id: 'claude-sonnet-4-20250514', name: 'Claude Sonnet 4', provider: 'anthropic', context: 200000, priceIn: 3, priceOut: 15, tags: ['reasoning', 'legacy'] },
-  { id: 'claude-opus-4-20250514', name: 'Claude Opus 4', provider: 'anthropic', context: 200000, priceIn: 15, priceOut: 75, tags: ['reasoning', 'legacy'] },
-  { id: 'claude-3-5-haiku-20241022', name: 'Claude 3.5 Haiku', provider: 'anthropic', context: 200000, priceIn: 0.8, priceOut: 4, tags: ['legacy'] },
+  // Retired models verified against Anthropic's model-deprecations page
+  // (2026-10-17): claude-sonnet-4-20250514 and claude-opus-4-20250514 were
+  // retired 2026-06-15, claude-3-5-haiku-20241022 retired 2026-02-19 — they
+  // 404 and are no longer listed. claude-mythos-5/5.1 exist but are limited
+  // to verified organizations, so they are not offered in the picker.
 ];
 
 module.exports = { chat, stream, models, buildBody, normalizeBlocks };

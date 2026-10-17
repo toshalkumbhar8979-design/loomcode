@@ -38,6 +38,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `<leader>x` keybind, which previously resolved to a slash command with no
   handler.
 
+### Fixed
+- **Model catalogs verified against live provider APIs.** Every model ID the
+  picker ships was checked against the authoritative source (OpenAI,
+  NVIDIA, OpenRouter and Groq `/v1/models`; Anthropic's official pricing +
+  deprecation pages; the models.dev cache for registry providers), and every
+  dead ID was removed or repointed:
+  - **NVIDIA** (the reported failure): the default active model
+    `nvidia/llama-3.3-nemotron-super-49b-v1.5` did not exist and 404'd on
+    every request — repointed to `nvidia/nemotron-3-super-120b-a12b`
+    (54/54 catalog models live).
+  - **OpenAI:** dropped phantom `gpt-5.6`, `gpt-5.3-codex-spark`, `o3-pro`;
+    added live `gpt-5-codex`, `gpt-5.1-codex`, `gpt-5.1-codex-max`,
+    `gpt-5.1-codex-mini`, `gpt-5.2-codex`, `gpt-5.2-pro` (34/34 live).
+  - **Anthropic:** dropped models Anthropic retired in 2026
+    (`claude-sonnet-4-20250514`, `claude-opus-4-20250514`,
+    `claude-3-5-haiku-20241022`); added live `claude-fable-5`,
+    `claude-opus-4-7`, `claude-opus-4-6` (14 models, all prices matched to
+    the official pricing table; Mythos 5/5.1 omitted — verification-program
+    accounts only).
+  - **Defaults:** `settings.js` DEFAULTS and the shipped model map no longer
+    name dead IDs (`gpt-5-fast`, `meta/llama-3.1-8b-instruct`,
+    `anthropic/claude-sonnet-4`, `moonshotai/kimi-k3-free` → `gpt-5`,
+    `nemotron-3-super-120b-a12b`, `claude-sonnet-5-5`,
+    `z-ai/glm-5.3-free`); OpenRouter 42/42 and TokenRouter (models.dev's
+    single `z-ai/glm-5.3-free`) verified live.
+  - Usage/context tests now pin a deterministic model/window so future
+    default-model changes can't shift their expectations.
+
 ### Changed
 - **Orchestrator now delegates by default.** The build agent's standing
   instructions were rewritten to make fan-out the first move on any broad
