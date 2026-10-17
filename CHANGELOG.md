@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] — completion harness, specialist agents, headless browser, TUI refresh
 
 ### Changed
+- **Orchestrator now delegates by default.** The build agent's standing
+  instructions were rewritten to make fan-out the first move on any broad
+  SEARCH / ANALYSIS / OPTIMIZATION request ("find what causes X", "where is
+  Y", "how does Z work", "optimize W", "audit/investigate/locate"): it
+  splits the scope into independent questions and dispatches them as
+  **parallel `task` calls** (one `explore` subagent per disjoint area of the
+  codebase), then reads a file itself only to resolve a single ambiguous
+  line a subagent's report left open. This closes the gap where the agent
+  defaulted to reading files serially on its own. The plumbing already
+  existed (`task` tool, `runSubagent`, per-run cancellation, token rollup,
+  `Promise.all` execution) — this change makes using it the default rather
+  than an afterthought. Pinned by new assertions in `agents.test.js`.
 - **Token optimization — prompt caching, cache-accurate pricing, and leaner
   context (7 changes across the request path):**
   - **OpenRouter/TokenRouter prompt caching:** the request body now sends

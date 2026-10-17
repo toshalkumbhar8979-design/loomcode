@@ -252,6 +252,12 @@ test("registry: specialist subagents (research/coder/reviewer/tester/web) + buil
   }
   // the main agent carries the orchestrator role prompt
   expect(all.build.prompt).toContain("MAIN ORCHESTRATOR");
+  // Orchestrator DELEGATES: broad search/analysis/optimization requests fan
+  // out to explore subagents in parallel rather than reading files serially
+  // itself. This is the behavior that makes "find what causes X" fast.
+  expect(all.build.prompt).toContain("FAN OUT");
+  expect(all.build.prompt).toContain("explore");
+  expect(all.build.prompt).toMatch(/parallel task calls/i);
   // tool scoping per specialist
   expect(agents.agentToolAllowed(all.web, "browser")).toBe(true);
   expect(agents.agentToolAllowed(all.web, "websearch")).toBe(true);
