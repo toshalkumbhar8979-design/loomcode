@@ -379,3 +379,49 @@ test("wrapErr: attaches status and Retry-After-derived retryAfterMs", () => {
   expect(plain.status).toBe(500);
   expect(plain.retryAfterMs).toBeUndefined();
 });
+
+// ─── v1.6.1 hang-watchdog additions ───
+
+// Iterator that never yields (the observed NIM hang: 200, then silence).
+function hangingStream() {
+  return {
+    [Symbol.asyncIterator]() { return this; },
+    next: () => new Promise(() => {}),
+  };
+}
+
+test("stream watchdog: no first token within budget rejects with a permanent error", async () => {
+  const client = { chat: { completions: { create: async () => hangingStream() } } };
+  const p = openaiCompat.createOpenAICompatProvider({ getKey: () => "k", providerId: "nvidia", envKeyHint: "NVIDIA", clientFactory: () => client });
+  let caught;
+  try {
+    await p.stream([{ role: "user", content: "hi" }], { model: "dead-model", firstChunkTimeoutMs: 50 });
+  } catch (e) { caught = e; }
+  expect(caught).toBeDefined();
+  expect(String(caught.message)).toMatch(/no output for 0s \(the first token never arrived\)/);
+  expect(caught.permanent).toBe(true);
+});
+
+test("stream watchdog: idle stall mid-response rejects with a permanent error", async () => {
+  let n = 0;
+  const client = {
+    chat: {
+      completions: {
+        create: async () => ({
+          [Symbol.asyncIterator]() { return this; },
+          next: () => (++n === 1
+            ? Promise.resolve({ done: false, value: { choices: [{ delta: { content: "partial" } }] } })
+            : new Promise(() => {})),
+        }),
+      },
+    },
+  };
+  const p = openaiCompat.createOpenAICompatProvider({ getKey: () => "k", providerId: "nvidia", envKeyHint: "NVIDIA", clientFactory: () => client });
+  let caught;
+  try {
+    await p.stream([{ role: "user", content: "hi" }], { model: "dead-model", firstChunkTimeoutMs: 50, idleTimeoutMs: 50 });
+  } catch (e) { caught = e; }
+  expect(caught).toBeDefined();
+  expect(String(caught.message)).toMatch(/no output for 0s \(the stream stalled mid-response\)/);
+  expect(caught.permanent).toBe(true);
+});

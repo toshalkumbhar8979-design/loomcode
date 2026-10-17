@@ -497,6 +497,41 @@ test("runTurn: model errors surface as error responses", async () => {
   expect(res.content).toContain("boom");
 });
 
+test("runTurn: permanent provider errors are not retried and surface", async () => {
+  const s = freshSession();
+  // No other model available: the error surfaces immediately, zero retries.
+  s.autoSwitchModel = () => null;
+  let calls = 0;
+  s.getResponse = async () => {
+    calls++;
+    const e = new Error("NVIDIA error: the model produced no output for 90s (the first token never arrived)");
+    /** @type {any} */ (e).permanent = true;
+    throw e;
+  };
+  const res = await s.runTurn({ onDelta: () => {} });
+  expect(calls).toBe(1);
+  expect(res.type).toBe("error");
+  expect(res.content).toMatch(/no output for 90s/);
+});
+
+test("runTurn: permanent error auto-switches once, then surfaces on the new model", async () => {
+  const s = freshSession();
+  let calls = 0;
+  s.getResponse = async () => {
+    calls++;
+    const e = new Error("dead endpoint");
+    /** @type {any} */ (e).permanent = true;
+    throw e;
+  };
+  const switches = [];
+  const res = await s.runTurn({ onDelta: () => {}, onModelSwitch: (d) => switches.push(d) });
+  // One switch attempt, one try on the replacement, then the error surfaces.
+  expect(calls).toBe(2);
+  expect(res.type).toBe("error");
+  expect(switches).toHaveLength(1);
+  expect(switches[0].reason).toBe("timeout");
+});
+
 test("_sandboxBlock: empty until sandbox enabled, then routes via docker exec", () => {
   const cfgDir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-cfg-"));
   const prevCfg = process.env.LOOM_CONFIG_DIR;

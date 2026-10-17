@@ -744,6 +744,9 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
     let todowroteThisTurn = false;
     // Transient provider-error retry state.
     let providerRetries = 0;
+    // A permanently-dead model (stream watchdog / hung endpoint) already
+    // triggered one auto-switch this turn.
+    let permanentSwitched = false;
     // Reactive compaction already fired this turn (context-overflow 400).
     let compactedThisTurn = false;
     // Mid-turn compaction already fired this turn.
@@ -776,6 +779,24 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
       } catch (err) {
         if (isAbortError(err)) {
           return finishInterrupted();
+        }
+        // Permanent failures (first-chunk/idle stream watchdogs, hung
+        // endpoints) must not be retried — retrying a dead endpoint just
+        // re-hangs the turn. Auto-switch to a different recent model once,
+        // then surface the error.
+        if (err && /** @type {any} */ (err).permanent) {
+          if (!permanentSwitched) {
+            const fromKey = (this.provider.active?.name || '?') + '/' + (this.config.model?.[this.provider.active?.name] || '?');
+            const switched = this.autoSwitchModel(this.provider.active?.name);
+            if (switched) {
+              permanentSwitched = true;
+              if (callbacks.onModelSwitch) {
+                callbacks.onModelSwitch({ from: fromKey, to: switched.provider + '/' + switched.model, reason: 'timeout' });
+              }
+              continue;
+            }
+          }
+          return { type: 'error', content: String(err.message || err) };
         }
         // Rate limit / overload: WAIT and retry (honor Retry-After when the
         // provider sent one). Model switching on a 429 wastes the wait — the

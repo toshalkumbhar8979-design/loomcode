@@ -141,6 +141,9 @@ function wrapErr(err, modelId, envKeyHint, baseURL) {
     return new Error(`${envKeyHint || 'API'} error ${status}: ${msg}`);
   })());
   out.status = err.status ? Number(err.status) : undefined;
+  // Permanent failures (stream watchdog timeouts, hung endpoints) carry the
+  // flag through so the session loop can auto-switch instead of re-hanging.
+  if (err && /** @type {any} */ (err).permanent) /** @type {any} */ (out).permanent = true;
   // Retry-After from the openai SDK error headers (seconds or HTTP-date).
   const hdrs = err.headers;
   const ra = hdrs && (typeof hdrs.get === 'function' ? hdrs.get('retry-after') : hdrs['retry-after']);
@@ -153,6 +156,34 @@ function wrapErr(err, modelId, envKeyHint, baseURL) {
     }
   }
   return out;
+}
+
+// Race a (usually never-resolving) promise against a watchdog timer. NIM
+// deployments for models that aren't enabled on the account accept the POST
+// and then stream NOTHING — without this the turn would hang until the
+// user's patience runs out (measured: 83s to headers, then zero chunks).
+// The error is marked `permanent` so the session loop never retries it.
+function withTimeout(p, ms, what) {
+  let timer;
+  // Settle-shape guard so a late rejection of p can never become an
+  // unhandled rejection after the watchdog has already won the race.
+  const guard = p.then((v) => ({ v }), (e) => ({ e }));
+  return Promise.race([
+    guard,
+    new Promise((res) => { timer = setTimeout(() => res({ timeout: true }), ms); }),
+  ]).then((winner) => {
+    clearTimeout(timer);
+    if (winner.timeout) {
+      const e = new Error(
+        `the model produced no output for ${Math.round(ms / 1000)}s (${what}) — ` +
+        'endpoints that hang like this are usually not enabled for this account or model. ' +
+        'Try /models and pick a model that responds.');
+      /** @type {any} */ (e).permanent = true;
+      throw e;
+    }
+    if (winner.e) throw winner.e;
+    return winner.v;
+  });
 }
 
 async function retryWithBackoff(fn, maxTries, envKeyHint) {
@@ -221,18 +252,26 @@ function createOpenAICompatProvider({ getKey, providerId, envKeyHint, clientFact
     const key = getKey();
     if (!key) throw new Error(`${envKeyHint || 'API'} key not set. Use /connect or set the ${envKeyHint || 'API'}_API_KEY env var.`);
     const baseURL = getBaseUrl(providerId) || defaultBaseUrl || getDefaultBaseUrl(providerId);
-    return new OpenAI({ apiKey: key, baseURL });
+    // maxRetries:0 — the SDK's default 2 retries stack on top of our
+    // retryWithBackoff, multiplying a dead endpoint's hang time; the 300s
+    // default is a hard cap for non-stream chat (streams override it per
+    // request and use the first-chunk/idle watchdogs instead).
+    return new OpenAI({ apiKey: key, baseURL, maxRetries: 0, timeout: 300000 });
   }
 
   async function chat(messages, options = {}) {
     const client = getClient();
     const req = buildRequest(messages, options, providerId);
-    const requestOpts = { signal: options.signal };
+    const requestOpts = { signal: options.signal, timeout: options.chatTimeoutMs > 0 ? Number(options.chatTimeoutMs) : 300000 };
     try {
       const resp = await retryWithBackoff(() => client.chat.completions.create(req, requestOpts), 4, envKeyHint);
       return normalize(resp);
     } catch (err) {
       if (isAbortError(err)) throw err;
+      const name = String(err && err.name || '');
+      if (name === 'APIConnectionTimeoutError' || /timed?\s?out/i.test(String(err && err.message || ''))) {
+        /** @type {any} */ (err).permanent = true;
+      }
       throw wrapErr(err, options.model || '?', envKeyHint, getBaseUrl(providerId));
     }
   }
@@ -240,7 +279,9 @@ function createOpenAICompatProvider({ getKey, providerId, envKeyHint, clientFact
   async function stream(messages, options = {}, onDelta, onReasoning) {
     const client = getClient();
     const req = { ...buildRequest(messages, options, providerId), stream: true, stream_options: { include_usage: true } };
-    const requestOpts = { signal: options.signal };
+    // timeout:0 — long streams are legitimate; the first-chunk/idle
+    // watchdogs below bound the silent-hang case instead.
+    const requestOpts = { signal: options.signal, timeout: 0 };
     try {
       const s = await retryWithBackoff(() => client.chat.completions.create(req, requestOpts), 4, envKeyHint);
       let content = '';
@@ -249,7 +290,37 @@ function createOpenAICompatProvider({ getKey, providerId, envKeyHint, clientFact
       let finishReason = null;
       const toolAcc = new Map();
 
-      for await (const chunk of s) {
+      // Watchdogs: NIM endpoints for models the account cannot use accept
+      // the POST and then stream NOTHING (measured: 83s to headers, zero
+      // chunks after) — without these bounds the turn hangs forever.
+      // The option values are test seams; the session leaves them default.
+      const firstChunkMs = Number(options.firstChunkTimeoutMs) > 0 ? Number(options.firstChunkTimeoutMs) : 90000;
+      const idleMs = Number(options.idleTimeoutMs) > 0 ? Number(options.idleTimeoutMs) : 120000;
+      let iter;
+      try { iter = s[Symbol.asyncIterator](); } catch { iter = s; }
+      let sawChunk = false;
+      for (;;) {
+        let step;
+        try {
+          step = await withTimeout(
+            iter.next(),
+            sawChunk ? idleMs : firstChunkMs,
+            sawChunk ? 'the stream stalled mid-response' : 'the first token never arrived');
+        } catch (watchErr) {
+          // Best-effort close of the underlying stream; never hang on cleanup.
+          try {
+            if (iter.return) {
+              await Promise.race([
+                Promise.resolve(iter.return()).catch(() => {}),
+                new Promise((r) => setTimeout(r, 500)),
+              ]);
+            }
+          } catch {}
+          throw watchErr;
+        }
+        if (step.done) break;
+        const chunk = step.value;
+        sawChunk = true;
         if (chunk.usage) usage = chunk.usage;
         if (chunk.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
         const delta = chunk.choices?.[0]?.delta || {};
