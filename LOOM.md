@@ -1,4 +1,4 @@
-# LOOM.md
+demoust leave space for it now a# LOOM.md
 
 ## Project Overview
 Loom Code is an AI-powered coding agent for the terminal — multi-provider support (Anthropic, OpenAI, NVIDIA, Google, OpenRouter, Local/Ollama) and a redesigned OpenTUI (SolidJS) terminal interface.
@@ -27,27 +27,33 @@ Loom Code is an AI-powered coding agent for the terminal — multi-provider supp
   - `<text>`, `<box>`, `<scrollbox>` — layout/display
   - `<input>`, `<textarea>`, `<select>`, `<tab_select>` — inputs (underscore for `tab_select`)
 - Text styling uses **nested** modifier tags: `<strong>`, `<em>`, `<u>`, `<span fg="...">` — NOT props
-- Colors via palette helpers in `src/tui/theme.ts` (hex strings)
+- Colors via palette helpers in `src/tui/design.ts` (hex strings)
 
 ## Architecture — TUI (new, OpenTUI/SolidJS)
 ```
 src/tui-open.tsx        Entry point (bun) — render(<App/>)
 src/tui/
   App.tsx               Root component — layout, keyboard routing, session submit loop, slash commands (command errors surface as toasts, not chat messages)
-  store.ts              SolidJS signals: messages, input, thinking, modal, suggestions, provider state, todos, pets
-  theme.ts              Color palette (loom dark/light), LOOM banner ASCII, VERSION
-  components/
-    SplashScreen.tsx    Full-screen banner + input prompt (shown when no messages)
-    ChatArea.tsx        Message list (user/assistant/tool/system bubbles, thinking indicator) — assistant bubbles render on a slightly darker patch; while the model edits files the view splits: chat left, diff panel right
-    Sidebar.tsx         Right-hand panel: provider, model, tabs (Info/Todos/Files), companion pet
-    InputBar.tsx        Bottom input with slash autocomplete (mouse click/wheel) + status line
-    Modals.tsx          Provider picker, model picker, key input, base-URL editor, confirm dialogs (mouse click/wheel)
-  companion/
-    openpets.ts         Optional OpenPets desktop app bridge (IPC via @open-pets/client)
-    (Companion.tsx lives in components/ — animated pet with blink frames, click reactions, speech bubbles)
+  store.ts              SolidJS signals: messages, input, thinking, modal, suggestions, provider state, todos
+  design.ts             Palettes/themes, glyphs, block wordmarks, splash robot, VERSION
+  keybinds.ts           Configurable keymap + leader mode
+  markdown.tsx          Markdown renderer + code highlighting
+  toolkit.ts            Tool output formatting helpers
+  reports.ts            /help, /status, /keybinds text
+  shell/
+    Boot.tsx            Splash: anchored robot head, tagline, centered composer
+    LoomBar.tsx         Composer + status rows (mode, provider, model, usage)
+    Stage.tsx           Transcript: user bars, assistant markdown, tools, diffs, todos
+  overlays/
+    Layer.tsx           Modal frame
+    Deck.tsx            Command palette (ctrl+p)
+    Pickers.tsx         Provider/model/theme/settings/key/baseurl modals
+    Sheets.tsx          Help, MCP, sandbox, subagents, sessions, skills, connectors
+    Gate.tsx            Permission + question prompts
+    Toasts.tsx          Transient notices
 ```
 
-The old `src/tui.js` (ink) has been removed. `src/core/cli.js` now spawns `bun src/tui-open.tsx` when TTY + bun available, else falls back to the basic readline REPL.
+The old `src/tui.js` (ink) and the old `src/tui/components/` tree have been removed. `src/core/cli.js` spawns `bun src/tui-open.tsx` when TTY + bun available, else falls back to the basic readline REPL.
 
 ## Architecture — Core (unchanged)
 ```
@@ -69,60 +75,10 @@ src/mcp/                    MCP client + manager (stdio servers)
 src/skills/                 Skill install/remove/list from ~/.loom/skills
 ```
 
-## Companion Pet System
-- **5 built-in pets**: Cat, Robot, Fenrir (wolf), Luma (firefly), OpenPets (desktop sync)
-- **Animation**: 700ms blink interval, idle/thinking/working/happy/sleep poses, random phrases
-- **Interaction**: Click pet → celebrating mood + hearts counter + speech bubble
-- **Event-driven moods**: `notifyPet({ mood: "working"|"success"|"error"|"celebrating" ... })` called from chat lifecycle
-- **OpenPets desktop sync** (optional): `@open-pets/client` IPC bridge at `src/tui/companion/openpets.ts`
-  - Reactions: idle, thinking, working, editing, running, testing, waiting, waving, success, error, celebrating
-  - Auto-discovers desktop app via `%APPDATA%\OpenPets\runtime\ipc.json` (Win) or `~/.config/OpenPets/runtime/ipc.json` (Linux)
-  - Graceful no-op when desktop app not running
-- `/companion` opens picker modal; selection persisted to `~/.loom/tui.json`
-- Settings `[e]` toggles OpenPets sync on/off
-
-## Slash Commands (39 total)
-| Command | Args | Description |
-|---------|------|-------------|
-| `/help` | — | Show this help dialog |
-| `/build` | — | Build mode — full agent tools (all tools, executes changes) |
-| `/plan` | — | Plan mode — read-only analysis; model gets only read/glob/grep/webfetch/todowrite, mutations blocked by an execute guard; ends with "Plan complete — Tab to Build, send 'go'" |
-| `/chat` | — | Chat mode — conversation only, zero tools |
-| `/connect` | `[provider]` | Add/connect a provider (opens picker if no arg) |
-| `/key` | — | Edit API key for current provider |
-| `/baseurl` | `[provider] [url]` | Set provider base URL |
-| `/model` | `[model-id]` | Pick active model (or open picker) |
-| `/models` | — | List available models (grouped by provider) |
-| `/providers` | — | List supported providers |
-| `/status` | — | Show connection status (provider, model, key) |
-| `/usage` | — | Show token usage and billing breakdown (session + lifetime + monthly budget) |
-| `/budget` | `[level \| $]` | Budget routing — `free`/`cheap`/`best`/`auto`, or a dollar cap (`/budget 50`). Over-cap blocks paid turns (`/budget free` is the escape hatch) |
-| `/new` | — | Start a new session |
-| `/clear` | — | Clear the chat |
-| `/compact` | — | Compact conversation (keep last 10) |
-| `/restore` | — | Restore a snapshot point |
-| `/undo` | — | Undo last exchange |
-| `/redo` | — | Redo last undone exchange |
-| `/reset` | — | Reset the session |
-| `/settings` | — | Toggle details/thinking/sidebar/OpenPets |
-| `/sessions` | — | Browse saved sessions |
-| `/share` | — | Export the current session to JSON |
-| `/export` | — | Export to markdown |
-| `/thinking` | — | Toggle thinking visibility |
-| `/details` | — | Toggle tool detail visibility |
-| `/theme` | — | Theme picker (live switch + persist) |
-| `/permissions` | — | Saved permission rules (view / reset) |
-| `/editor` | — | Open external editor (LOOM.md) |
-| `/diff` | — | Show git diff |
-| `/init` | — | Create LOOM.md |
-| `/memory` | — | Show memory file locations |
-| `/doctor` | — | Run diagnostics |
-| `/skills` | `install <dir\|git> \| remove <name>` | Manage skills (`/skills install <path-or-url> [name]`, `/skills remove <name>`, `/skills help`) |
-| `/mcp` | `add <name> <cmd> \| remove \| toggle` | Manage MCP servers (`/mcp add <name> <command> [args...]`, `/mcp remove <name>`, `/mcp toggle <name>`, `/mcp help`) |
-| `/debug` | — | Show debug info |
-| `/fork` | — | Fork conversation |
-| `/companion` | — | Change your companion pet |
-| `/exit` | — | Quit Loom Code |
+## Slash Commands (41 total)
+`SLASH_LIST` in `src/tui/store.ts` is the source of truth; see the README table
+for the full list with arguments. Aliases (`/model`, `/thinking`, `/details`,
+`/rewind`) work but stay hidden from the picker.
 
 ### Leader Key (Ctrl+X)
 | Key | Slash Command |
@@ -140,6 +96,8 @@ src/skills/                 Skill install/remove/list from ~/.loom/skills
 | `s` | `/settings` |
 | `t` | `/thinking` |
 | `d` | `/details` |
+| `a` | `/agents` |
+| `j` | `/subagents` |
 | `b` | `/build` |
 | `p` | `/plan` |
 
@@ -147,7 +105,7 @@ src/skills/                 Skill install/remove/list from ~/.loom/skills
 - **Slash (`/`)** — live-filtered commands with descriptions, 10-row scrollable window over the full list, UP/DOWN/TAB/ENTER/ESC
 - **At (`@`)** — fuzzy file search (project files, top 10)
 - **Bang (`!`)** — shell presets (`!ls -la`, `!git status`, `!git diff`, `!pwd`)
-- **Mouse** — click a suggestion row to select + execute it; scroll wheel scrolls through the full list and moves the selection (also in modals: provider/model/companion pickers + palette — model picker shows "showing N-M of X" range)
+- **Mouse** — click a suggestion row to select + execute it; scroll wheel scrolls through the full list and moves the selection (also in modals: provider/model/theme pickers + palette — model picker shows "showing N-M of X" range)
 
 ### Keyboard Shortcuts
 | Keys | Action |
@@ -155,10 +113,8 @@ src/skills/                 Skill install/remove/list from ~/.loom/skills
 | `Enter` | Submit prompt / pick autocomplete |
 | `Esc` | Interrupt thinking / close modal / clear input |
 | `Ctrl+C` | Exit TUI (clean terminal restore) |
-| `Ctrl+B` | Toggle sidebar |
 | `Ctrl+P` | Command palette (type to filter) |
-| `Ctrl+X` | Leader prefix (3s timeout) |
-| `Ctrl+I` | Cycle sidebar tab (Info/Todos/Files) |
+| `Ctrl+X` | Leader prefix (2s timeout) |
 | `Tab` | Cycle autocomplete / cycle input mode (Build/Plan/Chat) |
 | `Up/Down` | Navigate autocomplete / suggestion list |
 | `Mouse wheel` | Scroll chat history (scrollbox) / move suggestion + modal selection |
@@ -173,7 +129,10 @@ src/skills/                 Skill install/remove/list from ~/.loom/skills
   "apiKeys":  { "nvidia": "..." },
   "baseUrls": { "nvidia": "https://integrate.api.nvidia.com/v1" },
   "maxTokens": 8192,
-  "temperature": 0.7
+  "temperature": 0.7,
+  "requestTimeoutMs": 600000,
+  "toolTimeoutMs": 180000,
+  "subagentTimeoutMs": 900000
 }
 ```
 
@@ -181,12 +140,11 @@ src/skills/                 Skill install/remove/list from ~/.loom/skills
 `~/.loom/tui.json`:
 ```json
 {
-  "sidebarVisible": true,
+  "theme": "loom",
   "showToolDetails": false,
   "showThinking": true,
-  "companion": "cat",
-  "openPetsSync": false,
-  "petEnabled": true
+  "leader": "ctrl+x",
+  "leader_timeout": 2000
 }
 ```
 
@@ -200,7 +158,7 @@ Install the one matching the host OS — npm/bun install will pull them automati
 - When adding a new slash command:
   1. Register in `src/tui/store.ts` (`SLASH_LIST`)
   2. Add a `case "cmdname":` block in `src/tui/App.tsx` (`processSlash`)
-  3. If it opens a picker, add a modal handler in `src/tui/components/Modals.tsx`
+  3. If it opens a picker, add a modal handler in `src/tui/overlays/Pickers.tsx` (or `Sheets.tsx` for full-screen reports)
 - To add a provider: drop a file in `src/providers/`, register in `providers/index.js` (`PROVIDERS`, `PROVIDER_ORDER`, `PROVIDER_LABELS`), add its base URL default to `config/settings.js`
 - Run deterministic checks with `bun -e "..."` or `bun build` before pushing UI changes
 - **Critical**: All signal reads MUST be inside JSX expressions (`{signal()}`) or `<Show when={signal()}>` — top-level `const s = signal()` captures once and never updates
@@ -216,7 +174,7 @@ const s = suggestions();
 </Show>
 ```
 
-This pattern applies to ALL components: InputBar, Companion, Sidebar, BreadcrumbBar, ChatArea, Modals.
+This pattern applies to ALL components: Boot, LoomBar, Stage, Gate, Pickers, Sheets, Deck.
 
 ### Passing props to children
 Pass **accessor functions**, not resolved values, for reactive props. Component bodies
@@ -224,12 +182,12 @@ run once (untracked), so `const msgs = props.messages` in a child body captures 
 
 ```tsx
 // WRONG — child body reads props.messages once, never updates
-<ChatArea messages={messages()} />
+<Stage messages={messages()} />
 
 // CORRECT — child calls the accessor inside JSX
-<ChatArea messages={messages} />
-// in ChatArea: const visible = () => (props.messages?.() || []).slice(-40); ... {visible().map(...)}
+<Stage messages={messages} />
+// in Stage: const visible = () => (props.messages?.() || []).slice(-40); ... {visible().map(...)}
 ```
 
-Boolean/static props may stay as values (`show={sidebarVisible()}` is fine when read inside
+Boolean/static props may stay as values (`show={showThinking()}` is fine when read inside
 `<Show when={...}>` or another JSX expression).

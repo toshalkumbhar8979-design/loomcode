@@ -1,6 +1,6 @@
 // Generic tool-name/arg formatting shared by the chat and the tool log.
 // Per-tool display data (icons, pending labels, spinners, blocks) lives in
-// tool-display.ts — this module only knows how to FORMAT, never which tool
+// toolkit.ts — this module only knows how to FORMAT, never which tool
 // is which.
 
 // mcp__memory__read_graph → memory.read_graph  ·  todowrite → todowrite

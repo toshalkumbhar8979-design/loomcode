@@ -1,5 +1,6 @@
-// Loom Code - OpenTUI app root component.
-// useKeyboard handles ALL text input char-by-char.
+// Loom Code — OpenTUI root. One keyboard dispatcher, one turn engine, one
+// shell. Every key maps to a configured action; every turn streams into the
+// Stage as numbered parts (thought, tool, output, patch, reply).
 import { onMount, onCleanup, createMemo, Show } from "solid-js";
 import { useKeyboard, usePaste, useRenderer, useSelectionHandler } from "@opentui/solid";
 import { createTimeline } from "@opentui/core";
@@ -7,7 +8,7 @@ import path from "path";
 import fs from "fs";
 import os from "os";
 import { execSync } from "child_process";
-import { palette, setTheme, themeOptions, themeName, LOOM_LOGO } from "./theme.ts";
+import { palette, setTheme, themeOptions, themeName, WORDMARK_CODE_PLAIN } from "./design.ts";
 import {
   messages, setMessages, input, setInput, cursor, setCursor, setDraft,
   selStart, selEnd, setSelStart, setSelEnd, clearSelection,
@@ -16,7 +17,6 @@ import {
   thinkStart, setThinkStart,
   modal, openModal, closeModal,
   suggestions, setSuggestions, autoKind, setAutoKind, setAutoIndex,
-  sidebarVisible, setSidebarVisible, sidebarTab, setSidebarTab,
   refreshProviderState, refreshUsage, appendMessage, patchLastMessage, patchMessageAt, recomputeTodos,
   invalidateFilesCache,
   getSession, persistUi,
@@ -26,40 +26,39 @@ import {
   inputMode, setInputMode,
   setSkillActive,
   SLASH_LIST, fuzzyFiles,
-  Suggestion,
+  type Suggestion,
   registerSuggestionPicker, pickSuggestion,
   recordPrompt, historyPrev, historyNext, historyReset,
   speedStats, setSpeedStats,
   permission, requestPermission, askSessionPermissions,
-  setSessionAuto, autoPerm,
-  userExpandedIdx, setUserExpandedIdx,
+  setSessionAuto, autoPerm, setPointerPos,
+  setUserExpandedIdx,
   showToast,
   wireTodoEvents,
   startSubagent, updateSubagent, endSubagent, persistSubagent, loadSubagentHistory,
-  activeSubagents, subagentHistory,
   queueDraft, dequeueDraft, queuedDrafts,
   vimMode, vimNormal, setVimNormal, toggleVim,
 } from "./store.ts";
-import { BreadcrumbBar } from "./components/BreadcrumbBar.tsx";
 import * as kbs from "./keybinds.ts";
-import { SplashScreen } from "./components/SplashScreen.tsx";
-import { ChatArea, estVisualLines, USER_PREVIEW_LINES } from "./components/ChatArea.tsx";
-import { Sidebar } from "./components/Sidebar.tsx";
-import { InputBar } from "./components/InputBar.tsx";
-import { ToastOverlay } from "./components/ToastOverlay.tsx";
-import { PermissionPopup } from "./components/PermissionPopup.tsx";
 import { prettyToolName, stripAnsi } from "./toolname.ts";
-import { toolDisplay } from "./tool-display.ts";
+import { toolDisplay } from "./toolkit.ts";
+import { Stage, estVisualLines, USER_PREVIEW_LINES } from "./shell/Stage.tsx";
+import { LoomBar } from "./shell/LoomBar.tsx";
+import { Boot } from "./shell/Boot.tsx";
+import { Gate } from "./overlays/Gate.tsx";
+import { Toasts } from "./overlays/Toasts.tsx";
+import { Deck } from "./overlays/Deck.tsx";
 import {
   ProviderPicker, SelectModal, InputModal, SettingsModal,
-  PaletteModal, McpModal, ConnectorsModal, GraphModal, SandboxModal,
   openModelPicker, openKeyModal, openBaseUrlEditor,
-  showProvidersText, showHelpText, showAgentsText,
-  openGraphModal,
-} from "./components/Modals.tsx";
-import { SubagentPanel, SubagentDetailPanel } from "./components/SubagentPanel.tsx";
+} from "./overlays/Pickers.tsx";
+import {
+  McpModal, ConnectorsModal, SandboxModal, GraphModal, openGraphModal,
+  SubagentPanel, SubagentDetailPanel,
+} from "./overlays/Sheets.tsx";
+import { showHelpText, showProvidersText, showAgentsText } from "./reports.ts";
 import { saveSession, loadSession, listSessions } from "../core/session-store.js";
-import { loadConfig, saveConfig, getBaseUrl } from "../config/settings.js";
+import { loadConfig, saveConfig } from "../config/settings.js";
 import { loadAgents, resolveAgent } from "../core/agents.js";
 import { snapshotBefore, snapshotAfter, snapshotBashBefore, diffBashAfter, clearFileDiffs } from "../core/file-diffs.js";
 import { createRestorePoint, listRestorePoints, restoreTo } from "../core/restore.js";
@@ -70,41 +69,49 @@ import * as sandbox from "../core/sandbox.js";
 import { on } from "../core/events.js";
 import { listSkills } from "../skills/skills-manager.js";
 
-let _vimReg = ""; // vim NORMAL-mode paste register
-
-// Transcript undo/redo — one undoable step per user turn. The engine is pure
-// (src/core/transcript-undo.js); App owns the stacks and clones snapshots.
+let _vimReg = "";
 const _undo = new TranscriptUndo(50);
-// Restore-point id created for the most recent turn, attached to the snapshot
-// pushed just before that turn so an undo can also roll the working tree back.
 let _lastRestoreId: string | null = null;
 
-const ui = palette("loom");
+const ui = palette();
 
 export function App(props: { initialPrompt?: string; resumeSession?: string; autoMode?: boolean }) {
   const renderer = useRenderer();
   if (props.autoMode) setSessionAuto(true);
 
-  // First ESC while a turn runs only arms the interrupt; a second ESC within
-  // the window actually stops it (no more accidental Interrupts).
   let escArmAt: number | null = null;
+  let pointerTimer: any = null;
+  let pendingPointer = { x: 0, y: 0 };
+
+  // Mouse movement is only consumed by the splash robot. Coalesce it to one
+  // update per frame and skip it entirely once the transcript is docked, so
+  // hovering/scrolling the slash list does not re-render the splash art.
+  function trackPointer(e: any) {
+    if (messages().length > 0) return;
+    pendingPointer = { x: Number(e.x) || 0, y: Number(e.y) || 0 };
+    if (pointerTimer) return;
+    pointerTimer = setTimeout(() => {
+      pointerTimer = null;
+      setPointerPos(pendingPointer.x, pendingPointer.y);
+    }, 16);
+  }
 
   function quit(code: number = 0) {
     persistUi();
-    let sessionId = "";
-    try { sessionId = saveSession(syncSessionForSave()).id; } catch {}
+    let sid = "";
+    try { sid = saveSession(syncSessionForSave()).id; } catch {}
     try { renderer.destroy(); } catch {}
-    setTimeout(function() {
+    setTimeout(() => {
       console.log("");
-      console.log(LOOM_LOGO.join("\n"));
+      console.log(WORDMARK_CODE_PLAIN);
+      console.log("");
       const binName = process.env.LOOM_BIN_NAME || "loom";
-      console.log("   resume: " + binName + " -s " + sessionId);
+      console.log("   Resume this session: " + binName + (sid ? " -s " + sid : ""));
       console.log("");
       process.exit(code);
     }, 150);
   }
 
-  // Shell helper
   function runShell(cmd: string): string {
     try {
       return (execSync(cmd, { cwd: process.cwd(), encoding: "utf8", timeout: 15000, stdio: "pipe", windowsHide: true }) || "(no output)").slice(0, 4000);
@@ -112,8 +119,8 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
   }
 
   function expandAt(text: string): string {
-    return text.replace(/@([\w\.\-\/\\]+)/g, function(_, r) {
-      var p = path.join(process.cwd(), r);
+    return text.replace(/@([\w\.\-\/\\]+)/g, (_, r) => {
+      const p = path.join(process.cwd(), r);
       if (fs.existsSync(p)) {
         try { return "\n\n[File: " + r + "]\n" + fs.readFileSync(p, "utf8").slice(0, 5000); } catch {}
       }
@@ -124,13 +131,8 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
   function updateAutocomplete(text: string) {
     if (!text) { setSuggestions([]); setAutoKind("none"); setAutoIndex(0); return; }
     if (text.startsWith("/")) {
-      var q = text.slice(1).toLowerCase();
-      var hits = SLASH_LIST.filter(function(c) { return c.cmd.startsWith(q); }).map(function(c) {
-        // Popup stays terse: short desc only — syntax lives in /help (args).
-        var s: Suggestion = { label: "/" + c.cmd, desc: c.desc };
-        return s;
-      });
-      // Custom commands (.loom/commands/*.md) join the picker after built-ins.
+      const q = text.slice(1).toLowerCase();
+      const hits = SLASH_LIST.filter(c => c.cmd.startsWith(q)).map(c => ({ label: "/" + c.cmd, desc: c.desc } as Suggestion));
       try {
         const { listCustomCommands } = require("../core/custom-commands.js");
         for (const cc of listCustomCommands()) {
@@ -139,52 +141,43 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
       } catch {}
       setSuggestions(hits); setAutoKind("slash"); setAutoIndex(0);
     } else if (text.startsWith("@") && !/\s/.test(text.slice(text.lastIndexOf("@") + 1))) {
-      // Only when the trailing token after the last @ is unspaced ("@exâ€¦"):
-      // a completed "@agent query" must not re-open the picker.
-      var m = text.match(/@([\w\.\-\/\\]*)$/);
-      var q = (m ? m[1] : "").toLowerCase();
-      // Subagents first (the main agent delegates to them automatically), then
-      // files, so "@exâ€¦" suggests @explore before paths.
-      var agentHits = Object.values(loadAgents()).filter(function(a: any) {
-        return a.mode === "subagent" && (a.id.startsWith(q) || a.name.toLowerCase().startsWith(q));
-      }).map(function(a: any) { return { label: "@" + a.id, desc: a.description } as Suggestion; });
-      var fileHits = fuzzyFiles(m ? m[1] : "").slice(0, Math.max(1, 10 - agentHits.length)).map(function(f) { return { label: "@" + f } as Suggestion; });
+      const m = text.match(/@([\w\.\-\/\\]*)$/);
+      const q = (m ? m[1] : "").toLowerCase();
+      const agentHits = Object.values(loadAgents()).filter((a: any) =>
+        a.mode === "subagent" && (a.id.startsWith(q) || a.name.toLowerCase().startsWith(q))
+      ).map((a: any) => ({ label: "@" + a.id, desc: a.description } as Suggestion));
+      const fileHits = fuzzyFiles(m ? m[1] : "").slice(0, Math.max(1, 10 - agentHits.length)).map(f => ({ label: "@" + f } as Suggestion));
       setSuggestions(agentHits.concat(fileHits)); setAutoKind("at"); setAutoIndex(0);
     } else if (text.startsWith("@")) {
       setSuggestions([]); setAutoKind("none"); setAutoIndex(0);
     } else if (text.startsWith("!")) {
-      setSuggestions([{ label: "!ls -la" }, { label: "!git status" }, { label: "!git diff" }, { label: "!pwd" }] as Suggestion[]); setAutoKind("shell"); setAutoIndex(0);
+      setSuggestions([{ label: "!ls -la" }, { label: "!git status" }, { label: "!git diff" }, { label: "!pwd" }] as Suggestion[]);
+      setAutoKind("shell"); setAutoIndex(0);
     } else {
-      // Plain text draft: no prefix, no suggestions â€” stale autocomplete
-      // selection must not take precedence over submission.
       setSuggestions([]); setAutoKind("none"); setAutoIndex(0);
     }
   }
 
-  // While a turn is running, Enter does NOT consume the input: the typed text
-  // stays in the bar (editable) and is sent normally once the task finishes.
-  // recordPrompt() runs only when the prompt is actually submitted, so a held
-  // draft that was never sent doesn't pollute the prompt history.
   function submit(text: string) {
-    var raw = text.trim();
+    const raw = text.trim();
     if (!raw) return;
     setSuggestions([]); setAutoKind("none"); setAutoIndex(0);
 
     if (raw.startsWith("/")) { recordPrompt(raw); setDraft(""); processSlash(raw); return; }
-    if (raw.startsWith("!")) { recordPrompt(raw); setDraft(""); appendMessage({ role: "user", content: raw }); appendMessage({ role: "system", content: runShell(raw.slice(1)) }); return; }
+    if (raw.startsWith("!")) {
+      recordPrompt(raw); setDraft("");
+      appendMessage({ role: "user", content: raw });
+      appendMessage({ role: "system", content: runShell(raw.slice(1)) });
+      return;
+    }
 
-    // Docker-install resume: while an install is pending, "docker is ready"
-    // continues the sandbox setup in THIS session instead of going to the
-    // model. Outside the pending flow the phrase is ordinary conversation.
-    // All docker state checks are ASYNC (spawn-based) — a sync status call
-    // here froze the whole TUI whenever the docker daemon was slow.
     if (sandbox.isReadySignal(raw)) {
       if (sandbox.sandboxPending()) {
         recordPrompt(raw); setDraft("");
         appendMessage({ role: "user", content: raw });
-        sandbox.sandboxStatusAsync().then(function(st0) {
+        sandbox.sandboxStatusAsync().then((st0: any) => {
           if (st0.docker === "ready" || st0.docker === "no_daemon") {
-            appendMessage({ role: "system", content: "Docker detected \u2014 pick an OS to finish the sandbox setup." });
+            appendMessage({ role: "system", content: "Docker detected — pick an OS to finish the sandbox setup." });
             openModal({ type: "sandbox" });
           } else {
             sandbox.markInstallPending();
@@ -194,13 +187,11 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
         return;
       }
       if (!thinking()) {
-        // Might be a "set up the sandbox" request (docker ready, no container
-        // yet). Check async, then either open the wizard or treat as chat.
-        sandbox.sandboxStatusAsync().then(function(st0) {
+        sandbox.sandboxStatusAsync().then((st0: any) => {
           if (st0.docker === "ready" && st0.container === "absent" && /set ?up|build|create|make/i.test(raw)) {
             recordPrompt(raw); setDraft("");
             appendMessage({ role: "user", content: raw });
-            appendMessage({ role: "system", content: "Docker detected \u2014 pick an OS to finish the sandbox setup." });
+            appendMessage({ role: "system", content: "Docker detected — pick an OS to finish the sandbox setup." });
             openModal({ type: "sandbox" });
           } else {
             recordPrompt(raw); setDraft("");
@@ -211,48 +202,37 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
       }
     }
 
-    // "@agent â€¦" delegates the whole turn to that subagent (same as the model
-    // calling the task tool â€” but explicit). "@file â€¦" still inlines the file.
-    var agentId: string | null = null;
-    var userText: string | undefined;
+    let agentId: string | null = null;
+    let userText: string | undefined;
+    let expanded = raw;
     if (raw.startsWith("@")) {
-      var atMatch = raw.match(/^@([\w\-]+)\s*([\s\S]*)$/);
+      const atMatch = raw.match(/^@([\w\-]+)\s*([\s\S]*)$/);
       if (atMatch) {
-        var atAgent = resolveAgent(atMatch[1]);
+        const atAgent = resolveAgent(atMatch[1]);
         if (atAgent && atAgent.mode === "subagent") {
           agentId = atAgent.id;
           userText = atMatch[2].trim() || "Continue with your task.";
         }
       }
-      if (!agentId) raw = expandAt(raw);
+      if (!agentId) expanded = expandAt(raw);
     }
 
-    if (thinking()) {
-      // Keep the text in the input bar â€” hint shown in the footer while held.
-      return;
-    }
-    recordPrompt(raw);
+    if (thinking()) return;
+    recordPrompt(expanded);
     setDraft("");
-    runPrompt(userText != null ? userText : raw, false, agentId, userText);
+    runPrompt(userText != null ? userText : expanded, false, agentId, userText);
   }
 
   function runPrompt(raw: string, shown: boolean, agentId?: string | null, userText?: string) {
-    // Undo checkpoint: capture the transcript as it is BEFORE this turn so
-    // /undo can step back to it. Done synchronously before any message is
-    // appended; the restore point is created in the background below and its
-    // id is stitched onto the snapshot so undo can also roll files back.
-    var preUi = messages().slice();
-    var preSess = getSession().messages.slice();
-    var preTodos = (getSession().todos || []).slice();
-    var preStep = _undo.push({ ui: preUi, session: preSess, todos: preTodos }, raw);
+    const preUi = messages().slice();
+    const preSess = getSession().messages.slice();
+    const preTodos = (getSession().todos || []).slice();
+    const preStep = _undo.push({ ui: preUi, session: preSess, todos: preTodos }, raw);
 
     if (!shown) appendMessage({ role: "user", content: raw });
-    // Snapshot the project in the background so /restore always works, without
-    // stalling the first API call. The created point's id is bound to the undo
-    // step just pushed, so an undo can rewind both transcript and files.
-    setTimeout(function() {
+    setTimeout(() => {
       try {
-        var rp = createRestorePoint(raw);
+        const rp = createRestorePoint(raw);
         if (rp && rp.id) {
           _lastRestoreId = rp.id;
           if (preStep) preStep.restoreId = rp.id;
@@ -260,382 +240,297 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
       } catch {}
     }, 0);
     setThinking(true); setThinkStart(Date.now());
-    var idx = messages().length;
-    appendMessage({ role: "assistant", content: "", thinking: true, agentLabel: agentId || undefined });
-    // Live-collapse state from a previous turn must not leak onto this one.
+    const sess = getSession();
+    const turnId = (sess.turnCount || 0) + 1;
+    const idx = messages().length;
+    appendMessage({ role: "assistant", content: "", thinking: true, agentLabel: agentId || undefined, turnId });
     setThoughtClosed(new Set<number>());
-    var t0 = Date.now();
+    const t0 = Date.now();
 
-    var sess = getSession();
     sess.setMode(inputMode());
     setSpeedStats({ live: { elapsedMs: 0, firstTokenMs: null, tokensPerSec: 0 }, last: sess.getSpeed().last });
-    var turnDiffs: any[] = [];
-    var lastSpeedPush = 0;
-    // Streaming is batched: rapid deltas would re-render the whole chat (and
-    // the diff patches inside it) dozens of times a second, which flickers the
-    // whole screen. Text is accumulated and flushed ~10/sec instead.
-    var contentAcc = "";
-    var reasonAcc = "";
-    var flushTimer: any = null;
-    // Opencode-style tool activity, interleaved with thinking and text: every
-    // event lands as its OWN part in arrival order, so the chat streams as a
-    // flow â€” thinking, then the read row, thinking again, the edit row, then
-    // the reply â€” never a fixed "thinking on top, tools below" layout. Each
-    // tool call keeps its own row ("~ Preparing edit..." while running, then
-    // a muted "â†’ Read a.ts" that STAYS in the transcript like opencode).
-    // A finished write/edit/bash that actually changed a file attaches its
-    // diff to that row's part, so the patch renders inline right where the
-    // edit happened, then the message continues normally. Parts are
-    // THROTTLED: bursts must not re-render at full rate (that is what made
-    // fast output flicker), so the first tool of a burst patches immediately
-    // and the rest ride the 100ms stream flush.
-    var parts: any[] = [];
-    var lastToolPatch = 0;
-    // Fresh array of part objects with reasoning durations stamped in (the
-    // active reasoning part's duration grows while it streams; once the model
-    // moves on its first/last timestamps freeze, so the settled "+ Thought Â· Ns"
-    // shows the time it actually spent thinking).
+    clearFileDiffs();
+    let turnDiffs: any[] = [];
+    let lastSpeedPush = 0;
+    let contentAcc = "";
+    let reasonAcc = "";
+    let flushTimer: any = null;
+    const parts: any[] = [];
+    let lastToolPatch = 0;
+    const subAcc: any = { agent: "", text: "", log: "", status: "" };
+
     function snapshotParts() {
-      return parts.map(function(p: any) {
-        if (p.type === "reasoning") {
-          return { ...p, thinkMs: Math.max(0, (p.lastAt || p.firstAt || 0) - (p.firstAt || 0)) };
-        }
-        return p;
-      });
+      return parts.map(p => p.type === "reasoning"
+        ? { ...p, thinkMs: Math.max(0, (p.lastAt || p.firstAt || 0) - (p.firstAt || 0)) }
+        : p);
     }
     function ensureTextPart(txt: string) {
       if (!txt) return;
-      var hasText = parts.some(function(p: any) { return p.type === "text"; });
-      if (!hasText) parts.push({ type: "text", text: String(txt) });
+      if (!parts.some(p => p.type === "text")) parts.push({ type: "text", text: String(txt) });
     }
-    // Live subagent delegation panel (task tool): streamed deltas, tool calls
-    // and status land in the message's `subagent` field while the child runs.
-    var subAcc: any = { agent: "", text: "", log: "", status: "" };
     function flushStream() {
       if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
-      // Patch the FULL accumulated state (never reset): the old per-delta
-      // replace made the bubble show only the newest chunk and flicker the
-      // whole screen while writing.
       if (contentAcc) patchLastMessage({ content: contentAcc });
       if (reasonAcc) patchLastMessage({ thinkingContent: reasonAcc });
       if (parts.length) patchLastMessage({ parts: snapshotParts() });
       if (subAcc.agent) patchMessageAt(idx, { subagent: { agent: subAcc.agent, text: subAcc.text, log: subAcc.log, status: subAcc.status } });
     }
-    var speedTimer = setInterval(function() {
+    const speedTimer = setInterval(() => {
       if (thinking()) setSpeedStats({ live: sess.getSpeed().live, last: sess.getSpeed().last });
     }, 1000);
-    // Per-turn todo capture: registered BEFORE the turn starts so a fast
-    // first todo update is never missed; todo updates land in the message's
-    // patch region (alongside file diffs) instead of only the sidebar.
-    var offTodos: (() => void) | null = on("todos:changed", function(list: any[]) {
-      patchMessageAt(idx, { todos: (Array.isArray(list) ? list : []).map(function(t: any) {
-        return { done: t.status === "completed", inProgress: t.status === "in_progress", cancelled: t.status === "cancelled", text: String(t.content || "") };
-      }) });
+    const offTodos: (() => void) | null = on("todos:changed", (list: any[]) => {
+      patchMessageAt(idx, {
+        todos: (Array.isArray(list) ? list : []).map((t: any) => ({
+          done: t.status === "completed", inProgress: t.status === "in_progress",
+          cancelled: t.status === "cancelled", text: String(t.content || ""),
+        })),
+      });
     });
-    var sendOpts: any = agentId ? { agentId: agentId } : undefined;
+    const sendOpts: any = agentId ? { agentId } : undefined;
+
     try {
-    sess.sendUserMessage(raw, {
-      onDelta: function(txt) {
-        contentAcc += txt;
-        // Text streams where it arrived: merge into the running text part, or
-        // start a new one below the tools/reasoning that came before it.
-        var last = parts[parts.length - 1];
-        if (last && last.type === "text") last.text += txt;
-        else parts.push({ type: "text", text: String(txt) });
-        if (!flushTimer) flushTimer = setTimeout(flushStream, 100);
-        // Throttle sidebar speed updates to ~2/sec so fast streams don't spam renders.
-        var now = Date.now();
-        if (now - lastSpeedPush > 500) {
-          lastSpeedPush = now;
-          setSpeedStats({ live: sess.getSpeed().live, last: sess.getSpeed().last });
-        }
-      },
-      onReasoning: function(txt) {
-        reasonAcc += txt;
-        // Merge into the live reasoning part (the model streams one thinking
-        // block at a time); a tool/text part in between starts a NEW reasoning
-        // part below it â€” opencode interleaves thinking with the tool rows.
-        var last = parts[parts.length - 1];
-        if (last && last.type === "reasoning") {
-          last.text += txt;
-          last.lastAt = Date.now();
-        } else {
-          var now = Date.now();
-          parts.push({ type: "reasoning", text: String(txt), firstAt: now, lastAt: now });
-        }
-        if (!flushTimer) flushTimer = setTimeout(flushStream, 100);
-      },
-      onSubagent: function(ev: any) {
-        if (!ev) return;
-        // Mirror the streamed event into the global subagent tracker so the
-        // /subagents panel can show live status alongside the per-message block.
-        // Tracker writes are guarded by try/catch so a tracker bug never
-        // breaks streaming.
-        try {
-          const runId = ev.runId || subAcc.runId;
-          if (ev.type === "start" && runId) {
-            subAcc.runId = runId;
-            startSubagent({ runId, agent: ev.agent || "", agentId: ev.id || "", prompt: String(ev.text || ""), sessionId: getSession()?.conversationId });
-          } else if (runId) {
-            if (ev.type === "delta" || ev.type === "reasoning") updateSubagent(runId, { contentAppend: String(ev.text || "") });
-            else if (ev.type === "tool") updateSubagent(runId, { toolLogAppend: String(ev.text || "") });
-            else if (ev.type === "done") {
-              const wasInterrupted = !!ev.interrupted;
-              const finished = endSubagent(runId, {
-                status: wasInterrupted ? "cancelled" : "done",
-                content: String(ev.text || ""),
-                interrupted: wasInterrupted,
-                durationMs: typeof ev.durationMs === "number" ? ev.durationMs : undefined,
-                tokensIn: typeof ev.tokensIn === "number" ? ev.tokensIn : undefined,
-                tokensOut: typeof ev.tokensOut === "number" ? ev.tokensOut : undefined,
-                costUsd: typeof ev.costUsd === "number" ? ev.costUsd : undefined,
-              });
-              if (finished) persistSubagent(finished);
-            } else if (ev.type === "error") {
-              const finished = endSubagent(runId, { status: "error", content: String(ev.text || ""), interrupted: false });
-              if (finished) persistSubagent(finished);
+      sess.sendUserMessage(raw, {
+        onDelta(txt: string) {
+          contentAcc += txt;
+          const last = parts[parts.length - 1];
+          if (last && last.type === "text") last.text += txt;
+          else parts.push({ type: "text", text: String(txt) });
+          if (!flushTimer) flushTimer = setTimeout(flushStream, 100);
+          const now = Date.now();
+          if (now - lastSpeedPush > 500) {
+            lastSpeedPush = now;
+            setSpeedStats({ live: sess.getSpeed().live, last: sess.getSpeed().last });
+          }
+        },
+        onReasoning(txt: string) {
+          reasonAcc += txt;
+          const last = parts[parts.length - 1];
+          if (last && last.type === "reasoning") {
+            last.text += txt;
+            last.lastAt = Date.now();
+          } else {
+            const now = Date.now();
+            parts.push({ type: "reasoning", text: String(txt), firstAt: now, lastAt: now });
+          }
+          if (!flushTimer) flushTimer = setTimeout(flushStream, 100);
+        },
+        onSubagent(ev: any) {
+          if (!ev) return;
+          try {
+            const runId = ev.runId || subAcc.runId;
+            if (ev.type === "start" && runId) {
+              subAcc.runId = runId;
+              startSubagent({ runId, agent: ev.agent || "", agentId: ev.id || "", prompt: String(ev.text || ""), sessionId: getSession()?.conversationId });
+            } else if (runId) {
+              if (ev.type === "delta" || ev.type === "reasoning") updateSubagent(runId, { contentAppend: String(ev.text || "") });
+              else if (ev.type === "tool") updateSubagent(runId, { toolLogAppend: String(ev.text || "") });
+              else if (ev.type === "done") {
+                const wasInterrupted = !!ev.interrupted;
+                const finished = endSubagent(runId, {
+                  status: wasInterrupted ? "cancelled" : "done",
+                  content: String(ev.text || ""),
+                  interrupted: wasInterrupted,
+                  durationMs: typeof ev.durationMs === "number" ? ev.durationMs : undefined,
+                  tokensIn: typeof ev.tokensIn === "number" ? ev.tokensIn : undefined,
+                  tokensOut: typeof ev.tokensOut === "number" ? ev.tokensOut : undefined,
+                  costUsd: typeof ev.costUsd === "number" ? ev.costUsd : undefined,
+                });
+                if (finished) persistSubagent(finished);
+              } else if (ev.type === "error") {
+                const finished = endSubagent(runId, { status: "error", content: String(ev.text || ""), interrupted: false });
+                if (finished) persistSubagent(finished);
+              }
+            }
+          } catch {}
+          if (ev.agent) subAcc.agent = ev.agent;
+          if (ev.type === "delta" || ev.type === "reasoning") subAcc.text += String(ev.text || "");
+          else if (ev.type === "tool") subAcc.log += (subAcc.log ? " · " : "") + String(ev.text || "");
+          else if (ev.type === "status") subAcc.status = String(ev.text || "");
+          if (!flushTimer) flushTimer = setTimeout(flushStream, 100);
+        },
+        onAutoCompact(res: any) {
+          if (res?.compacted) {
+            appendMessage({ role: "system", content: "Auto-compacted: " + res.method + " — summarized/truncated " + res.removed + " earlier messages. Context was near the model limit." });
+            refreshUsage();
+          }
+        },
+        onTool(name: string, inp: any, callId: string) {
+          const pn = prettyToolName(name);
+          const dsp = toolDisplay(pn);
+          parts.push({ type: "tool", tool: { name: pn, icon: dsp.icon, pending: dsp.pending, label: dsp.label(inp || {}), status: "running", callId: callId || undefined } });
+          if (Date.now() - lastToolPatch > 150) {
+            lastToolPatch = Date.now();
+            flushStream();
+          } else if (!flushTimer) {
+            flushTimer = setTimeout(flushStream, 100);
+          }
+          if (dsp.diffs === "file") {
+            const fp = inp?.filePath;
+            if (fp) snapshotBefore(fp);
+          }
+          if (dsp.diffs === "bash") snapshotBashBefore();
+        },
+        onPermissionRequest(name: string, command: string, label: string, options?: string[], permKey?: string) {
+          return requestPermission(
+            String(name), String(command || ""), String(label || ""),
+            name === "ask", Array.isArray(options) ? options.map(String) : undefined,
+            permKey ? String(permKey) : undefined
+          );
+        },
+        onToolOutput(tc: any, chunk: string) {
+          const cid = tc && tc.id;
+          let pi = -1;
+          for (let k = parts.length - 1; k >= 0; k--) {
+            const pt = parts[k];
+            if (pt.type !== "tool" || pt.tool.status !== "running") continue;
+            if (cid) { if (pt.tool.callId && pt.tool.callId === cid) { pi = k; break; } continue; }
+            if (!pt.tool.callId) { pi = k; break; }
+          }
+          if (pi >= 0) {
+            let buf = (parts[pi].tool.liveOutput || "") + String(chunk || "");
+            if (buf.length > 6000) buf = "… (stream truncated)\n" + buf.slice(-6000);
+            parts[pi].tool.liveOutput = buf;
+          }
+          if (!flushTimer) flushTimer = setTimeout(flushStream, 100);
+        },
+        onToolResult(name: string, out: any, inp: any, callId: string) {
+          const pn = prettyToolName(name);
+          let doneIdx = -1;
+          for (let k = parts.length - 1; k >= 0; k--) {
+            const pt = parts[k];
+            if (pt.type === "tool" && pt.tool.name === pn && pt.tool.status === "running") {
+              if (callId && pt.tool.callId && pt.tool.callId !== callId) continue;
+              pt.tool.status = out?.error ? "error" : "done";
+              delete pt.tool.liveOutput;
+              doneIdx = k;
+              break;
             }
           }
-        } catch {}
-        if (ev.agent) subAcc.agent = ev.agent;
-        if (ev.type === "delta" || ev.type === "reasoning") subAcc.text += String(ev.text || "");
-        else if (ev.type === "tool") subAcc.log += (subAcc.log ? " \u00B7 " : "") + String(ev.text || "");
-        else if (ev.type === "status") subAcc.status = String(ev.text || "");
-        if (!flushTimer) flushTimer = setTimeout(flushStream, 100);
-      },
-      onAutoCompact: function(res) {
-        if (res?.compacted) {
-          appendMessage({ role: "system", content: "Auto-compacted: " + res.method + " \u2014 summarized/truncated " + res.removed + " earlier messages. Context was near the model limit." });
-        }
-      },
-      onTool: function(name, inp, callId) {
-        var pn = prettyToolName(name);
-        var dsp = toolDisplay(pn);
-        parts.push({ type: "tool", tool: { name: pn, icon: dsp.icon, pending: dsp.pending, label: dsp.label(inp || {}), status: "running", callId: callId || undefined } });
-        // First tool of a burst shows immediately; follow-ups ride the
-        // 100ms stream flush so a rapid tool sequence does not re-render
-        // the bubble (and the whole chat) dozens of times a second.
-        if (Date.now() - lastToolPatch > 150) {
-          lastToolPatch = Date.now();
+          if (doneIdx >= 0 && !out?.error && typeof out?.result === "string") {
+            let resTxt = stripAnsi(out.result).trim();
+            if (resTxt.length > 4000) resTxt = resTxt.slice(0, 4000) + "\n… (truncated)";
+            if (resTxt) parts[doneIdx].tool.output = resTxt;
+          }
           flushStream();
-        } else if (!flushTimer) {
-          flushTimer = setTimeout(flushStream, 100);
-        }
-        // Diff capture is per-tool display data too ("file" snapshots the
-        // path, "bash" diffs the tree) â€” no names in the loop.
-        if (dsp.diffs === "file") {
-          var fp = inp?.filePath;
-          if (fp) { snapshotBefore(fp); }
-        }
-        if (dsp.diffs === "bash") snapshotBashBefore();
-      },
-      onPermissionRequest: function(name, command, label, options) {
-        // The permission popup rises from the input bar; the turn stays paused
-        // until the user picks Allow / Always allow / Deny â€” or, for the ask
-        // tool, one of the question options / a typed answer.
-        return requestPermission(
-          String(name),
-          String(command || ""),
-          String(label || ""),
-          name === "ask",
-          Array.isArray(options) ? options.map(String) : undefined
-        );
-      },
-      onToolOutput: function(tc, chunk, kind) {
-        // Live terminal output (bash): append to the matching RUNNING tool
-        // part so the chat streams a growing output block. The callId keeps
-        // parallel commands on their own rows.
-        var cid = tc && tc.id;
-        for (var pi = parts.length - 1; pi >= 0; pi--) {
-          var pt = parts[pi];
-          if (pt.type !== "tool" || pt.tool.status !== "running") continue;
-          if (cid) {
-            if (pt.tool.callId && pt.tool.callId === cid) break;
-            continue;
+          let diffs2: any[] = [];
+          const fp = inp?.filePath;
+          const dsp = toolDisplay(pn);
+          if (dsp.diffs === "file" && fp && !out?.error) {
+            try {
+              const d = snapshotAfter(fp);
+              if (d.added || d.removed) diffs2.push(d);
+            } catch {}
           }
-          if (!pt.tool.callId) break;
-        }
-        if (pi >= 0 && parts[pi].type === "tool") {
-          var buf = (parts[pi].tool.liveOutput || "") + String(chunk || "");
-          if (buf.length > 6000) buf = "\u2026 (stream truncated)\n" + buf.slice(-6000);
-          parts[pi].tool.liveOutput = buf;
-        }
-        if (!flushTimer) flushTimer = setTimeout(flushStream, 100);
-      },
-      onToolResult: function(name, out, inp, callId) {
-        // Mark the LAST running tool part for this tool as done (LIFO â€” a
-        // burst of the same tool resolves in order; callId pins the exact row).
-        var pn = prettyToolName(name);
-        var doneIdx = -1;
-        for (var pi = parts.length - 1; pi >= 0; pi--) {
-          var pt = parts[pi];
-          if (pt.type === "tool" && pt.tool.name === pn && pt.tool.status === "running") {
-            if (callId && pt.tool.callId && pt.tool.callId !== callId) continue;
-            pt.tool.status = out?.error ? "error" : "done";
-            delete pt.tool.liveOutput;
-            doneIdx = pi;
-            break;
+          if (dsp.diffs === "bash" && !out?.error) {
+            try { diffs2 = diffs2.concat(diffBashAfter().filter((d2: any) => !d2.isNew)); } catch {}
           }
-        }
-        // Keep the tool's RESULT on its part (stripped, capped) so the chat can
-        // render an output block â€” opencode shows bash/generic tool output in
-        // the transcript; the agent's work product belongs in the chat, not
-        // only the log.
-        if (doneIdx >= 0 && !out?.error && typeof out?.result === "string") {
-          var resTxt = stripAnsi(out.result).trim();
-          if (resTxt.length > 4000) resTxt = resTxt.slice(0, 4000) + "\n\u2026 (truncated)";
-          if (resTxt) parts[doneIdx].tool.output = resTxt;
-        }
+          if (diffs2.length) {
+            if (doneIdx >= 0) parts[doneIdx].tool.fileDiffs = diffs2.slice();
+            const merged = turnDiffs.filter(x => !diffs2.some(y => y.abs === x.abs)).concat(diffs2);
+            turnDiffs = merged;
+            const cur = messages()[idx]?.fileDiffs || [];
+            if (cur.length !== merged.length || cur.some((x: any, i: number) => x.abs !== merged[i].abs)) {
+              patchMessageAt(idx, { fileDiffs: merged });
+            }
+          }
+        },
+        onModelSwitch(info: any) {
+          appendMessage({ role: "system", content: "Model — tokens finished on " + info.from + ", auto-switched to " + info.to + " and retrying." });
+          refreshProviderState();
+        },
+      }, sendOpts).then((resp: any) => {
+        ensureTextPart(resp.content);
         flushStream();
-        var diffs2: any[] = [];
-        var fp = inp?.filePath;
-        var dsp = toolDisplay(pn);
-        if (dsp.diffs === "file" && fp && !out?.error) {
-          try {
-            var d = snapshotAfter(fp);
-            // New files get no diff â€” there is nothing to change yet; only
-            // edits of existing files show a patch.
-            if (d.added || d.removed) diffs2.push(d);
-          } catch {}
-        }
-        if (dsp.diffs === "bash" && !out?.error) {
-          try { diffs2 = diffs2.concat(diffBashAfter().filter(function(d2: any) { return !d2.isNew; })); } catch {}
-        }
-        if (diffs2.length) {
-          // Attach the diff to the part that produced it (opencode renders the
-          // patch INLINE in the Edit part, right where the edit happened) and
-          // keep the message-level copy for restored sessions.
-          if (doneIdx >= 0) parts[doneIdx].tool.fileDiffs = diffs2.slice();
-          var merged = turnDiffs.filter(function(x) { return !diffs2.some(function(y) { return y.abs === x.abs; }); }).concat(diffs2);
-          turnDiffs = merged;
-          // Patch only when the list actually changed, or every tool result
-          // forces a full re-render of the message mid-stream.
-          var cur = messages()[idx]?.fileDiffs || [];
-          if (cur.length !== merged.length || cur.some(function(x: any, i: number) { return x.abs !== merged[i].abs; })) {
-            patchMessageAt(idx, { fileDiffs: merged });
+        const isErr = resp.type === "error";
+        if (resp.interrupted) {
+          patchMessageAt(idx, { thinking: false, interrupted: true, thinkTime: Date.now() - t0, isError: false, parts: snapshotParts() });
+          const keptChars = String(resp.content || "").length;
+          let inProgress = null;
+          const tdNow = sess.todos || [];
+          for (const td of tdNow) { if (td.status === "in_progress") { inProgress = td; break; } }
+          appendMessage({ role: "system", content: "Interrupted — kept " + keptChars + " chars of the partial response" + (inProgress ? " (in progress: " + inProgress.content + ")" : "") + ". Type \"continue\" to resume the task." });
+        } else {
+          patchMessageAt(idx, { content: resp.content || "(the model ended the turn without any text)", thinking: false, thinkTime: Date.now() - t0, isError: isErr, parts: snapshotParts() });
+          const openTodos = resp.openTodos;
+          if (!isErr && openTodos && openTodos.length) {
+            const openNames: string[] = [];
+            for (let oi = 0; oi < Math.min(openTodos.length, 8); oi++) openNames.push("- [" + openTodos[oi].status + "] " + openTodos[oi].content);
+            appendMessage({ role: "system", content: "Stopped with " + openTodos.length + " todo(s) still open:\n" + openNames.join("\n") + (openTodos.length > 8 ? "\n- …" : "") + "\nSay \"continue\" to keep going." });
           }
         }
-      },
-      onModelSwitch: function(info) {
-        appendMessage({ role: "system", content: "Model \u2014 tokens finished on " + info.from + ", auto-switched to " + info.to + " and retrying." });
-        refreshProviderState();
-      },
-    }, sendOpts).then(function(resp) {
-      // Providers that answer without streaming text (no onDelta ever fired)
-      // still land their reply as the final text part.
-      ensureTextPart(resp.content);
-      flushStream();
-      var isErr = resp.type === "error";
-      if (resp.interrupted) {
-        // Keep the partial text in the bubble; the session already stored it,
-        // so the user can type "continue" to resume the task.
-        patchMessageAt(idx, { thinking: false, interrupted: true, thinkTime: Date.now() - t0, isError: false, parts: snapshotParts() });
-        var keptChars = String(resp.content || "").length;
-        var inProgress = null;
-        var tdNow = sess.todos || [];
-        for (var ti = 0; ti < tdNow.length; ti++) { if (tdNow[ti].status === "in_progress") { inProgress = tdNow[ti]; break; } }
-        appendMessage({ role: "system", content: "Interrupted \u2014 kept " + keptChars + " chars of the partial response" + (inProgress ? " (in progress: " + inProgress.content + ")" : "") + ". Type \"continue\" to resume the task." });
-      } else {
-        patchMessageAt(idx, { content: resp.content || "(the model ended the turn without any text)", thinking: false, thinkTime: Date.now() - t0, isError: isErr, parts: snapshotParts() });
-        // Real leftovers, not a generic stop line: when the turn wrote todos
-        // and still has open ones, the session reports exactly which.
-        var openTodos = resp.openTodos;
-        if (!isErr && openTodos && openTodos.length) {
-          var openNames = [];
-          for (var oi = 0; oi < Math.min(openTodos.length, 8); oi++) openNames.push("- [" + openTodos[oi].status + "] " + openTodos[oi].content);
-          appendMessage({ role: "system", content: "Stopped with " + openTodos.length + " todo(s) still open:\n" + openNames.join("\n") + (openTodos.length > 8 ? "\n- \u2026" : "") + "\nSay \"continue\" to keep going." });
+        if (!isErr && sess.mode === "plan") {
+          let plannedSteps = 0;
+          const planTodos = sess.todos || [];
+          for (const td of planTodos) { if (td.status !== "completed" && td.status !== "cancelled") plannedSteps++; }
+          appendMessage({ role: "system", content: "Plan complete — " + (plannedSteps ? plannedSteps + " step(s) planned. " : "") + "press Tab to switch to Build, then send \"go\" to execute." });
         }
-      }
-      if (!isErr && sess.mode === "plan") {
-        var plannedSteps = 0;
-        var planTodos = sess.todos || [];
-        for (var pi = 0; pi < planTodos.length; pi++) { if (planTodos[pi].status !== "completed" && planTodos[pi].status !== "cancelled") plannedSteps++; }
-        appendMessage({ role: "system", content: "Plan complete \u2014 " + (plannedSteps ? plannedSteps + " step(s) planned. " : "") + "press Tab to switch to Build, then send \"go\" to execute." });
-      }
-      setSpeedStats({ live: null, last: sess.getSpeed().last });
-    }).catch(function(e) {
-      ensureTextPart("Error: " + String(e?.message || e).slice(0, 500));
-      flushStream();
-      var err = e || {};
-      patchMessageAt(idx, { content: "Error: " + String(err.message || err).slice(0, 500), thinking: false, isError: true, thinkTime: Date.now() - t0, parts: snapshotParts() });
-    }).finally(function() {
-      clearInterval(speedTimer);
-      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
-      if (offTodos) { offTodos(); offTodos = null; }
-      // Per-turn autosave: persist after every turn so a crash/exit never
-      // loses more than the last exchange (previously only /exit saved).
-      try { saveSession(syncSessionForSave()); } catch {}
-      // Freeze the subagent panel at its final state ("finished").
-      if (subAcc.agent) patchMessageAt(idx, { subagent: { agent: subAcc.agent, text: subAcc.text, log: subAcc.log, status: subAcc.status, done: true } });
-      // Let the settled assistant message render before the global turn state
-      // changes; otherwise the test renderer can sample the old frame after
-      // thinking() becomes false.
-      setTimeout(function() {
-        setThinking(false); setThinkStart(null); recomputeTodos(); refreshUsage();
-        flushQueueSoon();
-      }, 0);
-    });
+        setSpeedStats({ live: null, last: sess.getSpeed().last });
+      }).catch((e: any) => {
+        ensureTextPart("Error: " + String(e?.message || e).slice(0, 500));
+        flushStream();
+        patchMessageAt(idx, { content: "Error: " + String(e?.message || e).slice(0, 500), thinking: false, isError: true, thinkTime: Date.now() - t0, parts: snapshotParts() });
+      }).finally(() => {
+        clearInterval(speedTimer);
+        if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+        if (offTodos) offTodos();
+        try { saveSession(syncSessionForSave()); } catch {}
+        if (subAcc.agent) patchMessageAt(idx, { subagent: { agent: subAcc.agent, text: subAcc.text, log: subAcc.log, status: subAcc.status, done: true } });
+        setTimeout(() => {
+          setThinking(false); setThinkStart(null); recomputeTodos(); refreshUsage();
+          flushQueueSoon();
+        }, 0);
+      });
     } catch (e: any) {
-      // A provider that throws synchronously (bad key, malformed config) must
-      // still finish the turn â€” never leave the chat stuck on "Thinking".
       ensureTextPart("Error: " + String(e?.message || e).slice(0, 500));
       flushStream();
       patchMessageAt(idx, { content: "Error: " + String(e?.message || e).slice(0, 500), thinking: false, isError: true, thinkTime: Date.now() - t0 });
       clearInterval(speedTimer);
       if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
-      if (offTodos) { offTodos(); offTodos = null; }
-      setTimeout(function() {
+      if (offTodos) offTodos();
+      setTimeout(() => {
         setThinking(false); setThinkStart(null); recomputeTodos(); refreshUsage();
         flushQueueSoon();
       }, 0);
     }
   }
 
-  // Send the next queued draft (deferred so it never runs inside the turn's
-  // finally stack); no-op when a new turn already started or nothing queued.
   function flushQueueSoon() {
-    setTimeout(function() {
+    setTimeout(() => {
       if (thinking() || permission() || modal()) return;
       const next = dequeueDraft();
       if (next) submit(next);
     }, 60);
   }
 
-  // Save the FULL chat: the core session only tracks {role, content,
-  // toolCalls, reasoning} (that list feeds the provider API), while the TUI's
-  // display parts â€” thinking text, tool rows, diffs, todos, error flags â€” live
-  // in the store's message list. Merge them into the session before persisting
-  // so /sessions restores the whole conversation, not just a text dump.
   function syncSessionForSave() {
-    var sess = getSession();
-    var ui = messages();
-    // Pair by TURN INDEX (tail-aligned), never by content: repeated, empty or
-    // identical assistant replies would otherwise attach the wrong message's
-    // parts/tools/diffs/todos. Walking from the end keeps the pairing aligned
-    // when auto-compaction trims the session's head but not the UI's.
-    var uiAsst: any[] = [];
-    for (var j = 0; j < ui.length; j++) if (ui[j].role === "assistant") uiAsst.push(ui[j]);
-    var uiIdx = uiAsst.length - 1;
-    var sessMsgs = sess.messages.slice();
-    for (var i = sessMsgs.length - 1; i >= 0; i--) {
-      var m = sessMsgs[i];
-      if (m.role !== "assistant") continue;
-      var u = uiAsst[uiIdx];
-      uiIdx--;
-      if (!u || !(u.parts || u.thinkingContent || u.todos || u.fileDiffs || u.isError || u.interrupted)) continue;
-      // Strip ephemeral stream state (live terminal output) â€” the saved chat
-      // keeps the final tool output only.
-      var cleanParts = Array.isArray(u.parts) ? u.parts.map(function(p: any) {
+    const sess = getSession();
+    const uiMsgs = messages();
+    const sessMsgs = sess.messages.slice();
+    // A UI assistant row represents the WHOLE turn (thoughts + tools + final
+    // reply), while the session stores one assistant row per model pass. Map
+    // each UI row to the LAST assistant row with the same turnId; the old
+    // reverse-order pairing attached a previous turn's parts to an earlier
+    // tool-call row.
+    const lastAssistantForTurn = new Map<number, number>();
+    for (let i = 0; i < sessMsgs.length; i++) {
+      const m = sessMsgs[i];
+      if (m.role === "assistant" && typeof m.turnId === "number") lastAssistantForTurn.set(m.turnId, i);
+    }
+    for (const u of uiMsgs) {
+      if (u.role !== "assistant" || typeof u.turnId !== "number") continue;
+      const i = lastAssistantForTurn.get(u.turnId);
+      if (i == null) continue;
+      if (!(u.parts || u.thinkingContent || u.todos || u.fileDiffs || u.isError || u.interrupted)) continue;
+      const cleanParts = Array.isArray(u.parts) ? u.parts.map((p: any) => {
         if (p.type === "tool" && p.tool && p.tool.liveOutput) {
-          var t = Object.assign({}, p.tool);
+          const t = Object.assign({}, p.tool);
           delete t.liveOutput;
           return Object.assign({}, p, { tool: t });
         }
         return p;
       }) : u.parts;
       sessMsgs[i] = {
-        ...m,
-        parts: cleanParts, tools: u.tools, thinkingContent: u.thinkingContent,
+        ...sessMsgs[i], parts: cleanParts, tools: u.tools, thinkingContent: u.thinkingContent,
         todos: u.todos, fileDiffs: u.fileDiffs, isError: u.isError,
         interrupted: u.interrupted, thinkTime: u.thinkTime,
       };
@@ -644,50 +539,39 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
     return sess;
   }
 
-  // Jump to a saved session: swap its messages into the live conversation
-  // (used by /sessions picker and `loom -s <id>` resume on start). The saved
-  // file carries the full display chat (parts, thinking, diffs, todos); for
-  // older saves that only have toolCalls, rebuild the tool rows from them and
-  // attach each saved tool result to its row â€” same look as a live turn.
   function resumeSessionById(id: string) {
-    var data = loadSession(id);
+    const data = loadSession(id);
     if (!data?.messages?.length) { showToast("Session not found: " + id, "error"); return; }
-    // Reuse the resumed id as the live session's id so a later
-    // saveSession(syncSessionForSave()) persists under the SAME id.
     getSession().conversationId = id;
-    var pendingParts: Record<string, any> = {};
-    getSession().messages = data.messages.map(function(m) {
-      // toolCallId MUST survive the resume: the provider wire format sends it
-      // as tool_call_id / tool_use_id — dropping it makes the next turn fail
-      // with "400: missing field tool_call_id" (NVIDIA) after a resume.
-      var clean: any = {
+    const pendingParts: Record<string, any> = {};
+    getSession().messages = data.messages.map((m: any) => {
+      const clean: any = {
         role: m.role,
         content: m.content,
-        toolCalls: m.toolCalls || (m as any).tool_calls,
-        toolCallId: m.toolCallId || (m as any).tool_call_id,
+        toolCalls: m.toolCalls || m.tool_calls,
+        toolCallId: m.toolCallId || m.tool_call_id,
+        turnId: m.turnId,
       };
       if (m.reasoning) clean.reasoning = m.reasoning;
       return clean;
     });
-    setMessages(data.messages.map(function(m) {
-      // Tool result rows: attach the saved output to the matching call's row
-      // so bash/generic tools render their collapsed block like live turns.
+    setMessages(data.messages.map((m: any) => {
       if (m.role === "tool" && m.toolCallId && pendingParts[m.toolCallId]) {
         pendingParts[m.toolCallId].output = m.content;
         return null;
       }
-      var out: any = { role: m.role, content: m.content, toolCalls: m.toolCalls, thinkTime: m.thinkTime };
+      const out: any = { role: m.role, content: m.content, toolCalls: m.toolCalls, thinkTime: m.thinkTime, turnId: m.turnId };
       if (m.role === "assistant") {
         if (m.reasoning && !m.thinkingContent) out.thinkingContent = m.reasoning;
         if (Array.isArray(m.parts) && m.parts.length) {
           out.parts = m.parts;
         } else {
-          var calls = Array.isArray(m.toolCalls) ? m.toolCalls : [];
+          const calls = Array.isArray(m.toolCalls) ? m.toolCalls : [];
           if (calls.length) {
-            out.parts = calls.map(function(c: any) {
-              var pn = prettyToolName(c.name);
-              var dsp = toolDisplay(pn);
-              var tool: any = { name: pn, icon: dsp.icon, pending: dsp.pending, label: dsp.label(c.input || {}), status: "done" };
+            out.parts = calls.map((c: any) => {
+              const pn = prettyToolName(c.name);
+              const dsp = toolDisplay(pn);
+              const tool: any = { name: pn, icon: dsp.icon, pending: dsp.pending, label: dsp.label(c.input || {}), status: "done" };
               if (c.id) pendingParts[c.id] = tool;
               return { type: "tool", tool };
             });
@@ -696,37 +580,35 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
         out.todos = m.todos; out.fileDiffs = m.fileDiffs; out.isError = m.isError; out.interrupted = m.interrupted;
       }
       return out;
-    }).filter(function(x) { return x !== null; }));
+    }).filter((x: any) => x !== null));
     appendMessage({ role: "system", content: "Resumed " + id });
     refreshProviderState();
   }
 
   function processSlash(raw: string) {
-    // Quote-aware tokenizer so /mcp add keeps "C:\path with spaces\python.exe"
-    // intact (claude-compatible one-liner).
-    var parts = plugin.tokenizeCli(raw.slice(1));
+    const parts = plugin.tokenizeCli(raw.slice(1));
     if (!parts.length) return;
-    var cmd = parts[0].toLowerCase();
-    var args = parts.slice(1).filter(function(a) { return !/^\[.*\]$/.test(a); });
-    // Custom commands from .loom/commands/*.md run FIRST: /name args
-    // expands the md body ($ARGUMENTS â†’ args) and submits it as a prompt.
+    const cmd = parts[0].toLowerCase();
+    const args = parts.slice(1).filter(a => !/^\[.*\]$/.test(a));
+
     try {
       const { expandCustomCommand } = require("../core/custom-commands.js");
       const expanded = expandCustomCommand(cmd, args.join(" "));
       if (expanded !== null) {
-        setInput("");
-        setCursor(0);
+        setInput(""); setCursor(0);
         submit(expanded);
         return;
       }
     } catch {}
-    var sess = getSession();
-    var cfg = loadConfig();
+
+    const sess = getSession();
+    const cfg = loadConfig();
 
     switch (cmd) {
       case "help": showHelpText(); return;
       case "agents": showAgentsText(); return;
-      case "subagents": runAction("subagent_list"); return;
+      case "subagents": loadSubagentHistory({ limit: 200 }); openModal({ type: "subagents" }); return;
+      case "editor": appendMessage({ role: "system", content: plugin.editorCmd() }); return;
       case "context": {
         const msgs = getSession().messages || [];
         const est = (s: any) => Math.ceil(String(s == null ? "" : (typeof s === "object" ? JSON.stringify(s) : s)).length / 4);
@@ -735,15 +617,19 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
         try { schemas += est(getSession()._agentBlock) + est(getSession()._resolvedPrimary) + est(getSession()._resolvedSandbox) + Math.ceil((getSession()._toolSchemaChars || 0) / 4); } catch {}
         for (const m of msgs) {
           const t = est(m.content) + est(m.toolCalls);
-          if (m.role === "user") user += t; else if (m.role === "assistant") asst += t; else if (m.role === "tool") tool += t; else sys += t;
+          if (m.role === "user") user += t;
+          else if (m.role === "assistant") asst += t;
+          else if (m.role === "tool") tool += t;
+          else sys += t;
         }
         const total = sys + user + asst + tool + schemas;
-        // Live window estimate from the session (messages + system + tool
-        // schemas) — the percent is recomputed now, not a startup snapshot.
         let winLine = "";
+        let autoLine = "";
         try {
           const ce = getSession().contextEstimate();
           winLine = "Window:  ~" + ce.tokens.toLocaleString() + " / " + ce.window.toLocaleString() + " tokens (" + ce.pct + "% used)";
+          const threshold = Math.round((getSession().config.compactThreshold ?? 0.75) * 100);
+          autoLine = "Auto-compact at: " + threshold + "% of the window";
         } catch {}
         appendMessage({ role: "system", content: [
           "=== Context (~tokens, chars/4 estimate) ===",
@@ -754,6 +640,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
           "Schemas+turn:  " + schemas,
           "TOTAL:         " + total + "  (" + msgs.length + " messages)",
           winLine,
+          autoLine,
           "", "Tip: /compact frees context when this grows large.",
         ].join("\n") });
         return;
@@ -765,9 +652,11 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
             appendMessage({ role: "system", content: r.compacted
               ? "Compacted (" + r.method + "): summarized/truncated " + r.removed + " earlier messages; ~" + (r.tokensAfter ?? "?") + " tokens remain."
               : "Nothing to compact — the conversation is still short." });
+            refreshUsage();
           },
         }).then((r: any) => {
           if (!r.compacted && !r.reason) appendMessage({ role: "system", content: "Compaction failed — try again." });
+          refreshUsage();
           try { saveSession(syncSessionForSave()); } catch {}
         }).catch((e: any) => appendMessage({ role: "system", content: "Compaction failed: " + String(e?.message || e) }));
         return;
@@ -784,16 +673,19 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
         if (inputMode() !== "plan") { showToast("/approve only applies in Plan mode", "error"); return; }
         let plan = "";
         const ms2 = messages();
-        for (let i = ms2.length - 1; i >= 0; i--) { const m: any = ms2[i]; if (m.role === "assistant" && String(m.content || "").includes("## Plan")) { plan = String(m.content); break; } }
+        for (let i = ms2.length - 1; i >= 0; i--) {
+          const m: any = ms2[i];
+          if (m.role === "assistant" && String(m.content || "").includes("## Plan")) { plan = String(m.content); break; }
+        }
         openModal({
           type: "select", title: "Approve plan & switch to Build?", searchable: false,
-          options: [{ label: "Approve \u2014 execute in Build", value: "go" }, { label: "Stay in Plan", value: "stay" }],
+          options: [{ label: "Approve — execute in Build", value: "go" }, { label: "Stay in Plan", value: "stay" }],
           onPick(v: string) {
             closeModal();
             if (v !== "go") return;
             setInputMode("build");
             getSession().setMode("build");
-            appendMessage({ role: "system", content: "Plan approved \u2014 switched to Build." });
+            appendMessage({ role: "system", content: "Plan approved — switched to Build." });
             submit(plan ? "Execute this plan:\n\n" + plan : "Proceed with the approved plan.");
           },
         });
@@ -803,7 +695,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
         const bt = require("../core/background-tasks.js");
         const rows = bt.listBackgroundTasks();
         appendMessage({ role: "system", content: rows.length
-          ? "=== Background tasks ===\n" + rows.map((t: any) => `${t.status === "running" ? "[>]" : t.status === "done" ? "[x]" : "[-]"} ${t.id}  ${t.command.slice(0, 50)}\n    ${t.status}${t.exitCode != null ? " exit=" + t.exitCode : ""} \u00B7 ${(t.output.match(/\n/g) || []).length} lines`).join("\n")
+          ? "=== Background tasks ===\n" + rows.map((t: any) => `${t.status === "running" ? "[>]" : t.status === "done" ? "[x]" : "[-]"} ${t.id}  ${t.command.slice(0, 50)}\n    ${t.status}${t.exitCode != null ? " exit=" + t.exitCode : ""} · ${(t.output.match(/\n/g) || []).length} lines`).join("\n")
           : "No background tasks. Start one: ask the agent to run bash with background:true." });
         return;
       }
@@ -815,7 +707,11 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
         openModal({
           type: "select", title: "Rewind files to restore point", searchable: false,
           options: pts.slice(0, 12).map((p: any) => ({ label: p.label || p.id, sub: new Date(p.createdAt || Date.now()).toLocaleString(), value: p.id })),
-          onPick(id: string) { closeModal(); const r = rp.restoreTo(id); showToast(r && r.ok ? "Files rewound to " + id : "Restore failed", r && r.ok ? "ok" : "error"); },
+          onPick(id: string) {
+            closeModal();
+            const r = rp.restoreTo(id);
+            showToast(r && r.ok ? "Files rewound to " + id : "Restore failed", r && r.ok ? "ok" : "error");
+          },
         });
         return;
       }
@@ -826,7 +722,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
           fsx.mkdirSync(dir, { recursive: true });
           const esc = (s: string) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
           const body = messages().map((m: any) => `<div class="m ${esc(m.role)}"><b>${esc(m.role)}</b><pre>${esc(String(m.content ?? ""))}</pre></div>`).join("\n");
-          const html = `<!doctype html><meta charset="utf-8"><title>Loom session</title><style>body{background:#171512;color:#f2ede4;font-family:ui-monospace,monospace;max-width:900px;margin:2rem auto;padding:0 1rem}.m{border-left:3px solid #463f36;padding:.25rem .75rem;margin:.6rem 0}.m.user{border-color:#a8c496}.m.assistant{border-color:#e8845c}.m.system{color:#a89d8d}pre{white-space:pre-wrap;font-family:inherit;margin:.2rem 0}</style><h1>Loom Code session</h1>${body}`;
+          const html = `<!doctype html><meta charset="utf-8"><title>Loom session</title><style>body{background:#0b0d10;color:#d7dee6;font-family:ui-monospace,monospace;max-width:900px;margin:2rem auto;padding:0 1rem}.m{border-left:3px solid #2b333d;padding:.25rem .75rem;margin:.6rem 0}.m.user{border-color:#6fd3b6}.m.assistant{border-color:#e5b567}.m.system{color:#61707d}pre{white-space:pre-wrap;font-family:inherit;margin:.2rem 0}</style><h1>Loom Code session</h1>${body}`;
           const f = pathx.join(dir, (sessionId() || "session") + ".html");
           fsx.writeFileSync(f, html);
           showToast("Shared: " + f, "ok", 6000);
@@ -834,25 +730,20 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
         return;
       }
       case "export": {
-        // Markdown transcript export — the plain-text counterpart to /share
-        // (which writes HTML). One file per session under .loom/exports/.
         try {
           const fsx = require("fs"); const pathx = require("path");
           const dir = pathx.join(process.cwd(), ".loom", "exports");
           fsx.mkdirSync(dir, { recursive: true });
           const lines: string[] = [];
-          lines.push("# Loom Code session");
-          lines.push("");
+          lines.push("# Loom Code session", "");
           lines.push("- Date: " + new Date().toISOString().slice(0, 19).replace("T", " "));
           lines.push("- Model: " + providerName() + " / " + modelName());
-          lines.push("- Messages: " + messages().length);
-          lines.push("");
+          lines.push("- Messages: " + messages().length, "");
           for (const m of messages()) {
             const who = m.role === "user" ? "User" : m.role === "assistant" ? "Assistant" : "System";
-            lines.push("## " + who);
-            lines.push("");
+            lines.push("## " + who, "");
             const text = String(m.content ?? "").trim();
-            if (text) { lines.push(text); lines.push(""); }
+            if (text) { lines.push(text, ""); }
             if (Array.isArray(m.parts)) {
               for (const p of m.parts) {
                 if (p.type === "tool" && p.tool) {
@@ -862,14 +753,12 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
                   if (out) row += ": " + out.replace(/\s+/g, " ").slice(0, 300);
                   lines.push(row);
                 } else if (p.type === "text" && String(p.text || "").trim()) {
-                  lines.push(String(p.text).trim());
-                  lines.push("");
+                  lines.push(String(p.text).trim(), "");
                 }
               }
             }
             if (m.isError) lines.push("**(turn ended with an error)**", "");
-            lines.push("---");
-            lines.push("");
+            lines.push("---", "");
           }
           const f = pathx.join(dir, (sessionId() || "session") + ".md");
           fsx.writeFileSync(f, lines.join("\n"));
@@ -881,7 +770,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
         const name = String(args[0] || "").replace(/[^\w-]/g, "");
         if (!name) { showToast("Usage: /worktree <name>", "error"); return; }
         const out2 = runShell(`git worktree add ../loom-${name} -b wt/${name}`);
-        showToast(out2.toLowerCase().includes("fatal") ? "Worktree failed \u2014 see chat" : "Worktree ../loom-" + name + " ready (branch wt/" + name + ")", out2.toLowerCase().includes("fatal") ? "error" : "ok", 6000);
+        showToast(out2.toLowerCase().includes("fatal") ? "Worktree failed — see chat" : "Worktree ../loom-" + name + " ready (branch wt/" + name + ")", out2.toLowerCase().includes("fatal") ? "error" : "ok", 6000);
         appendMessage({ role: "system", content: out2.slice(0, 1500) });
         return;
       }
@@ -900,20 +789,20 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
         try {
           const mem = require("../core/memory.js");
           const ok2 = mem.appendMemory(fact, "project");
-          showToast(ok2 ? "Remembered \u2192 LOOM.md" : "Could not write LOOM.md", ok2 ? "ok" : "error");
+          showToast(ok2 ? "Remembered → LOOM.md" : "Could not write LOOM.md", ok2 ? "ok" : "error");
         } catch { showToast("Could not write LOOM.md", "error"); }
         return;
       }
       case "vim": {
-        const on = toggleVim();
-        showToast("Vim mode: " + (on ? "on \u2014 Esc toggles NORMAL" : "off"), "ok");
+        const on2 = toggleVim();
+        showToast("Vim mode: " + (on2 ? "on — Esc toggles NORMAL" : "off"), "ok");
         return;
       }
       case "build": case "plan": case "chat": {
-        var modeInfo: Record<string, string> = {
-          build: "Build \u2014 all tools enabled",
-          plan: "Plan \u2014 read-only, no file changes",
-          chat: "Chat \u2014 conversation only, no tools",
+        const modeInfo: Record<string, string> = {
+          build: "Build — all tools enabled",
+          plan: "Plan — read-only, no file changes",
+          chat: "Chat — conversation only, no tools",
         };
         setInputMode(cmd as any);
         sess.setMode(cmd);
@@ -922,7 +811,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
       }
       case "models": openModelPicker(); return;
       case "connect": {
-        var pv = args[0]?.toLowerCase();
+        const pv = args[0]?.toLowerCase();
         if (!pv) { openModal({ type: "provider" }); return; }
         if (!PROVIDERS[pv]) { showToast("Unknown provider: " + pv + ". Try /connect to pick.", "error"); return; }
         cfg.provider = pv; saveConfig(cfg); refreshProviderState(); openKeyModal(pv);
@@ -935,29 +824,25 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
           sess.setModel(cfg.provider, args[0]);
           refreshProviderState();
           showToast("Model: " + args[0], "ok");
-        }
-		else openModelPicker();
+        } else openModelPicker();
         return;
       }
       case "providers": showProvidersText(); return;
       case "status": {
         const { envNamesFor } = require("../providers/index.js");
-        var keySet = !!(cfg.apiKeys?.[cfg.provider] || (envNamesFor(cfg.provider) || []).some(n => !!process.env[n]));
+        const keySet = !!(cfg.apiKeys?.[cfg.provider] || (envNamesFor(cfg.provider) || []).some((n: string) => !!process.env[n]));
         appendMessage({ role: "system", content: "Provider: " + cfg.provider + "\nModel: " + (cfg.model?.[cfg.provider] || "default") + "\nKey: " + (keySet ? "configured" : "NOT SET") });
         return;
       }
       case "memory": {
         appendMessage({ role: "system", content: [
           path.join(process.cwd(), "LOOM.md"),
-          path.join(os.homedir(), ".loom", "LOOM.md")
-        ].map(function(l) { return (fs.existsSync(l) ? "+" : "-") + " " + l; }).join("\n") });
+          path.join(os.homedir(), ".loom", "LOOM.md"),
+        ].map(l => (fs.existsSync(l) ? "+" : "-") + " " + l).join("\n") });
         appendMessage({ role: "system", content: plugin.editorCmd() });
         return;
       }
-      case "graph": {
-        openGraphModal();
-        return;
-      }
+      case "graph": openGraphModal(); return;
       case "permissions": {
         if (args[0] === "auto") {
           const next = !sess.permissions.auto;
@@ -966,16 +851,19 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
           showToast("Auto-approve permissions: " + (next ? "ON" : "OFF") + (next ? " (asks are auto-approved, denies still block)" : ""), next ? "ok" : "info");
           return;
         }
-        var rules = sess.permissions.sessionRules;
+        const rules = sess.permissions.sessionRules;
         if (args[0] === "reset") {
-          for (var rk of Array.from(rules.keys())) sess.permissions.clearRule(rk);
+          for (const rk of Array.from(rules.keys())) sess.permissions.clearRule(rk as string);
           showToast("Permission rules cleared.", "ok");
           return;
         }
-        var lines: string[] = [];
-        rules.forEach(function(v: string, k: string) { lines.push("  " + k + "  \u2192  " + v); });
+        const lines: string[] = [];
+        rules.forEach((v: string, k: string) => {
+          const i = k.indexOf("|");
+          lines.push("  " + (i > 0 ? "[" + k.slice(0, i) + "] " + k.slice(i + 1) : "legacy " + k) + "  →  " + v);
+        });
         if (!lines.length) lines.push("  (no saved rules)");
-        appendMessage({ role: "system", content: "Saved permission rules (set via \"Always allow\" in the popup):\n" + lines.join("\n") + "\nUse /permissions reset to clear." });
+        appendMessage({ role: "system", content: "Saved permission rules (set via \"Always allow\" / \"Always deny\" in the popup):\n" + lines.join("\n") + "\nUse /permissions reset to clear." });
         return;
       }
       case "budget": {
@@ -985,13 +873,11 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
         const arg = args[0]?.toLowerCase();
         if (arg === "override") {
           requestOverride();
-          showToast("Budget override set â€” exactly one paid turn will go through despite the cap.", "ok");
+          showToast("Budget override set — exactly one paid turn will go through despite the cap.", "ok");
           refreshUsage();
           return;
         }
         if (arg === "daily") {
-          // 0 is a valid value (disables the alert) â€” only a missing argument
-          // is invalid.
           const num = args[1] === undefined ? NaN : parseFloat(args[1].replace(/^[$]/, ""));
           if (!Number.isNaN(num)) {
             setDailyAlert(num);
@@ -1000,15 +886,9 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
             return;
           }
           const day = dayStatus();
-          showToast(
-            "Daily spend today: " + formatUsd(day.dayCostUsd) + (day.alertUsd > 0 ? " (alert at " + formatUsd(day.alertUsd) + ")" : " (no alert set)") + " â€” set one: /budget daily 3",
-            "ok"
-          );
+          showToast("Daily spend today: " + formatUsd(day.dayCostUsd) + (day.alertUsd > 0 ? " (alert at " + formatUsd(day.alertUsd) + ")" : " (no alert set)") + " — set one: /budget daily 3", "ok");
           return;
         }
-        // /budget <number> â€” set the monthly spend cap (Phase 2 governor).
-        // 0 is a valid value (disables enforcement) â€” only a missing argument
-        // is invalid.
         const num = arg === undefined ? NaN : parseFloat(arg.replace(/^[$]/, ""));
         if (!Number.isNaN(num)) {
           setMonthlyBudget(num);
@@ -1021,43 +901,37 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
           const spend = budgetStatus();
           const day = dayStatus();
           const picked = info.picked ? info.picked.provider + " / " + info.picked.model : "(none available)";
-          const dayLine = "Day:      " + formatUsd(day.dayCostUsd) + (day.alertUsd > 0 ? " today (alert at " + formatUsd(day.alertUsd) + ")" : " today") + (day.alert ? "  \u26a0 daily alert reached" : "");
-          appendMessage({
-            role: "system",
-            content:
-              "=== Budget ===\n" +
-              "Level:    " + cur + (cur === "auto" ? "  (explicit picks, no routing)" : "  (auto-routed per turn)") + "\n" +
-              "Would pick: " + picked + (info.freeAvailable ? "" : "  \u2014 no free models reachable") + "\n" +
-              "Spend:    " + formatUsd(spend.monthCostUsd) + " of " + formatUsd(spend.budgetUsd) + " this month (" + Math.round(spend.pct) + "%)" + (spend.over ? "  \u26a0 cap reached \u2014 paid turns blocked" : "") + "\n" +
-              dayLine + "\n" +
-              "Levels:  free (only $0 models)  cheap (free + low-cost)  best (frontier)  auto (default)\n" +
-              "Try: /budget free  \u2014 every turn stays free, paid models are blocked.  /budget 50 \u2014 set the monthly cap.  /budget override \u2014 one paid turn past the cap.  /budget daily 3 \u2014 alert when a day spends $3."
-          });
+          const dayLine = "Day:      " + formatUsd(day.dayCostUsd) + (day.alertUsd > 0 ? " today (alert at " + formatUsd(day.alertUsd) + ")" : " today") + (day.alert ? "  daily alert reached" : "");
+          appendMessage({ role: "system", content:
+            "=== Budget ===\n" +
+            "Level:    " + cur + (cur === "auto" ? "  (explicit picks, no routing)" : "  (auto-routed per turn)") + "\n" +
+            "Would pick: " + picked + (info.freeAvailable ? "" : "  — no free models reachable") + "\n" +
+            "Spend:    " + formatUsd(spend.monthCostUsd) + " of " + formatUsd(spend.budgetUsd) + " this month (" + Math.round(spend.pct) + "%)" + (spend.over ? "  cap reached — paid turns blocked" : "") + "\n" +
+            dayLine + "\n" +
+            "Levels:  free (only $0 models)  cheap (free + low-cost)  best (frontier)  auto (default)\n" +
+            "Try: /budget free  — every turn stays free, paid models are blocked.  /budget 50 — set the monthly cap.  /budget override — one paid turn past the cap.  /budget daily 3 — alert when a day spends $3." });
           return;
         }
-        if (!LEVELS.includes(arg)) { showToast("Budget: free, cheap, best, auto â€” or a dollar cap, e.g. /budget 50", "error"); return; }
+        if (!LEVELS.includes(arg)) { showToast("Budget: free, cheap, best, auto — or a dollar cap, e.g. /budget 50", "error"); return; }
         cfg.budgetLevel = arg; saveConfig(cfg); sess.config = cfg; refreshProviderState();
         if (arg === "free") {
           const info = describeLevel("free");
-          if (!info.picked) showToast("Budget: free \u2014 but NO free model reachable yet. Run /connect for a free provider.", "error");
-          else showToast("Budget: free \u2014 every turn now routes to " + info.picked.provider + " / " + info.picked.model, "ok");
+          if (!info.picked) showToast("Budget: free — but NO free model reachable yet. Run /connect for a free provider.", "error");
+          else showToast("Budget: free — every turn now routes to " + info.picked.provider + " / " + info.picked.model, "ok");
         } else {
           showToast("Budget: " + arg, "ok");
         }
         return;
       }
       case "new": case "clear": {
-        // Warn before wiping the session â€” one wrong /clear loses the whole
-        // transcript. A compact confirm modal with explicit Keep/Clear options.
-        var msgCount = messages().length;
+        const msgCount = messages().length;
         openModal({
-          type: "select", title: "Clear session?",
-          searchable: false,
+          type: "select", title: "Clear session?", searchable: false,
           options: [
             { label: "Keep it", sub: "esc / enter to keep", value: "keep" },
             { label: "Clear session (" + msgCount + " messages)", sub: "irreversible", value: "clear" },
           ],
-          onPick: function(val: any) {
+          onPick(val: any) {
             closeModal();
             if (val !== "clear") { showToast("Session kept.", "info"); return; }
             sess.reset(); setMessages([]); showToast("Session cleared.", "ok"); refreshUsage();
@@ -1067,25 +941,20 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
       }
       case "restore": {
         const points = listRestorePoints();
-        if (!points.length) {
-          showToast("No restore points yet. A point is saved automatically before every prompt.");
-          return;
-        }
+        if (!points.length) { showToast("No restore points yet. A point is saved automatically before every prompt."); return; }
         openModal({
-          type: "select",
-          title: "Restore Point",
-          options: points.map(function(p) {
+          type: "select", title: "Restore Point",
+          options: points.map(p => {
             const t = new Date(p.at);
             const pad = (n: number) => String(n).padStart(2, "0");
             const when = pad(t.getMonth() + 1) + "-" + pad(t.getDate()) + " " + pad(t.getHours()) + ":" + pad(t.getMinutes());
-            const count = Object.keys(p.files).length;
-            return { label: (p.label ? p.label : "(no prompt)"), sub: when + " \u2014 " + count + " files", value: p.id };
+            return { label: (p.label ? p.label : "(no prompt)"), sub: when + " — " + Object.keys(p.files).length + " files", value: p.id };
           }),
-          onPick: function(id) {
+          onPick(id: string) {
             const r = restoreTo(id);
             closeModal();
-            if (!r.ok) { closeModal(); showToast("Restore failed: " + r.error, "error"); return; }
-            var line = "Restored to earlier state: " + r.restored.length + " files written back";
+            if (!r.ok) { showToast("Restore failed: " + r.error, "error"); return; }
+            let line = "Restored to earlier state: " + r.restored.length + " files written back";
             if (r.deleted.length) line += ", " + r.deleted.length + " files removed";
             if (r.errors.length) line += "\nErrors: " + r.errors.join("; ").slice(0, 300);
             appendMessage({ role: "system", content: line });
@@ -1096,23 +965,19 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
         return;
       }
       case "undo": {
-        // Step back one turn: restore the transcript captured before the last
-        // user turn, and (when that step has a restore point) offer to rewind
-        // the working tree too so files match the conversation.
         if (!_undo.canUndo()) { showToast("Nothing to undo.", "info"); return; }
-        // Current state goes on the redo stack so the undo can be re-done.
-        var curSnap = {
+        const curSnap = {
           ui: messages().slice(),
           session: getSession().messages.slice(),
           todos: (getSession().todos || []).slice(),
           restoreId: _lastRestoreId || undefined,
         };
-        var target = _undo.undo(curSnap);
+        const target = _undo.undo(curSnap);
         if (!target) { showToast("Nothing to undo.", "info"); return; }
         setMessages(target.ui || []);
         getSession().messages = (target.session || []).slice();
         getSession().todos = (target.todos || []).slice();
-        var undoLine = "Undone \u2014 transcript restored" + (target.label ? " to before: " + target.label.slice(0, 60) : "") + ".";
+        let undoLine = "Undone — transcript restored" + (target.label ? " to before: " + target.label.slice(0, 60) : "") + ".";
         if (target.restoreId) {
           _lastRestoreId = target.restoreId;
           undoLine += "\nAlso rewind the working tree to match? Run /undo-files to restore files from the same point.";
@@ -1124,30 +989,28 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
       }
       case "redo": {
         if (!_undo.canRedo()) { showToast("Nothing to redo.", "info"); return; }
-        var curSnap2 = {
+        const curSnap2 = {
           ui: messages().slice(),
           session: getSession().messages.slice(),
           todos: (getSession().todos || []).slice(),
           restoreId: _lastRestoreId || undefined,
         };
-        var target2 = _undo.redo(curSnap2);
+        const target2 = _undo.redo(curSnap2);
         if (!target2) { showToast("Nothing to redo.", "info"); return; }
         setMessages(target2.ui || []);
         getSession().messages = (target2.session || []).slice();
         getSession().todos = (target2.todos || []).slice();
         if (target2.restoreId) _lastRestoreId = target2.restoreId;
-        appendMessage({ role: "system", content: "Redone \u2014 transcript restored" + (target2.label ? " to: " + target2.label.slice(0, 60) : "") + "." });
+        appendMessage({ role: "system", content: "Redone — transcript restored" + (target2.label ? " to: " + target2.label.slice(0, 60) : "") + "." });
         try { saveSession(syncSessionForSave()); } catch {}
         refreshUsage();
         return;
       }
       case "undo-files": {
-        // Roll the working tree back to the restore point bound to the most
-        // recent undo, so files match the rewound conversation.
         if (!_lastRestoreId) { showToast("No file restore point bound to the last undo.", "error"); return; }
-        var rr = restoreTo(_lastRestoreId);
+        const rr = restoreTo(_lastRestoreId);
         if (!rr.ok) { showToast("File restore failed: " + rr.error, "error"); return; }
-        appendMessage({ role: "system", content: "Working tree rewound \u2014 " + rr.restored.length + " files restored, " + rr.deleted.length + " removed." });
+        appendMessage({ role: "system", content: "Working tree rewound — " + rr.restored.length + " files restored, " + rr.deleted.length + " removed." });
         invalidateFilesCache();
         clearFileDiffs();
         return;
@@ -1158,73 +1021,64 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
         const u = getUsage();
         const meta = modelMeta();
         const sess2 = getSession();
-        const ctx = meta?.context || 200000;
-        const ctxPct = ctx ? Math.round((sess2.tokensUsed / ctx) * 100) : 0;
+        const ce = sess2.contextEstimate();
         const budgetPct = u.budgetUsd ? Math.round((u.month.costUsd / u.budgetUsd) * 100) : 0;
         const priceLine = meta ? " ($" + (meta.priceIn || 0) + "/$" + (meta.priceOut || 0) + " per 1M in/out)" : "";
         appendMessage({ role: "system", content:
           "=== Usage ===\n" +
           "Model:    " + providerName() + " / " + modelName() + priceLine + "\n" +
-          "Session:  " + formatTokens(sess2.tokensUsed) + " tokens (" + formatTokens(sess2.tokensIn) + " in / " + formatTokens(sess2.tokensOut) + " out)  " + ctxPct + "% of " + formatTokens(ctx) + " context  \u00B7  " + formatUsd(sess2.sessionCost) + "\n" +
-          "Lifetime: " + formatTokens(u.totalTokens) + " tokens \u00B7 " + formatUsd(u.totals.costUsd) + "\n" +
-          "Month " + u.monthKey + ": " + formatTokens(u.monthTokens) + " tokens \u00B7 " + formatUsd(u.month.costUsd) + "  \u00B7  " + budgetPct + "% of " + formatUsd(u.budgetUsd) + " budget"
-        });
+          "Session:  " + formatTokens(sess2.tokensUsed) + " tokens (" + formatTokens(sess2.tokensIn) + " in / " + formatTokens(sess2.tokensOut) + " out)  ·  " + formatUsd(sess2.sessionCost) + "\n" +
+          "Context:  ~" + formatTokens(ce.tokens) + " / " + formatTokens(ce.window) + " tokens (" + ce.pct + "% used)\n" +
+          "Lifetime: " + formatTokens(u.totalTokens) + " tokens · " + formatUsd(u.totals.costUsd) + "\n" +
+          "Month " + u.monthKey + ": " + formatTokens(u.monthTokens) + " tokens · " + formatUsd(u.month.costUsd) + "  ·  " + budgetPct + "% of " + formatUsd(u.budgetUsd) + " budget" });
         return;
       }
       case "skills": {
-        var sub = args[0];
+        const sub = args[0];
         if (sub === "install") { appendMessage({ role: "system", content: plugin.installSkillCmd(args.slice(1)) }); return; }
         if (sub === "remove") { appendMessage({ role: "system", content: plugin.removeSkillCmd(args.slice(1)) }); return; }
         if (sub === "help") { appendMessage({ role: "system", content: plugin.skillHelp() }); return; }
-        // Skill browser popup (same window as the model selector): grouped by
-        // source (global ~/.loom, agents ~/.agents, project .loom), Enter
-        // toggles on/off, and an "install" row opens the add flow.
-        var cfgNow = loadConfig();
-        var disabledNow = (cfgNow.skillDisabled || []);
-        var list = listSkills();
+        const cfgNow = loadConfig();
+        const disabledNow = (cfgNow.skillDisabled || []);
+        const list = listSkills();
         if (!list.length) { appendMessage({ role: "system", content: plugin.listSkillsText() }); return; }
-        var bySource: Record<string, any[]> = { global: [], agents: [], project: [] };
-        for (var sk of list) (bySource[sk.source] = bySource[sk.source] || []).push(sk);
-        var skillOptions: any[] = [];
-        var sourceTitles: Record<string, string> = { global: "Global (~/.loom/skills)", agents: "Agents (~/.agents/skills)", project: "Project (.loom/skills)" };
-        var firstHeader = true;
-        for (var srcKey of ["global", "agents", "project"]) {
+        const bySource: Record<string, any[]> = { global: [], agents: [], project: [] };
+        for (const sk of list) (bySource[sk.source] = bySource[sk.source] || []).push(sk);
+        const skillOptions: any[] = [];
+        const sourceTitles: Record<string, string> = { global: "Global (~/.loom/skills)", agents: "Agents (~/.agents/skills)", project: "Project (.loom/skills)" };
+        for (const srcKey of ["global", "agents", "project"]) {
           if (!bySource[srcKey].length) continue;
           skillOptions.push({ isHeader: true, header: sourceTitles[srcKey] });
-          firstHeader = false;
-          for (var sk3 of bySource[srcKey]) {
-            var off3 = disabledNow.includes(sk3.name);
-            skillOptions.push({ label: sk3.name, value: sk3.name,
-              sub: "[" + (off3 ? "off" : "on") + "] " + sk3.description.slice(0, 44), tags: [srcKey] });
+          for (const sk3 of bySource[srcKey]) {
+            const off3 = disabledNow.includes(sk3.name);
+            skillOptions.push({ label: sk3.name, value: sk3.name, sub: "[" + (off3 ? "off" : "on") + "] " + sk3.description.slice(0, 44), tags: [srcKey] });
           }
         }
         skillOptions.push({ label: "+ Install skill", value: "__install__", sub: "from a local folder or git URL (--trust for remote)" });
         openModal({
-          type: "select", title: "Skills â€” Enter toggle on/off",
-          searchable: true,
-          options: skillOptions,
-          onPick: function(val: any) {
+          type: "select", title: "Skills — Enter toggle on/off", searchable: true, options: skillOptions,
+          onPick(val: any) {
             if (val === "__install__") {
               closeModal();
               openModal({
                 type: "input", title: "Install skill",
                 placeholder: "folder path or git URL [--trust]",
-                onCancel: function() { setTimeout(function() { processSlash("/skills"); }, 10); },
-                onPick: function(target: string) {
+                onCancel() { setTimeout(() => processSlash("/skills"), 10); },
+                onPick(target: string) {
                   if (!target.trim()) { closeModal(); return; }
-                  var out = plugin.installSkillCmd(target.trim().split(/\s+/));
+                  const out = plugin.installSkillCmd(target.trim().split(/\s+/));
                   showToast(out.split("\n")[0].slice(0, 90), out.indexOf("blocked") >= 0 || out.indexOf("failed") >= 0 ? "error" : "ok", 6000);
                   appendMessage({ role: "system", content: out });
                   closeModal();
-                  setTimeout(function() { processSlash("/skills"); }, 10); // reopen refreshed
+                  setTimeout(() => processSlash("/skills"), 10);
                 },
               });
               return;
             }
-            var cfg2 = loadConfig();
-            var d = (cfg2.skillDisabled || []);
+            const cfg2 = loadConfig();
+            const d = (cfg2.skillDisabled || []);
             if (d.includes(val)) {
-              cfg2.skillDisabled = d.filter(function(n: string) { return n !== val; });
+              cfg2.skillDisabled = d.filter((n: string) => n !== val);
               showToast("skill ON: " + val, "ok");
             } else {
               cfg2.skillDisabled = d.concat([val]);
@@ -1232,39 +1086,31 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
             }
             saveConfig(cfg2);
             sess.config = cfg2;
-            closeModal(); setTimeout(function() { processSlash("/skills"); }, 10); // reopen refreshed
+            closeModal(); setTimeout(() => processSlash("/skills"), 10);
           },
         });
         return;
       }
       case "mcp": {
-        var sub2 = args[0];
+        const sub2 = args[0];
         if (sub2 === "add") { appendMessage({ role: "system", content: plugin.mcpAddCmd(args.slice(1)) }); return; }
         if (sub2 === "remove") { appendMessage({ role: "system", content: plugin.mcpRemoveCmd(args.slice(1)) }); return; }
         if (sub2 === "toggle") { appendMessage({ role: "system", content: plugin.mcpToggleCmd(args.slice(1)) }); return; }
         if (sub2 === "help") { appendMessage({ role: "system", content: plugin.mcpHelp() }); return; }
-        // MCP browser popup: list every server (defaults + added), toggle
-        // on/off with Enter, add new servers with A.
         openModal({ type: "mcp" });
         return;
       }
       case "connectors": {
-        var sub3 = args[0];
+        const sub3 = args[0];
         if (sub3 === "add") { appendMessage({ role: "system", content: plugin.connectorAddCmd(args.slice(1)) }); return; }
         if (sub3 === "remove") { appendMessage({ role: "system", content: plugin.mcpRemoveCmd(args.slice(1)) }); return; }
         if (sub3 === "toggle") { appendMessage({ role: "system", content: plugin.mcpToggleCmd(args.slice(1)) }); return; }
         if (sub3 === "help") { appendMessage({ role: "system", content: plugin.mcpHelp() }); return; }
-        // Connector browser: hosting/cloud services (Supabase, Railway, Vercel,
-        // Netlify, Cloudflare, Next.js). Same server store as /mcp, different
-        // preset list behind the "A" add flow.
         openModal({ type: "connectors" });
         return;
       }
       case "sandbox": {
-        var ssub = args[0];
-        // The setup wizard is a modal: docker check (with download link) →
-        // OS pick → live build. Bare /sandbox and /sandbox setup open it.
-        // Status/on/rm use ASYNC docker calls — sync ones froze the TUI.
+        const ssub = args[0];
         if (!ssub || ssub === "setup" || ssub === "os") { openModal({ type: "sandbox" }); return; }
         if (ssub === "guide") { appendMessage({ role: "system", content: sandbox.installGuide() }); return; }
         if (ssub === "off") {
@@ -1273,7 +1119,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
           return;
         }
         if (ssub === "on") {
-          sandbox.sandboxStatusAsync().then(function(stOn) {
+          sandbox.sandboxStatusAsync().then((stOn: any) => {
             if (stOn.container !== "running") { appendMessage({ role: "system", content: "Sandbox container is not running. Run /sandbox setup first." }); return; }
             sandbox.setSandboxEnabled(true);
             appendMessage({ role: "system", content: "Sandbox on — the agent can use the sandbox tool for isolated commands inside " + sandbox.CONTAINER + " when needed. Everything else stays on your machine." });
@@ -1282,11 +1128,13 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
         }
         if (ssub === "rm") {
           appendMessage({ role: "system", content: "Removing the sandbox container…" });
-          var rmCp = require("child_process");
-          var rmSpawn = rmCp.spawn("docker", ["rm", "-f", sandbox.CONTAINER], { windowsHide: true });
-          var rmDone = false;
-          var rmTimer = setTimeout(function() { if (!rmDone) { rmDone = true; try { rmSpawn.kill(); } catch {} appendMessage({ role: "system", content: "Sandbox removal timed out. Is Docker running?" }); } }, 30000);
-          rmSpawn.on("close", function(rmCode) {
+          const rmCp = require("child_process");
+          const rmSpawn = rmCp.spawn("docker", ["rm", "-f", sandbox.CONTAINER], { windowsHide: true });
+          let rmDone = false;
+          const rmTimer = setTimeout(() => {
+            if (!rmDone) { rmDone = true; try { rmSpawn.kill(); } catch {} appendMessage({ role: "system", content: "Sandbox removal timed out. Is Docker running?" }); }
+          }, 30000);
+          rmSpawn.on("close", (rmCode: number) => {
             if (rmDone) return;
             rmDone = true;
             clearTimeout(rmTimer);
@@ -1297,7 +1145,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
               appendMessage({ role: "system", content: "No sandbox container to remove." });
             }
           });
-          rmSpawn.on("error", function() {
+          rmSpawn.on("error", () => {
             if (rmDone) return;
             rmDone = true;
             clearTimeout(rmTimer);
@@ -1306,12 +1154,12 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
           return;
         }
         if (ssub === "status") {
-          sandbox.sandboxStatusAsync().then(function(st) {
-            var line = "Sandbox: ";
+          sandbox.sandboxStatusAsync().then((st: any) => {
+            let line = "Sandbox: ";
             if (st.docker === "not_installed") line += "Docker not installed";
             else if (st.docker === "no_daemon") line += "Docker installed, daemon not running";
-            else line += "Docker " + st.dockerVersion + " \u00b7 container " + st.container + (st.enabled ? " \u00b7 sandbox tool on" : " \u00b7 sandbox tool off");
-            if (st.pending) line += "\nWaiting for you to install Docker \u2014 when it's done say \"docker is ready\" (or run /sandbox).";
+            else line += "Docker " + st.dockerVersion + " · container " + st.container + (st.enabled ? " · sandbox tool on" : " · sandbox tool off");
+            if (st.pending) line += "\nWaiting for you to install Docker — when it's done say \"docker is ready\" (or run /sandbox).";
             else if (st.docker === "not_installed") line += "\nRun /sandbox for the setup wizard.";
             else if (st.container === "absent") line += "\nRun /sandbox to build it.";
             appendMessage({ role: "system", content: line });
@@ -1323,50 +1171,35 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
       }
       case "sessions": {
         const saved = listSessions();
-        if (!saved.length) {
-          appendMessage({ role: "system", content: "No saved sessions yet." });
-          return;
-        }
+        if (!saved.length) { appendMessage({ role: "system", content: "No saved sessions yet." }); return; }
         openModal({
-          type: "select",
-          title: "Saved Sessions",
-          searchable: true,
-          options: saved.map(function(s) {
+          type: "select", title: "Saved Sessions", searchable: true,
+          options: saved.map(s => {
             const when = (s.updatedAt || s.createdAt || s.mtime || "").replace("T", " ").slice(0, 16);
-            return { label: s.id, sub: when + " \u2014 " + s.messageCount + " msgs", value: s.id };
+            return { label: s.id, sub: when + " — " + s.messageCount + " msgs", value: s.id };
           }),
-          onPick: function(id) {
-            closeModal();
-            resumeSessionById(id);
-          },
+          onPick(id: string) { closeModal(); resumeSessionById(id); },
         });
         return;
       }
       case "settings": openModal({ type: "settings" }); return;
-      case "thinking": setShowThinking(function(v) { return !v; }); showToast("Thinking display: " + (showThinking() ? "on" : "off")); return;
-      case "details": setShowToolDetails(function(v) { return !v; }); showToast("Tool details: " + (showToolDetails() ? "on" : "off")); return;
+      case "thinking": setShowThinking(v => !v); persistUi(); showToast("Thinking display: " + (showThinking() ? "on" : "off")); return;
+      case "details": setShowToolDetails(v => !v); showToast("Tool details: " + (showToolDetails() ? "on" : "off")); return;
       case "theme": {
-        // Live preview: moving the selection immediately shows the theme
-        // behind the modal; Enter confirms and closes. Esc restores the
-        // previous theme without saving it.
-        var tOpts = themeOptions().map(function(t) { return { label: t.label, value: t.id, sub: t.desc }; });
+        const tOpts = themeOptions().map(t => ({ label: t.label, value: t.id, sub: t.desc }));
         if (args.length) {
-          if (setTheme(args[0].toLowerCase())) { showToast("Theme: " + args[0].toLowerCase(), "ok"); }
+          if (setTheme(args[0].toLowerCase())) showToast("Theme: " + args[0].toLowerCase(), "ok");
           else showToast("Unknown theme: " + args[0] + ". Try /theme to pick.", "error");
           return;
         }
-        var prevTheme = themeName();
+        const prevTheme = themeName();
         openModal({
-          type: "select", title: "Select Theme",
-          options: tOpts,
-          searchable: false,
-          preview: true,
+          type: "select", title: "Select Theme", options: tOpts, searchable: false, preview: true,
           onPick(val: any, opt: any) {
             if (setTheme(val)) { closeModal(); showToast("Theme: " + (opt?.label || val), "ok"); }
           },
           onPreview(val: any) { if (val) { try { setTheme(val); } catch {} } },
           onCancel() {
-            // Restore the pre-picker theme if the user bailed with Esc.
             if (themeName() !== prevTheme) { try { setTheme(prevTheme); } catch {} }
             closeModal();
           },
@@ -1375,17 +1208,14 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
       }
       case "exit": {
         persistUi(); saveSession(syncSessionForSave());
-        showToast("Session saved: " + (sess.conversationId || "???") + " \u2014 Goodbye!", "ok");
-        setTimeout(function() { quit(); }, 500);
+        showToast("Session saved: " + (sess.conversationId || "???") + " — Goodbye!", "ok");
+        setTimeout(() => quit(), 500);
         return;
       }
       default: showToast("Unknown command: /" + cmd + ". Try /help.", "error"); return;
     }
   }
-  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• Keybind-driven actions â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-  // The keyboard handler below is a pure dispatcher: it maps the incoming key
-  // to a configured action (see keybinds.ts / docs/keybinds.md) and runs it
-  // here, where all the app state lives.
+
   function editDelete(kind: "backspace" | "delete") {
     const ss = selStart(), se = selEnd();
     if (ss >= 0 && se > ss) {
@@ -1406,13 +1236,11 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
     historyReset();
   }
 
-  // Up/Down resolve by context: suggestion list first, then caret lines in a
-  // multi-line draft, then prompt history (readline recall).
   function caretOrHistory(dir: number) {
     const s2 = suggestions();
     if (s2.length) {
-      if (dir < 0) setAutoIndex(function(i) { return Math.max(0, i - 1); });
-      else setAutoIndex(function(i) { return Math.min(s2.length - 1, i + 1); });
+      if (dir < 0) setAutoIndex(i => Math.max(0, i - 1));
+      else setAutoIndex(i => Math.min(s2.length - 1, i + 1));
       return;
     }
     clearSelection();
@@ -1434,12 +1262,8 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
   }
 
   function runAction(action: string, ks?: string) {
-    const slash = kbs.slashFor(action);
-    if (slash) { processSlash(slash); return; }
     switch (action) {
       case "app_exit": quit(); return;
-      case "sidebar_toggle": setSidebarVisible(function(v) { return !v; }); return;
-      case "sidebar_cycle_tab": setSidebarTab(function(t) { return (t + 1) % 3; }); return;
       case "input_select_all": {
         const len = input().length;
         setSelStart(0); setSelEnd(len);
@@ -1457,22 +1281,16 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
         }
         return;
       }
-      case "subagent_list": {
-        // Open (or re-open) the /subagents panel. The panel itself handles
-        // close on Esc; refreshing history on every open keeps past-session
-        // runs visible without requiring a restart.
+      case "subagent_list":
         loadSubagentHistory({ limit: 200 });
         openModal({ type: "subagents" });
         return;
-      }
       case "command_list": {
-        if (!modal()) openModal({ type: "palette", onPick: function(cmd) { processSlash(cmd); } });
+        if (!modal()) openModal({ type: "palette", onPick: (cmd: string) => processSlash(cmd) });
         return;
       }
       case "session_interrupt": {
         if (thinking()) {
-          // Two-press confirm: the 1st ESC arms, the 2nd (within 2.5s) actually
-          // interrupts â€” accidental key taps no longer kill a running task.
           const now = Date.now();
           if (escArmAt && now - escArmAt < 2500) {
             escArmAt = null;
@@ -1501,79 +1319,68 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
       }
       case "input_submit": {
         if (pickSuggestion()) return;
-        var text = input().trim();
+        const text = input().trim();
         if (!text) return;
-        var wantsCmd = text.startsWith("/") || text.startsWith("!");
-        // "# fact" \u2014 self-edit memory: save to project LOOM.md, send nothing.
+        const wantsCmd = text.startsWith("/") || text.startsWith("!");
         if (text.startsWith("# ") && text.slice(2).trim()) {
           try {
             const memR = require("../core/memory.js");
             const okR = memR.appendMemory(text.slice(2).trim(), "project");
-            showToast(okR ? "Remembered \u2192 LOOM.md" : "Could not write LOOM.md", okR ? "ok" : "error");
+            showToast(okR ? "Remembered → LOOM.md" : "Could not write LOOM.md", okR ? "ok" : "error");
           } catch { showToast("Could not write LOOM.md", "error"); }
-          clearSelection();
-          setDraft("");
-          setPastedAt(0);
+          clearSelection(); setDraft(""); setPastedAt(0);
           return;
         }
-        // Busy: queue the draft (claude-style) â€” it sends when the turn ends.
         if (thinking() && !wantsCmd) {
           queueDraft(text);
-          clearSelection();
-          setDraft("");
-          setPastedAt(0);
-          showToast("Queued \u2014 " + queuedDrafts().length + " waiting", "ok");
+          clearSelection(); setDraft(""); setPastedAt(0);
+          showToast("Queued — " + queuedDrafts().length + " waiting", "ok");
           return;
         }
-        clearSelection();
-        setDraft("");
-        setPastedAt(0);
+        clearSelection(); setDraft(""); setPastedAt(0);
         submit(text);
         return;
       }
       case "input_newline": {
-        clearSelection();
-        setPastedAt(0);
+        clearSelection(); setPastedAt(0);
         const p = Math.min(cursor(), input().length);
         const v = input();
-        const n = v.slice(0, p) + "\n" + v.slice(p);
-        setDraft(n, p + 1);
+        setDraft(v.slice(0, p) + "\n" + v.slice(p), p + 1);
         historyReset();
         return;
       }
-      case "input_move_left": clearSelection(); setCursor(function(c) { return Math.max(0, c - 1); }); return;
-      case "input_move_right": clearSelection(); setCursor(function(c) { return Math.min(input().length, c + 1); }); return;
+      case "input_move_left": clearSelection(); setCursor(c => Math.max(0, c - 1)); return;
+      case "input_move_right": clearSelection(); setCursor(c => Math.min(input().length, c + 1)); return;
       case "line_home": clearSelection(); setCursor(0); return;
       case "line_end": clearSelection(); setCursor(input().length); return;
       case "input_backspace": setPastedAt(0); editDelete("backspace"); return;
       case "input_delete": setPastedAt(0); editDelete("delete"); return;
       case "prompt_autocomplete_next": {
-        var s = suggestions();
-        if (s.length) { setAutoIndex(function(i) { return Math.min(s.length - 1, (i || 0) + 1); }); return; }
-        var modes = ["build", "plan", "chat"];
-        var mi = modes.indexOf(inputMode());
-        var nm = modes[(mi + 1) % 3];
+        const s = suggestions();
+        if (s.length) { setAutoIndex(i => Math.min(s.length - 1, (i || 0) + 1)); return; }
+        const modes = ["build", "plan", "chat"];
+        const mi = modes.indexOf(inputMode());
+        const nm = modes[(mi + 1) % 3];
         setInputMode(nm as any);
         getSession().setMode(nm);
         return;
       }
       case "up_context": caretOrHistory(-1); return;
       case "down_context": caretOrHistory(1); return;
-      case "input_paste": return; // bracketed paste arrives via usePaste
-      default: return;
+      case "input_paste": return;
+      default: {
+        const slash = kbs.slashFor(action);
+        if (slash) { processSlash(slash); return; }
+        return;
+      }
     }
   }
 
-  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• Keyboard handler â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-  // Dispatcher: resolves the key against the configured keybinds (defaults
-  // merged with ~/.loom/tui.json) and runs the action. Keys that match no
-  // binding fall through to the typing branch at the bottom.
-  useKeyboard(function(key) {
-    var k = key.name;
-    var ks = kbs.keyString(key);
-    var ma = modal();
+  useKeyboard((key: any) => {
+    const k = key.name;
+    const ks = kbs.keyString(key);
+    const ma = modal();
 
-    // Global exit; Ctrl+C copies the chatbox selection first when one exists.
     if (kbs.is("app_exit", ks)) {
       const ss = selStart(), se = selEnd();
       if (!ma && ss >= 0 && se > ss) {
@@ -1582,55 +1389,38 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
         setCursor(se);
         if (selText) {
           copyText(selText);
-          showToast("Copied \"" + selText.slice(0, 24) + (selText.length > 24 ? "\u2026" : "") + "\" to clipboard.", "ok");
+          showToast("Copied \"" + selText.slice(0, 24) + (selText.length > 24 ? "…" : "") + "\" to clipboard.", "ok");
         }
         return;
       }
       quit(); return;
     }
-    if (kbs.is("sidebar_toggle", ks)) { runAction("sidebar_toggle"); return; }
-
-    // Ctrl+A â€” select the whole draft (readline-style).
     if (kbs.is("input_select_all", ks)) { runAction("input_select_all"); return; }
 
-    // Leader key (default ctrl+x): the next key runs a <leader>X binding.
     if (kbs.tapLeader(ks)) return;
     if (kbs.isLeaderPending()) {
       const la = kbs.leaderMatch(ks);
       if (la) { kbs.cancelLeader(); runAction(la, ks); return; }
-      // Any other key while the leader is pending cancels it, then falls
-      // through to normal processing (matches classic leader UX).
       kbs.cancelLeader();
     }
 
-    // Permission popup owns all keys while it is open (its own useKeyboard
-    // handles up/down/enter/typing/esc) â€” the input bar must not receive them.
     if (permission()) return;
 
-    // Shift+Tab â€” toggle session-wide auto-approval (no per-command asks).
-    // Plain Tab still cycles suggestions/modes; shift+tab is unbound, so this
-    // never collides with the suggestion picker.
     if (k === "tab" && key.shift && !ma) {
       const next = !autoPerm();
       setSessionAuto(next);
       showToast(next
-        ? "Auto-approve ON \u00B7 all commands allowed this session (Shift+Tab to toggle)"
-        : "Auto-approve OFF \u00B7 per-command asks are back (Shift+Tab to toggle)",
+        ? "Auto-approve ON · all commands allowed this session (Shift+Tab to toggle)"
+        : "Auto-approve OFF · per-command asks are back (Shift+Tab to toggle)",
         next ? "ok" : "info", 4000);
       return;
     }
 
-    // Ctrl+E â€” keyboard expand/collapse for the most recent collapsed user
-    // bubble (clicking a bubble toggles it too).
     if (kbs.is("user_expand", ks)) { runAction("user_expand"); return; }
-
-    // Escape cancels a pending leader.
     if (k === "escape" && kbs.isLeaderPending()) { kbs.cancelLeader(); return; }
 
-    // Vim mode (/vim): Esc toggles NORMAL; in NORMAL, single keys edit the
-    // draft without inserting. i/a/I/A return to INSERT (default behavior).
     if (vimMode() && !ma && !permission()) {
-      if (k === "escape") { setVimNormal(function(v) { return !v; }); return; }
+      if (k === "escape") { setVimNormal(v => !v); return; }
       if (vimNormal()) {
         const vl = input();
         const vc = Math.min(cursor(), vl.length);
@@ -1652,51 +1442,25 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
           case "I": setVimNormal(false); setCursor(0); return;
           case "A": setVimNormal(false); setCursor(vl.length); return;
         }
-        return; // swallow everything else while NORMAL
+        return;
       }
     }
 
-    // Interrupt / draft-clear / modal cancel (default: ESC). A modal_cancel
-    // key without an open modal behaves like an interrupt (legacy ESC UX).
     if (kbs.is("session_interrupt", ks) || kbs.is("modal_cancel", ks)) { runAction("session_interrupt", ks); return; }
-
-    // Ctrl+P palette
     if (kbs.is("command_list", ks)) { runAction("command_list"); return; }
-
-    // Modal active => halt
     if (ma) return;
-
-    // Sidebar tab
-    if (kbs.is("sidebar_cycle_tab", ks)) { runAction("sidebar_cycle_tab"); return; }
-
-    // Tab â€” next suggestion, or cycle build/plan/chat when the list is empty.
     if (kbs.is("prompt_autocomplete_next", ks)) { runAction("prompt_autocomplete_next"); return; }
-
-    // Suggest nav / caret lines / history recall.
     if (kbs.is("up_context", ks)) { runAction("up_context"); return; }
     if (kbs.is("down_context", ks)) { runAction("down_context"); return; }
-
-    // Cursor movement: left/right always; up/down surf lines when the draft
-    // is multi-line (otherwise they recall prompt history). Moving the caret
-    // drops the selection (readline behavior).
     if (kbs.is("input_move_left", ks)) { runAction("input_move_left"); return; }
     if (kbs.is("input_move_right", ks)) { runAction("input_move_right"); return; }
     if (kbs.is("line_home", ks)) { runAction("line_home"); return; }
     if (kbs.is("line_end", ks)) { runAction("line_end"); return; }
-
-    // Enter (submit) and Shift+Enter (newline) â€” the chatbox grows with the
-    // text (up to its limit) and scrolls beyond it.
     if (kbs.is("input_submit", ks)) { runAction("input_submit"); return; }
     if (kbs.is("input_newline", ks)) { runAction("input_newline"); return; }
-
-    // Backspace / Delete â€” operate at the caret, or drop the whole selection
-    // when one is active.
     if (kbs.is("input_backspace", ks)) { runAction("input_backspace"); return; }
     if (kbs.is("input_delete", ks)) { runAction("input_delete"); return; }
 
-    // Typing â€” insert at the caret (or replace the selection). Sequences
-    // containing ESC (e.g. arrow keys or \x1b]52; clipboard OSC) must never
-    // be treated as text.
     if (!key.ctrl && !key.meta && key.sequence && key.sequence.indexOf("\x1b") < 0 && key.sequence.length <= 10 && key.sequence !== "\r" && key.sequence !== "\n" && key.sequence !== "\t") {
       const v = input();
       const ss = selStart(), se = selEnd();
@@ -1711,7 +1475,6 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
     }
   });
 
-  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• Mouse selection â†’ copy â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   function copyText(text: string) {
     try { process.stdout.write("\x1b]52;c;" + Buffer.from(text, "utf8").toString("base64") + "\x07"); } catch {}
     if (process.platform === "win32" && process.env.LOOM_NO_CLIPBOARD !== "1") {
@@ -1720,7 +1483,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
       } catch {}
     }
   }
-  useSelectionHandler(function(sel: any) {
+  useSelectionHandler((sel: any) => {
     if (!sel || sel.isDragging || sel.isStart) return;
     const ax = Math.min(Number(sel.anchor.x), Number(sel.focus.x));
     const ay = Math.min(Number(sel.anchor.y), Number(sel.focus.y));
@@ -1729,21 +1492,18 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
     if (ax === bx && ay === by) return;
     try {
       const lines = new TextDecoder().decode(renderer.currentRenderBuffer.getRealCharBytes(true)).split("\n");
-      const parts: string[] = [];
-      for (let y = ay; y <= by; y++) parts.push((lines[y] || "").slice(ax, bx + 1));
-      const text = parts.join("\n").replace(/\s+$/g, "").trimEnd();
+      const out: string[] = [];
+      for (let y = ay; y <= by; y++) out.push((lines[y] || "").slice(ax, bx + 1));
+      const text = out.join("\n").replace(/\s+$/g, "").trimEnd();
       if (!text.trim()) return;
       copyText(text);
       showToast("Copied " + text.length + " chars to clipboard.", "ok");
     } catch {}
   });
 
-  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• Paste â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-  usePaste(event => {
-    if (modal()) return;
-    // Multi-line paste is kept: the chatbox grows up to its height limit and
-    // scrolls beyond it, showing a "~N lines" indicator to save space.
-    const txt = new TextDecoder().decode((event as any).bytes || "").replace(/\r\n?/g, "\n");
+  usePaste((event: any) => {
+    if (modal() || permission()) return;
+    const txt = new TextDecoder().decode(event?.bytes || "").replace(/\r\n?/g, "\n");
     if (!txt) return;
     const v = input();
     const ss = selStart(), se = selEnd();
@@ -1757,91 +1517,60 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
     historyReset();
   });
 
-  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• Lifecycle â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   let _skillToastOff: (() => void) | null = null;
   let _skillDoneOff: (() => void) | null = null;
   let _taskToastOff: (() => void) | null = null;
-  onMount(function() {
-    // Keep the renderer's frame pump alive. The engine only runs its
-    // frame callback while there's a non-complete timeline registered;
-    // without one it drops the renderer to "not live" after the first
-    // paint and no further frames are flushed (frozen splash).
+  onMount(() => {
     createTimeline({ duration: Infinity, autoplay: true });
-
     refreshProviderState();
     refreshUsage();
     wireTodoEvents();
-    // Hydrate the subagent history from disk so /subagents can show past runs.
     loadSubagentHistory({ limit: 200 });
-    registerSuggestionPicker(function(label: string) {
+    registerSuggestionPicker((label: string) => {
       if (label.startsWith("/")) processSlash(label);
       else if (label.startsWith("!")) { appendMessage({ role: "user", content: label }); appendMessage({ role: "system", content: runShell(label.slice(1)) }); }
       else if (label.startsWith("@")) setDraft(label + " ");
     });
-    if (props.resumeSession) {
-      resumeSessionById(props.resumeSession);
-    }
-    if (props.initialPrompt) setTimeout(function() { submit(props.initialPrompt); }, 200);
-    // One-time session-start prompt: "Allow all commands in this session?"
-    // (Shift+Tab toggles auto-approval any time). Skipped when auto-approval
-    // is already on, when a popup/modal is open, and in the test harness
-    // (tests drive the popup explicitly via askSessionPermissions()).
+    if (props.resumeSession) resumeSessionById(props.resumeSession);
+    if (props.initialPrompt) setTimeout(() => submit(props.initialPrompt!), 200);
     if (!process.env.LOOM_NO_SESSION_PROMPT && !autoPerm() && !permission() && !modal() && !props.resumeSession) {
-      setTimeout(function() {
-        if (!autoPerm() && !permission() && !modal()) askSessionPermissions();
-      }, 500);
+      setTimeout(() => { if (!autoPerm() && !permission() && !modal()) askSessionPermissions(); }, 500);
     }
-    // Sandbox install pending from a previous session: remind on start so
-    // the user knows to come back with "docker is ready". Config-only check
-    // (no docker invocation — the old sandboxStatus() froze startup).
-    // Skipped in the test harness (same flag as the session prompt).
     try {
       if (!process.env.LOOM_NO_SESSION_PROMPT && sandbox.sandboxPending()) {
-        setTimeout(function() {
+        setTimeout(() => {
           appendMessage({ role: "system", content: "Docker sandbox setup is still pending. Install Docker (see /sandbox guide), then say \"docker is ready\" and I'll build it automatically." });
         }, 800);
       }
     } catch {}
-    _skillToastOff = on("trigger:skill", function(d: any) {
-      const names = (d?.skills || []).join(", ");
-      showToast("skill: " + names, "ok", 5000);
+    _skillToastOff = on("trigger:skill", (d: any) => {
+      showToast("skill: " + (d?.skills || []).join(", "), "ok", 5000);
       setSkillActive(d?.skills || []);
     });
-    _skillDoneOff = on("turn:end", function(d: any) {
+    _skillDoneOff = on("turn:end", (d: any) => {
       if (d?.skills?.length) showToast("skill handled: " + d.skills.join(", "), "ok");
     });
-    // Background-task completion toasts: bash background:true tasks finishing
-    // (done/error/killed) surface immediately so the model's "started a
-    // server" isn't silent forever.
-    var taskStatuses: Record<string, string> = {};
-    _taskToastOff = on("tasks:changed", function() {
+    const taskStatuses: Record<string, string> = {};
+    _taskToastOff = on("tasks:changed", () => {
       try {
-        var bt = require("../core/background-tasks.js");
-        var rows = bt.listBackgroundTasks();
-        for (var i = 0; i < rows.length; i++) {
-          var t = rows[i];
-          var prev = taskStatuses[t.id];
+        const bt = require("../core/background-tasks.js");
+        const rows = bt.listBackgroundTasks();
+        for (const t of rows) {
+          const prev = taskStatuses[t.id];
           taskStatuses[t.id] = t.status;
           if (prev === "running" && t.status !== "running") {
-            showToast("Task " + t.id + " " + t.status + (t.exitCode != null ? " (exit " + t.exitCode + ")" : "") + " \u2014 /tasks for output", t.status === "done" ? "ok" : "error", 6000);
+            showToast("Task " + t.id + " " + t.status + (t.exitCode != null ? " (exit " + t.exitCode + ")" : "") + " — /tasks for output", t.status === "done" ? "ok" : "error", 6000);
           }
         }
       } catch {}
     });
-    (globalThis as any).__loomTrace?.("onMount-done", new Error("mount complete"));
   });
-  onCleanup(function() { persistUi(); if (_skillToastOff) _skillToastOff(); if (_skillDoneOff) _skillDoneOff(); if (_taskToastOff) _taskToastOff(); });
+  onCleanup(() => { persistUi(); if (_skillToastOff) _skillToastOff(); if (_skillDoneOff) _skillDoneOff(); if (_taskToastOff) _taskToastOff(); });
 
-  var showSplash = createMemo(function() { return messages().length === 0; });
-
-  // opencode hides completed tool parts when "tool details" are off
-  // (shouldHide); running rows and errors always stay. Messages drive the
-  // chat render, so filtering HERE (a memo over messages() + showToolDetails())
-  // is the only path that reliably re-renders the chat on the toggle.
-  var chatMessages = createMemo(function() {
+  const chatMessages = createMemo(() => {
     const msgs = messages();
     if (showToolDetails()) return msgs;
-    return msgs.map(function(m: any) {
+    return msgs.map((m: any) => {
       if (m.role !== "assistant" || (!m.parts && !m.tools)) return m;
       return Object.assign({}, m, {
         parts: (m.parts || []).filter((p: any) => p.type !== "tool" || p.tool.status !== "done"),
@@ -1850,34 +1579,41 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
     });
   });
 
-  return (
-    <box position="absolute" top={0} left={0} right={0} bottom={0} flexDirection="column" backgroundColor={ui.bg}>
-      {showSplash() ? (
-        <SplashScreen />
-      ) : (
-        <box flexDirection="column" flexGrow={1}>
-          <BreadcrumbBar />
-          <box flexDirection="row" flexGrow={1}>
-            {/* Chat column: messages + input share one column so the input
-                never visually bleeds under the sidebar. */}
-            <box flexDirection="column" flexGrow={1}>
-              <ChatArea messages={chatMessages} thinking={thinking()} />
-              <InputBar />
-            {/* Sidebar separated by a breathing gap â€” no shared bottom edge. */}
+  const Shell = () => {
+    return (
+      <box flexDirection="column" flexGrow={1} paddingX={1}>
+        <Show
+          when={messages().length === 0}
+          fallback={
+            <>
+              <Stage messages={chatMessages} thinking={thinking()} />
+              <Gate />
+              <LoomBar />
+            </>
+          }
+        >
+          <Show when={!permission()} fallback={
+            <box flexDirection="column" flexGrow={1} justifyContent="center">
+              <Gate />
             </box>
-            <Show when={sidebarVisible()}>
-              <box width={39} flexShrink={0} marginLeft={1}>
-                <Sidebar show={sidebarVisible()} />
-              </box>
-            </Show>
-          </box>
-        </box>
-      )}
+          }>
+            <box flexDirection="column" flexGrow={1} justifyContent="center">
+              <Boot />
+              <LoomBar splash />
+            </box>
+            <Gate />
+          </Show>
+        </Show>
+      </box>
+    );
+  };
+
+  return (
+    <box position="absolute" top={0} left={0} right={0} bottom={0} flexDirection="column" backgroundColor={ui.bg}
+      onMouseMove={(e: any) => trackPointer(e)}>
+      <Shell />
 
       {(() => {
-        // Snapshot the modal object once: closeModal() inside an onCancel / key
-        // handler nulls the store mid-render, so reading modal() again in
-        // props would throw "null is not an object" on every Escape.
         const m = modal();
         if (!m) return null;
         return (
@@ -1886,18 +1622,18 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
             {m.type === "select" ? <SelectModal title={m.title} options={m.options ?? []} onPick={m.onPick} searchable={m.searchable} onCancel={m.onCancel} onPreview={m.onPreview} /> : null}
             {m.type === "input" ? <InputModal title={m.title} placeholder={m.placeholder} onPick={m.onPick} isKey={m.isKey} value={m.value} caretStart={m.caretStart} onCancel={m.onCancel} /> : null}
             {m.type === "settings" ? <SettingsModal /> : null}
-            {m.type === "palette" ? <PaletteModal onPick={m.onPick} /> : null}
+            {m.type === "palette" ? <Deck onPick={m.onPick} /> : null}
             {m.type === "mcp" ? <McpModal /> : null}
             {m.type === "connectors" ? <ConnectorsModal /> : null}
             {m.type === "sandbox" ? <SandboxModal /> : null}
             {m.type === "graph" ? <GraphModal graph={m.graph} err={m.graphError} /> : null}
             {m.type === "subagents" ? <SubagentPanel /> : null}
             {m.type === "subagent_detail" ? <SubagentDetailPanel /> : null}
-         </box>
+          </box>
         );
       })()}
 
-      <ToastOverlay />
+      <Toasts />
     </box>
   );
 }

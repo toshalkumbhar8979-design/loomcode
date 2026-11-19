@@ -5,6 +5,7 @@ const { execSync, spawn } = require('child_process');
 const { glob: globLib } = require('glob');
 const { commandRiskLabel } = require('../core/permissions');
 const { loadConfig } = require('../config/settings');
+const { withDeadline } = require('../core/deadline');
 const dnsPromises = require('dns').promises;
 
 const cwd = process.cwd();
@@ -14,6 +15,118 @@ function globIgnore(full) {
   if (!abs) return ['**/node_modules/**', '**/.git/**'];
   const base = path.posix.dirname(full);
   return ['node_modules', '.git'].map((n) => path.posix.join(base, '**', n, '**'));
+}
+
+/**
+ * Translate one POSIX-flavoured command into Windows PowerShell 5.1.
+ * Models routinely emit `ls -la`, `cat file`, or `mkdir -p dir`; PowerShell
+ * rejects those flags before the command runs. Only the leading utility is
+ * rewritten; pipes, redirection and PowerShell cmdlets pass through untouched.
+ * @param {string} command
+ * @returns {string}
+ */
+function translateWindowsPart(command) {
+  const c = String(command || '').trim();
+  const m = /^([a-zA-Z][\w.-]*)(?:\s+([\s\S]*))?$/.exec(c);
+  if (!m) return c;
+  const cmd = m[1];
+  const rest = (m[2] || '').trim();
+  switch (cmd) {
+    case 'ls': {
+      const force = /(^|\s)-[a-zA-Z]*a/.test(rest) || /--all\b/.test(rest);
+      const target = rest.replace(/(^|\s)--?[a-zA-Z-]+/g, ' ').trim();
+      return `Get-ChildItem${force ? ' -Force' : ''}${target ? ' ' + target : ''}`;
+    }
+    case 'cat': {
+      const target = rest.replace(/^--?[\w-]+\s+/, '').trim();
+      return target ? `Get-Content ${target}` : c;
+    }
+    case 'pwd':
+      return 'Get-Location';
+    case 'mkdir': {
+      const target = rest.replace(/^-[pP]\s+/, '').trim();
+      return target ? `New-Item -ItemType Directory -Force -Path ${target}` : c;
+    }
+    case 'rm': {
+      const recursive = /(^|\s)-[a-zA-Z]*[rR]/.test(rest);
+      const force = /(^|\s)-[a-zA-Z]*f/.test(rest);
+      const target = rest.replace(/(^|\s)--?[a-zA-Z-]+/g, ' ').trim();
+      if (!target) return c;
+      return `Remove-Item${recursive ? ' -Recurse' : ''}${force ? ' -Force' : ''} -LiteralPath ${target}`;
+    }
+    case 'cp': {
+      const recursive = /(^|\s)-[a-zA-Z]*[rR]/.test(rest);
+      const args = rest.replace(/(^|\s)--?[a-zA-Z-]+/g, ' ').trim();
+      return args ? `Copy-Item${recursive ? ' -Recurse' : ''} -Force ${args}` : c;
+    }
+    case 'mv': {
+      const args = rest.replace(/(^|\s)--?[a-zA-Z-]+/g, ' ').trim();
+      return args ? `Move-Item -Force ${args}` : c;
+    }
+    case 'touch':
+      return rest ? `New-Item -ItemType File -Force -Path ${rest}` : c;
+    case 'which':
+      return rest ? `(Get-Command ${rest}).Source` : c;
+    case 'head': {
+      const n = /-n\s*(\d+)/.exec(rest);
+      const file = rest.replace(/-n\s*\d+/, '').trim();
+      return file ? `Get-Content -LiteralPath ${file} -TotalCount ${n ? n[1] : 10}` : c;
+    }
+    case 'tail': {
+      const n = /-n\s*(\d+)/.exec(rest);
+      const file = rest.replace(/-n\s*\d+/, '').trim();
+      return file ? `Get-Content -LiteralPath ${file} -Tail ${n ? n[1] : 10}` : c;
+    }
+    case 'grep': {
+      const recursive = /(^|\s)-[a-zA-Z]*r/.test(rest);
+      const args = rest.replace(/(^|\s)--?[a-zA-Z-]+/g, ' ').trim();
+      const parts = /^(".*?"|'.*?'|\S+)\s+(.*)$/.exec(args);
+      if (!parts) return c;
+      return recursive
+        ? `Get-ChildItem -Recurse -File | Select-String -Pattern ${parts[1]}`
+        : `Select-String -Path ${parts[2]} -Pattern ${parts[1]}`;
+    }
+    case 'find': {
+      const name = /-name\s+("[^"]+"|'[^']+'|\S+)/.exec(rest);
+      return name ? `Get-ChildItem -Recurse -Filter ${name[1]}` : 'Get-ChildItem -Recurse';
+    }
+    case 'env':
+      return 'Get-ChildItem Env:';
+    case 'date':
+      return 'Get-Date';
+    case 'ps':
+      return 'Get-Process';
+    case 'kill': {
+      const pid = rest.replace(/(^|\s)--?[a-zA-Z-]+/g, ' ').trim();
+      return pid ? `Stop-Process -Id ${pid} -Force` : c;
+    }
+    default:
+      return c;
+  }
+}
+
+/**
+ * Normalize a command for Windows PowerShell 5.1: translate common Unix
+ * utilities and rewrite `a && b` / `a || b` into PowerShell conditionals.
+ * @param {string} command
+ * @returns {string}
+ */
+function windowsShellCommand(command) {
+  const c = String(command || '').trim();
+  if (!c) return c;
+  const orParts = c.split(/\s*\|\|\s*/);
+  if (orParts.length > 1) {
+    return orParts
+      .map((part, i) => (i === 0 ? windowsShellCommand(part) : `if (-not $?) { ${windowsShellCommand(part)} }`))
+      .join('; ');
+  }
+  const andParts = c.split(/\s*&&\s*/);
+  if (andParts.length > 1) {
+    return andParts
+      .map((part, i) => (i === 0 ? translateWindowsPart(part) : `if ($?) { ${translateWindowsPart(part)} }`))
+      .join('; ');
+  }
+  return translateWindowsPart(c);
 }
 
 // ---------------------------------------------------------------------------
@@ -89,7 +202,7 @@ const MODES = ['build', 'plan', 'chat'];
 // Tools that never mutate the filesystem/state — safe to expose in plan mode.
 // task delegates to a read-only-or-not subagent, so from the CALLER's side it
 // is safe in plan mode (the subagent's own tool list gates what it may do).
-const READ_ONLY_TOOLS = ['read', 'glob', 'grep', 'webfetch', 'websearch', 'todowrite', 'todoread', 'task'];
+const READ_ONLY_TOOLS = ['read', 'glob', 'grep', 'webfetch', 'websearch', 'todowrite', 'todoread', 'task', 'spawn_agents'];
 
 // Optional path sandbox: when config.sandbox.paths is set, filesystem tools
 // only operate inside those roots (defense in depth on top of permissions).
@@ -159,7 +272,7 @@ const TOOLS = {
   },
   write: {
     name: 'write',
-    description: 'Write a file to the local filesystem.',
+    description: 'Write a file to the local filesystem. Creates or completely replaces a file and any missing parent directories. Prefer the edit tool for targeted changes to an existing file; use write when creating a new file or replacing the whole file.',
     parameters: {
       filePath: { type: 'string', required: true, description: 'Absolute path to the file' },
       content: { type: 'string', required: true, description: 'Content to write' },
@@ -177,13 +290,13 @@ const TOOLS = {
   },
   edit: {
     name: 'edit',
-    description: 'Performs exact string replacements in files. Pass either oldString/newString for one replacement, or an edits array of {oldString, newString, replaceAll?} entries applied in order (multi-edit — prefer this over several edit calls on the same file).',
+    description: 'Performs exact string replacements in files. Use edit for targeted changes: oldString must match exactly and must occur exactly once unless replaceAll is true, and oldString/newString must differ. Pass either oldString/newString for one replacement, or an edits array of {oldString, newString, replaceAll?} entries applied in order (prefer this over several edit calls on the same file).',
     parameters: {
       filePath: { type: 'string', required: true, description: 'Absolute path to the file' },
-      oldString: { type: 'string', required: false, description: 'Text to replace (single edit)' },
-      newString: { type: 'string', required: false, description: 'Replacement text (single edit)' },
+      oldString: { type: 'string', required: false, description: 'Exact text to replace (single edit)' },
+      newString: { type: 'string', required: false, description: 'Replacement text (must differ from oldString)' },
       edits: { type: 'array', required: false, description: 'Multiple edits applied in order: [{oldString, newString, replaceAll?}, ...]' },
-      replaceAll: { type: 'boolean', required: false, description: 'Replace all occurrences' },
+      replaceAll: { type: 'boolean', required: false, description: 'Replace all occurrences of oldString (default false)' },
       dryRun: { type: 'boolean', required: false, description: 'Preview the edit without writing' },
     },
     async execute(params) {
@@ -191,12 +304,11 @@ const TOOLS = {
       if (!pathAllowed(filePath)) return { error: sandboxDenied('edit', filePath) };
       if (!fsSync.existsSync(filePath)) return { error: `File not found: ${filePath}` };
       let content = await fs.readFile(filePath, 'utf8');
-      // Multi-edit path: apply each {oldString, newString} in order against
-      // the in-memory copy, then write once. Sequential application means a
-      // later edit can target text an earlier edit inserted. Entries enforce
-      // uniqueness (a multi-edit that silently hits 2+ matches is how files
-      // get corrupted); the classic single oldString path keeps its
-      // replace-first-occurrence semantics for back-compat.
+      // Apply each {oldString, newString} in order against the in-memory copy,
+      // then write once. Sequential application means a later edit can target
+      // text an earlier edit inserted. Every entry must be a real change with a
+      // unique match (unless replaceAll) — silently replacing the first of
+      // several matches is how files get corrupted.
       const multi = Array.isArray(params.edits) && params.edits.length > 0;
       const edits = multi
         ? params.edits
@@ -209,17 +321,24 @@ const TOOLS = {
         const e = edits[i] || {};
         const oldStr = e.oldString;
         const newStr = e.newString;
+        const prefix = multi ? `edits[${i}]: ` : '';
         if (typeof oldStr !== 'string' || typeof newStr !== 'string') {
-          return { error: `edits[${i}]: oldString and newString must be strings` };
+          return { error: `${prefix}oldString and newString must be strings` };
+        }
+        if (oldStr === '') {
+          return { error: `${prefix}oldString cannot be empty when editing an existing file — use write for a full-file replacement` };
+        }
+        if (oldStr === newStr) {
+          return { error: `${prefix}oldString and newString are identical — no changes to apply` };
         }
         const count = content.split(oldStr).length - 1;
-        if (count === 0) return { error: multi ? `edits[${i}]: oldString not found in content` : 'oldString not found in content' };
+        if (count === 0) return { error: `${prefix}oldString not found in content` };
         if (e.replaceAll) {
           content = content.split(oldStr).join(newStr);
           applied.push(`replaced ${count} occurrences`);
         } else {
-          if (multi && count > 1) {
-            return { error: `edits[${i}]: found ${count} matches for oldString — provide more context to make it unique` };
+          if (count > 1) {
+            return { error: `${prefix}found ${count} matches for oldString — provide more context to make it unique, or set replaceAll to true` };
           }
           content = content.replace(oldStr, newStr.replace(/\$/g, '$$$$'));
           applied.push('replaced 1 occurrence');
@@ -236,13 +355,13 @@ const TOOLS = {
   },
   bash: {
     name: 'bash',
-    description: 'Execute a shell command on the user\'s machine. Pass sandbox:true to run it INSIDE the Docker sandbox instead (docker exec into loom-sandbox, project at /workspace) — required for anything the user asks to run "in the sandbox".',
+    description: 'Execute a shell command on the user\'s machine. On Windows this runs Windows PowerShell 5.1: prefer PowerShell cmdlets (Get-ChildItem, Get-Content, New-Item, Select-String) and avoid Unix-only flags. Common Unix commands (ls/cat/mkdir/rm/cp/mv/touch/grep/find/head/tail) and && are translated automatically, but PowerShell syntax is safer. Pass sandbox:true to run it INSIDE the Docker sandbox instead (docker exec into loom-sandbox, project at /workspace) — required for anything the user asks to run "in the sandbox".',
     parameters: {
       command: { type: 'string', required: true, description: 'The command to execute' },
       workdir: { type: 'string', required: false, description: 'Working directory' },
       timeoutMs: { type: 'number', required: false, description: 'Kill the command after this many ms (default 60000, max 600000)' },
       background: { type: 'boolean', required: false, description: 'Run without waiting (dev servers, long builds). Returns a task id immediately; check with the /tasks panel or the tasks tool.' },
-      sandbox: { type: 'boolean', required: false, description: 'Run this command inside the Docker sandbox container (docker exec) instead of on the host. Use when the user asked for the sandbox or isolation is needed; defaults to the host.' },
+      sandbox: { type: 'boolean', required: false, description: 'Run this command inside the Docker sandbox container only when the user explicitly asked for sandbox/isolation; otherwise omit it and run on the host.' },
     },
     async execute(params, ctx) {
       // Sandbox opt-in: the SAME command goes through docker exec into the
@@ -263,15 +382,48 @@ const TOOLS = {
         if (res.code !== 0) out += `\n[exit code: ${res.code}]`;
         return out || 'command completed';
       }
+      // Host commands on Windows go through PowerShell 5.1. Translate the
+      // Unix idioms models habitually emit (ls -la, cat, &&) before they hit
+      // the shell; sandbox commands below stay untouched (Linux container).
+      const hostCommand = process.platform === 'win32' ? windowsShellCommand(params.command) : params.command;
       // Background mode: fire-and-forget via the task registry.
       if (params.background) {
         const bt = require('../core/background-tasks');
         if (!pathAllowed(params.workdir || cwd)) return { error: sandboxDenied('bash', params.workdir || cwd) };
         const risk = params._approved ? null : commandRiskLabel(params.command);
         if (risk) return { error: `Blocked by safety filter: ${risk}. Approve it via the permission prompt to run it anyway.` };
-        const res = /** @type {{id:string}|{error:string}} */ (bt.startBackgroundTask(params.command));
+        const res = /** @type {{id:string}|{error:string}} */ (bt.startBackgroundTask(hostCommand));
         if ('error' in res) return { error: res.error };
         return `Started background task ${res.id}. Keep working; check output with /tasks (or bash background:false re-run).`;
+      }
+      // Live terminal execution: when the TUI is watching, prefer a PTY so
+      // the command sees a real terminal (colors, progress, interactive CLIs)
+      // and chunks stream into the transcript as they arrive. If the PTY
+      // cannot be created, fall through to the pipe implementation below.
+      const stream = ctx && typeof ctx.stream === 'function' ? ctx.stream : null;
+      if (stream && process.env.LOOM_PTY !== '0') {
+        const pty = require('../core/pty');
+        if (pty.available()) {
+          const dir = params.workdir || cwd;
+          if (!pathAllowed(dir)) return { error: sandboxDenied('bash', dir) };
+          const risk = params._approved ? null : commandRiskLabel(params.command);
+          if (risk) return { error: `Blocked by safety filter: ${risk}. Approve it via the permission prompt to run it anyway.` };
+          if (!params.command.trim()) return 'command completed (empty)';
+          const timeoutMs = Math.min(Math.max(Number(params.timeoutMs) || 60000, 1000), 600000);
+          const res = await pty.run(hostCommand, {
+            cwd: dir,
+            timeoutMs,
+            signal: ctx && ctx.signal,
+            onChunk: (text) => { try { stream(text, 'out'); } catch {} },
+          });
+          if (!res.fallback) {
+            let out = res.output;
+            if (res.timedOut) out += `\n[timed out after ${Math.round(timeoutMs / 1000)}s — killed]`;
+            else if (res.aborted) out += '\n[aborted by user]';
+            else if (res.code !== 0) out += `\n[exit code: ${res.code}]`;
+            return out || 'command completed';
+          }
+        }
       }
       return new Promise((resolve) => {
         const dir = params.workdir || cwd;
@@ -286,7 +438,7 @@ const TOOLS = {
           const opts = { cwd: dir, windowsHide: true };
           const isWin = process.platform === 'win32';
           const child = isWin
-            ? spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', '[Console]::OutputEncoding=[Text.Encoding]::UTF8;' + params.command], opts)
+            ? spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', '[Console]::OutputEncoding=[Text.Encoding]::UTF8;' + hostCommand], opts)
             : spawn('/bin/sh', ['-c', params.command], opts);
           // Kill after timeoutMs (default 60s, cap 600s) so a hung command
           // can never wedge the turn forever.
@@ -295,19 +447,28 @@ const TOOLS = {
           let aborted = false;
           const killChild = () => {
             if (isWin) {
-              try { execSync('taskkill /PID ' + child.pid + ' /T /F', { stdio: 'ignore', windowsHide: true }); } catch {}
+              // taskkill can itself block while a process tree is unwinding;
+              // launching it asynchronously preserves the tool's deadline.
+              try {
+                const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+                killer.unref();
+              } catch {}
             }
-            child.kill('SIGKILL');
+            try { child.kill('SIGKILL'); } catch {}
           };
-          const killTimer = setTimeout(() => { timedOut = true; killChild(); }, timeoutMs);
-          child.on('close', () => clearTimeout(killTimer));
+          let killTimer = null;
           // ESC/interrupt: the session's abort signal kills the running
           // command so the user isn't left waiting on a zombie process.
           const sig = ctx && ctx.signal;
           if (sig) {
-            if (sig.aborted) { aborted = true; clearTimeout(killTimer); killChild(); }
+            if (sig.aborted) { aborted = true; killChild(); }
             else {
-              const onAbort = () => { aborted = true; clearTimeout(killTimer); killChild(); };
+              const onAbort = () => {
+                aborted = true;
+                if (killTimer) clearTimeout(killTimer);
+                killChild();
+                setTimeout(() => finish(null), 250);
+              };
               try { sig.addEventListener('abort', onAbort, { once: true }); child.on('close', () => { try { sig.removeEventListener('abort', onAbort); } catch {} }); } catch {}
             }
           }
@@ -336,7 +497,11 @@ const TOOLS = {
             }
             if (stream) { try { stream(t, 'err'); } catch {} }
           });
-          child.on('close', (code) => {
+          let settled = false;
+          const finish = (code) => {
+            if (settled) return;
+            settled = true;
+            if (killTimer) clearTimeout(killTimer);
             let result = '';
             if (stdout) result += stdout;
             if (stderr) result += `\n[stderr]\n${stderr}`;
@@ -345,8 +510,21 @@ const TOOLS = {
             else if (code !== 0) result += `\n[exit code: ${code}]`;
             if (truncated) result += '\n[output truncated at 10 MB]';
             resolve(result || 'command completed');
+          };
+          // Windows sometimes keeps the PowerShell pipe open after taskkill.
+          // Resolve shortly after killing so a tool timeout is always bounded.
+          killTimer = setTimeout(() => {
+            timedOut = true;
+            killChild();
+            setTimeout(() => finish(null), 250);
+          }, timeoutMs);
+          child.on('close', finish);
+          child.on('error', (err) => {
+            if (settled) return;
+            settled = true;
+            if (killTimer) clearTimeout(killTimer);
+            resolve({ error: `Error executing command: ${err.message}` });
           });
-          child.on('error', (err) => resolve({ error: `Error executing command: ${err.message}` }));
         } catch (e) {
           resolve({ error: `Error executing command: ${e.message}` });
         }
@@ -355,7 +533,7 @@ const TOOLS = {
   },
   sandbox: {
     name: 'sandbox',
-    description: 'Run a shell command INSIDE the Docker sandbox via `docker exec loom-sandbox sh -lc "<command>"` (isolated Linux container, project at /workspace). Use when the user asked for the sandbox, the command is risky (installs, deletions, untrusted scripts), or a Linux-only environment is needed. Equivalent to bash with sandbox:true. One command per call.',
+    description: 'Run a shell command INSIDE the Docker sandbox via `docker exec loom-sandbox sh -lc "<command>"` (isolated Linux container, project at /workspace). Use only when the user explicitly asks for the sandbox or isolation. Equivalent to bash with sandbox:true. One command per call.',
     parameters: {
       command: { type: 'string', required: true, description: 'The Linux shell command to run inside the container' },
       workdir: { type: 'string', required: false, description: 'Working directory inside the container (host paths under the project map to /workspace/...)' },
@@ -613,8 +791,9 @@ const TOOLS = {
     description: 'Delegate a self-contained subtask to a subagent that runs fully autonomously and returns its final answer. Use when a piece of work can run independently (parallelizable), needs a focused toolset, or benefits from a different model. Pick the smallest suitable agent (see the agent param). Pass a COMPLETE, self-contained instruction: the goal, relevant file paths, and exactly what to return. The subagent may run tools autonomously; fold its findings into your own answer afterwards.',
     parameters: {
       prompt: { type: 'string', required: true, description: 'Complete instructions for the subagent — goal, relevant file paths, and the exact output to return' },
-      agent: { type: 'string', required: false, description: 'Subagent id: general (default), explore, scout, or a custom one from config.agents' },
+      agent: { type: 'string', required: false, description: 'Subagent id: general (default), explore, scout, research, architect, coder, reviewer, tester, web, or a custom configured agent' },
       model: { type: 'string', required: false, description: 'Optional model override "provider/model-id" for this delegation' },
+      timeoutMs: { type: 'number', required: false, description: 'Maximum runtime in ms (default from subagentTimeoutMs; max 1800000)' },
     },
     async execute(params, ctx) {
       const { runSubagent } = require('../core/agents');
@@ -625,11 +804,56 @@ const TOOLS = {
         parentSession: ctx && ctx.parentSession,
         onProgress: ctx && ctx.progress,
         signal: ctx && ctx.signal,
+        timeoutMs: typeof params.timeoutMs === 'number' ? Math.min(Math.max(params.timeoutMs, 1000), 1800000) : undefined,
       });
       if ('error' in res) return { error: res.error };
       const ms = res.durationMs;
       const usage = `[${res.agent} finished in ${(ms / 1000).toFixed(1)}s \u00B7 ${res.tokensIn + res.tokensOut} tokens \u00B7 ${res.costUsd > 0.001 ? '$' + res.costUsd.toFixed(4) : 'free'}]`;
       return usage + '\n\n' + res.content;
+    }
+  },
+  spawn_agents: {
+    name: 'spawn_agents',
+    description: 'Fan out a batch of independent subtasks to subagents that run CONCURRENTLY and return their reports together. Use this instead of sequential task calls whenever you can split work into 2+ independent packages (explore separate areas, review separate modules, test separate features). Each task is fully autonomous. Keep each prompt complete and self-contained: goal, file paths, and exactly what to return. Prefer explore for read-only investigation, coder for isolated implementation, reviewer/tester for verification.',
+    parameters: {
+      tasks: {
+        type: 'array',
+        required: true,
+        description: '1-8 independent delegations. Each item: { agent, prompt, model? }. Agent ids: general, explore, scout, research, architect, coder, reviewer, tester, web, or a configured custom agent.',
+        items: {
+          type: 'object',
+          properties: {
+            agent: { type: 'string', description: 'Subagent id (default general)' },
+            prompt: { type: 'string', description: 'Complete, self-contained instructions and the exact output to return' },
+            model: { type: 'string', description: 'Optional "provider/model-id" override' },
+            timeoutMs: { type: 'number', description: 'Optional per-task timeout in ms' },
+          },
+          required: ['prompt'],
+        },
+      },
+      concurrency: { type: 'number', required: false, description: 'Max subagents running at once (1-6, default 3)' },
+    },
+    async execute(params, ctx) {
+      const tasks = Array.isArray(params.tasks) ? params.tasks.slice(0, 8) : [];
+      if (!tasks.length) return { error: 'spawn_agents needs at least one task.' };
+      const { runSubagents } = require('../core/agents');
+      const { batchId, results } = await runSubagents({
+        tasks,
+        concurrency: params.concurrency,
+        parentSession: ctx && ctx.parentSession,
+        onProgress: ctx && ctx.progress,
+        signal: ctx && ctx.signal,
+      });
+      const sections = results.map((res, i) => {
+        const name = 'agent' in res && res.agent ? res.agent : (tasks[i].agent || 'agent');
+        const head = '### [' + (i + 1) + '/' + results.length + '] ' + name;
+        if (res.error) return head + ' — FAILED\n' + res.error;
+        const ok = /** @type {import('../core/agents').SubagentResult} */ (res);
+        const secs = (ok.durationMs / 1000).toFixed(1);
+        const cost = ok.costUsd > 0.001 ? '$' + ok.costUsd.toFixed(4) : 'free';
+        return head + ' — ' + secs + 's · ' + (ok.tokensIn + ok.tokensOut) + ' tokens · ' + cost + '\n\n' + ok.content;
+      });
+      return '[batch ' + batchId.slice(0, 8) + ' · ' + results.length + ' agents]\n\n' + sections.join('\n\n');
     }
   },
   browser: {
@@ -789,7 +1013,10 @@ async function executeTool(toolName, params, mode = 'build', ctx = null) {
       if (idx < 0) return { error: 'Malformed MCP tool name: ' + toolName };
       const server = toolName.slice(5, idx);
       const tool = toolName.slice(idx + 2);
-      const res = await mcp.callTool(server, tool, params || {});
+      const timeoutMs = Number(ctx && ctx.toolTimeoutMs) || 180000;
+      const res = await withDeadline('MCP tool "' + toolName + '"', timeoutMs, ctx && ctx.signal, (signal) =>
+        mcp.callTool(server, tool, params || {}, { signal })
+      );
       if (res && typeof res === 'object' && res.error) return { error: truncateToolText(res.error) };
       if (res && typeof res === 'object' && typeof res.result === 'string') return { result: truncateToolText(res.result) };
       return res;
@@ -800,7 +1027,12 @@ async function executeTool(toolName, params, mode = 'build', ctx = null) {
   const tool = TOOLS[toolName];
   if (!tool) return { error: `Unknown tool: ${toolName}` };
   try {
-    const result = await tool.execute(params, ctx);
+    const timeoutMs = toolName === 'task'
+      ? (Number(ctx && ctx.subagentTimeoutMs) || 900000)
+      : (Number(ctx && ctx.toolTimeoutMs) || 180000);
+    const result = await withDeadline('Tool "' + toolName + '"', timeoutMs, ctx && ctx.signal, (signal) =>
+      tool.execute(params, { ...(ctx || {}), signal })
+    );
     if (result && typeof result === 'object' && result.error) return { error: truncateToolText(result.error) };
     return { result: typeof result === 'string' ? truncateToolText(result) : result };
   } catch (e) {
@@ -840,4 +1072,4 @@ async function getAllToolDefinitions(mode = 'build') {
   }
 }
 
-module.exports = { TOOLS, MODES, READ_ONLY_TOOLS, getToolDefinitions, getAllToolDefinitions, executeTool, isPrivateAddress, truncateToolText };
+module.exports = { TOOLS, MODES, READ_ONLY_TOOLS, getToolDefinitions, getAllToolDefinitions, executeTool, isPrivateAddress, truncateToolText, windowsShellCommand };

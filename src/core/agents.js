@@ -62,7 +62,7 @@ const BUILTIN_AGENTS = {
     id: 'build', name: 'Build', mode: 'primary',
     description: 'Main orchestrator agent: full development work with all tools, drives tasks to completion.',
     tools: ['*'],
-    prompt: "You are the MAIN ORCHESTRATOR agent. You DELEGATE heavy lifting to subagents via the task tool and synthesize their reports — you are rarely the one reading raw files. For any task that is a SEARCH, ANALYSIS, or broad OPTIMIZATION (\"find what causes X\", \"where is Y\", \"how does Z work\", \"optimize W\", \"audit/investigate/locate\"), FAN OUT FIRST: split the scope into independent questions and dispatch them as parallel task calls in a single message — one explore agent per disjoint area of the codebase (parallel calls run concurrently). Only read/grep a file YOURSELF when you need one specific line a subagent's report left ambiguous. Then: (1) for non-trivial multi-step work capture the plan as a todowrite list up front, (2) keep working until every item is completed or explicitly cancelled — never stop mid-task with a summary while todos remain, (3) dispatch implementation/verification packages too: coder for isolated implementation, reviewer for review, tester for tests, research for deep multi-source investigation, web for browser work, (4) verify your work (run tests/typecheck/lint the project actually uses) before declaring done, (5) finish with a terse summary of what changed and which subagent reports you folded in.",
+    prompt: "You are the MAIN ORCHESTRATOR agent. Own the outcome: form a short execution plan, choose the smallest capable agent, and synthesize evidence into one verified result. You DELEGATE heavy lifting to subagents via task (one) or spawn_agents (a parallel batch) and synthesize their reports — you are rarely the one reading raw files. For any task that is a SEARCH, ANALYSIS, or broad OPTIMIZATION (\"find what causes X\", \"where is Y\", \"how does Z work\", \"optimize W\", \"audit/investigate/locate\"), FAN OUT FIRST: split the scope into independent questions and dispatch them with ONE spawn_agents call (or parallel task calls in a single message). Use one explore agent per disjoint area of the codebase. Only read/grep a file YOURSELF when you need one specific line a subagent's report left ambiguous. Then: (1) for non-trivial multi-step work capture the plan as a todowrite list up front, (2) keep working until every item is completed or explicitly cancelled — never stop mid-task with a summary while todos remain, (3) dispatch architecture/implementation/verification packages too: architect for boundaries and risks, coder for isolated implementation, reviewer for review, tester for tests, research for deep multi-source investigation, web for browser work, (4) reconcile conflicting reports against source code, (5) verify with the project’s real test/typecheck/lint commands before declaring done, (6) finish with a terse summary of changes, verification, and any residual risk.",
   },
   plan: {
     id: 'plan', name: 'Plan', mode: 'primary',
@@ -79,14 +79,14 @@ const BUILTIN_AGENTS = {
   general: {
     id: 'general', name: 'General', mode: 'subagent',
     description: 'General-purpose subagent with the full toolset (except delegation). Use for self-contained implementation tasks, bug fixes, and multi-step work.',
-    tools: ['*', '!task'],
+    tools: ['*', '!task', '!spawn_agents'],
     prompt: null,
   },
   explore: {
     id: 'explore', name: 'Explore', mode: 'subagent',
     description: 'Fast read-only codebase exploration: search symbols, read files, list files. Never modifies anything.',
-    // read-only tools, but WITHOUT task — subagents must not delegate (no recursion)
-    tools: () => readOnlyTools().filter((t) => t !== 'task'),
+    // read-only tools, but WITHOUT delegation — subagents must not recurse
+    tools: () => readOnlyTools().filter((t) => t !== 'task' && t !== 'spawn_agents'),
     prompt: null,
   },
   scout: {
@@ -101,10 +101,16 @@ const BUILTIN_AGENTS = {
     tools: ['read', 'glob', 'grep', 'webfetch', 'websearch', 'todowrite'],
     prompt: 'You are the Research agent. Investigate the topic from multiple independent sources (websearch/webfetch AND local files when relevant). Never state a fact you have not verified in a source. Track your investigation with todowrite when it has many steps. Return a structured report: "## Findings" (numbered facts, each with its source: URL or file:line), "## Gaps" (what you could not verify), "## Recommendation".',
   },
+  architect: {
+    id: 'architect', name: 'Architect', mode: 'subagent',
+    description: 'Read-only systems designer for cross-cutting changes. Maps data flow, failure boundaries, rollout risks, and a minimal implementation sequence.',
+    tools: () => readOnlyTools().filter((t) => t !== 'task' && t !== 'spawn_agents'),
+    prompt: 'You are the Architect agent. Inspect the actual code paths before recommending changes. Return: (1) current flow with file:line evidence, (2) target boundaries and invariants, (3) ordered implementation plan, (4) risks and verification criteria. Do not edit files and do not invent APIs.',
+  },
   coder: {
     id: 'coder', name: 'Coder', mode: 'subagent',
     description: 'Implementation specialist: writes and edits code, runs commands, verifies results. Use for well-scoped feature/bugfix packages that can run independently.',
-    tools: ['*', '!task'],
+    tools: ['*', '!task', '!spawn_agents'],
     prompt: 'You are the Coder agent. Implement exactly what was delegated — no scope creep. Follow the existing code conventions of the files you touch (imports, naming, JSDoc/typing style). Verify your work (run the relevant tests/typecheck) before reporting. Final report: files changed with line deltas, commands run and their outcomes, and anything left undone.',
   },
   reviewer: {
@@ -260,6 +266,8 @@ function buildSubagentBlock(agent) {
  *  @param {string} [opts.model]
  *  @param {import('./session').Session|null} [opts.parentSession]
  *  @param {AbortSignal|null} [opts.signal]
+ *  @param {number} [opts.timeoutMs]
+ *  @param {string} [opts.contextBlock]
  *  @param {function} [opts.onProgress]
  *  @returns {Promise<SubagentResult|SubagentError>} */
 async function runSubagent(opts) {
@@ -305,6 +313,9 @@ async function runSubagent(opts) {
   }
 
   child._agentBlock = buildSubagentBlock(agent);
+  // Apply config.agent.<id>.permission to the child so a delegated agent
+  // inherits its own permission tree (previously only @agent turns did).
+  try { child.permissions.setAgent(agent.id); } catch {}
 
   if (opts.signal) {
     try { opts.signal.addEventListener('abort', () => child.interrupt()); } catch {}
@@ -320,40 +331,61 @@ async function runSubagent(opts) {
 
   const t0 = Date.now();
   let resp;
+  let timedOut = false;
+  let deadlineTimer = null;
+  const timeoutMs = Number(opts.timeoutMs || child.config.subagentTimeoutMs) || 900000;
+  const foldIntoParent = () => {
+    if (!parent) return;
+    parent.tokensIn += child.tokensIn;
+    parent.tokensOut += child.tokensOut;
+    parent.tokensUsed += child.tokensUsed;
+    parent.sessionCost += child.sessionCost;
+  };
+  const fireStop = (reason) => {
+    try {
+      const hooks = require('./hooks');
+      Promise.resolve(hooks.runHook('subagentStop', {
+        agent: agent.id,
+        runId,
+        reason,
+        interrupted: !!resp?.interrupted,
+      })).catch(() => {});
+    } catch {}
+  };
   try {
     // 'start' carries the prompt so the tracker can show what was delegated.
     progress('start', prompt);
-    resp = await child.sendUserMessage(prompt, {
+    deadlineTimer = setTimeout(() => {
+      timedOut = true;
+      child.interrupt();
+      progress('error', 'Subagent timed out after ' + Math.ceil(timeoutMs / 1000) + 's.');
+    }, timeoutMs);
+    const fullPrompt = opts.contextBlock ? prompt + '\n\n' + opts.contextBlock : prompt;
+    resp = await child.sendUserMessage(fullPrompt, {
       onDelta: (t) => progress('delta', t),
       onReasoning: (t) => progress('reasoning', t),
       onTool: (name, inp) => progress('tool', name),
       onToolResult: (name, out) => progress('toolResult', name),
     });
   } finally {
+    if (deadlineTimer) clearTimeout(deadlineTimer);
     subagentChildren.delete(runId);
   }
   const durationMs = Date.now() - t0;
   const interrupted = !!resp.interrupted;
 
-  // subagentStop hook — fires when a subagent turn ends (success, error,
-  // interrupt). Fire-and-forget: a slow/broken hook must never wedge the
-  // parent turn.
-  try {
-    const hooks = require('./hooks');
-    Promise.resolve(hooks.runHook('subagentStop', {
-      agent: agent.id,
-      runId,
-      reason: resp.type || 'end',
-      interrupted,
-    })).catch(() => {});
-  } catch {}
-
-  if (parent) {
-    parent.tokensIn += child.tokensIn;
-    parent.tokensOut += child.tokensOut;
-    parent.tokensUsed += child.tokensUsed;
-    parent.sessionCost += child.sessionCost;
+  if (timedOut) {
+    // Timeout used to skip token/cost aggregation entirely; fold it so the
+    // parent's usage numbers stay truthful.
+    foldIntoParent();
+    fireStop('timeout');
+    const errMsg = '[subagent timeout] ' + agent.name + ' exceeded its ' + Math.ceil(timeoutMs / 1000) + 's limit.';
+    return { agent: agent.name, id: agent.id, runId, content: errMsg, tokensIn: child.tokensIn, tokensOut: child.tokensOut, costUsd: child.sessionCost, durationMs, interrupted: true, error: errMsg };
   }
+
+  fireStop(resp.type || 'end');
+
+  foldIntoParent();
 
   if (resp.type === 'error') {
     const errMsg = '[subagent error] ' + String(resp.content || '');
@@ -390,6 +422,77 @@ async function runSubagent(opts) {
   };
 }
 
+// Compact digest of the parent conversation for child sessions. Subagents run
+// in a fresh context; without this they cannot see what the user actually
+// asked for. Kept small (<= 3k chars) so it never dominates the child prompt.
+function buildContextDigest(parentSession) {
+  if (!parentSession) return '';
+  const rows = [];
+  const msgs = Array.isArray(parentSession.messages) ? parentSession.messages : [];
+  for (const m of msgs.slice(-8)) {
+    if (!m || m.role === 'tool') continue;
+    const text = String(m.content || '').replace(/\s+/g, ' ').trim();
+    if (!text) continue;
+    rows.push('- ' + m.role + ': ' + (text.length > 360 ? text.slice(0, 357) + '...' : text));
+  }
+  const todos = Array.isArray(parentSession.todos) ? parentSession.todos : [];
+  const open = todos.filter((t) => t.status === 'pending' || t.status === 'in_progress');
+  const parts = [];
+  if (rows.length) parts.push('## Parent context (most recent conversation)\n' + rows.join('\n'));
+  if (open.length) parts.push('## Open tasks\n' + open.slice(0, 12).map((t) => '- [' + t.status + '] ' + t.content).join('\n'));
+  if (!parts.length) return '';
+  let block = '\n\n' + parts.join('\n\n');
+  if (block.length > 3200) block = block.slice(0, 3200) + '\n[context truncated]';
+  return block;
+}
+
+// Fan out several independent delegations concurrently. One call = one model
+// round trip instead of N sequential ones; the orchestrator can request a whole
+// investigation in a single tool call. Results are returned in input order.
+/** @param {object} opts
+ *  @param {Array<{agent?: string, prompt: string, model?: string, timeoutMs?: number}>} opts.tasks
+ *  @param {number} [opts.concurrency]
+ *  @param {import('./session').Session|null} [opts.parentSession]
+ *  @param {AbortSignal|null} [opts.signal]
+ *  @param {boolean} [opts.context] include a parent-conversation digest
+ *  @param {function} [opts.onProgress]
+ *  @returns {Promise<{batchId: string, results: Array<SubagentResult|SubagentError>}>} */
+async function runSubagents(opts) {
+  const tasks = Array.isArray(opts && opts.tasks) ? opts.tasks : [];
+  const batchId = newRunId();
+  if (!tasks.length) return { batchId, results: [] };
+  const cap = Math.max(1, Math.min(Number(opts.concurrency) || 3, 6, tasks.length));
+  const contextBlock = opts.context === false ? '' : buildContextDigest(opts.parentSession);
+  const results = new Array(tasks.length);
+  let next = 0;
+  const workers = Array.from({ length: cap }, async () => {
+    for (;;) {
+      const index = next++;
+      if (index >= tasks.length) return;
+      const t = tasks[index] || {};
+      const wrapProgress = (ev) => {
+        try {
+          if (opts.onProgress) opts.onProgress({ ...ev, batchId, index, total: tasks.length });
+        } catch {}
+      };
+      results[index] = await runSubagent({
+        agentId: t.agent || 'general',
+        prompt: t.prompt,
+        model: t.model,
+        parentSession: opts.parentSession,
+        onProgress: wrapProgress,
+        signal: opts.signal,
+        timeoutMs: typeof t.timeoutMs === 'number'
+          ? Math.min(Math.max(t.timeoutMs, 1000), 1800000)
+          : undefined,
+        contextBlock,
+      });
+    }
+  });
+  await Promise.all(workers);
+  return { batchId, results };
+}
+
 module.exports = {
   BUILTIN_AGENTS,
   loadAgents,
@@ -398,7 +501,9 @@ module.exports = {
   filterToolDefs,
   buildAgentTurnBlock,
   buildSubagentBlock,
+  buildContextDigest,
   runSubagent,
+  runSubagents,
   cancelSubagent,
   liveSubagentRunIds,
 };

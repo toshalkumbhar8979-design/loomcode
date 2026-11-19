@@ -25,7 +25,6 @@ test("defaults preserve the legacy Loom bindings", () => {
   reload({});
   expect(kbs.is("app_exit", "ctrl+c")).toBe(true);
   expect(kbs.is("command_list", "ctrl+p")).toBe(true);
-  expect(kbs.is("sidebar_toggle", "ctrl+b")).toBe(true);
   expect(kbs.is("user_expand", "ctrl+e")).toBe(true);
   expect(kbs.is("input_select_all", "ctrl+a")).toBe(true);
   expect(kbs.is("input_submit", "return")).toBe(true);
@@ -96,9 +95,9 @@ test("array and object binding values are accepted", () => {
   reload({ keybinds: { command_list: ["ctrl+r", "ctrl+o"] } });
   expect(kbs.is("command_list", "ctrl+r")).toBe(true);
   expect(kbs.is("command_list", "ctrl+o")).toBe(true);
-  reload({ keybinds: { sidebar_toggle: { key: "ctrl+g" } } });
-  expect(kbs.is("sidebar_toggle", "ctrl+g")).toBe(true);
-  expect(kbs.is("sidebar_toggle", "ctrl+b")).toBe(false);
+  reload({ keybinds: { command_list: { key: "ctrl+g" } } });
+  expect(kbs.is("command_list", "ctrl+g")).toBe(true);
+  expect(kbs.is("command_list", "ctrl+p")).toBe(false);
 });
 
 test("none and false disable a binding", () => {

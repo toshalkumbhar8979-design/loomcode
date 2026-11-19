@@ -60,6 +60,9 @@ function buildRequest(messages, options, providerId) {
     max_tokens: options.maxTokens || 8192,
     temperature: options.temperature ?? 0.7,
   };
+  if (options.toolChoice && body.tools && body.tools.length) {
+    body.tool_choice = options.toolChoice;
+  }
   // OpenRouter/TokenRouter prompt caching: top-level "cache_control" true
   // (auto-detects prefix-cache-capable models, ignores it otherwise). Cuts
   // input cost on cache hits (~10% of full price) after the first turn.
@@ -116,6 +119,24 @@ function sanitizeErrBody(msg) {
 function wrapErr(err, modelId, envKeyHint, baseURL) {
   const raw = err.message || 'Unknown error';
   const msg = sanitizeErrBody(raw);
+  // Timeouts deserve an actionable message: name the real cause instead of the
+  // SDK's bare "Request timed out." and point at the knobs that change it.
+  if (isTransportTimeout(err)) {
+    // Preserve a specific watchdog message ("stream stalled", "first token
+    // never arrived") — it tells the user more than a generic timeout line.
+    if (/no output|stalled|never sent|never arrived/i.test(raw)) {
+      const out = new Error(`${envKeyHint || 'API'}: ${msg}`);
+      /** @type {any} */ (out).permanent = true;
+      return out;
+    }
+    const out = new Error(
+      `${envKeyHint || 'API'} request timed out while contacting ${baseURL || 'the endpoint'} ` +
+      `(model: ${modelId || '?'}). The endpoint did not respond in time. ` +
+      'Check the base URL (/baseurl), the network/proxy, or raise requestTimeoutMs in config. ' +
+      'A correct key does not help if the endpoint is unreachable or the model is not enabled for this account.');
+    /** @type {any} */ (out).permanent = true;
+    return out;
+  }
   // Carry the HTTP status + Retry-After onto the wrapped error so the
   // session loop can tell a rate-limit (wait+retry) from a quota switch.
   const out = /** @type {any} */ (!err.status ? new Error(`${envKeyHint || 'API'} error: ${msg}`) : (() => {
@@ -175,9 +196,10 @@ function withTimeout(p, ms, what) {
     clearTimeout(timer);
     if (winner.timeout) {
       const e = new Error(
-        `the model produced no output for ${Math.round(ms / 1000)}s (${what}) — ` +
-        'endpoints that hang like this are usually not enabled for this account or model. ' +
-        'Try /models and pick a model that responds.');
+        `request timed out after ${Math.round(ms / 1000)}s (${what}). ` +
+        'The endpoint accepted the request but produced no data — it may be ' +
+        'unreachable, overloaded, or the model may not be enabled for this ' +
+        'account. Try /models, check /baseurl, or raise requestTimeoutMs.');
       /** @type {any} */ (e).permanent = true;
       throw e;
     }
@@ -186,7 +208,7 @@ function withTimeout(p, ms, what) {
   });
 }
 
-async function retryWithBackoff(fn, maxTries, envKeyHint) {
+async function retryWithBackoff(fn, maxTries, envKeyHint, retryTransportTimeouts = false, signal) {
   let lastErr;
   for (let attempt = 0; attempt < maxTries; attempt++) {
     try {
@@ -195,7 +217,12 @@ async function retryWithBackoff(fn, maxTries, envKeyHint) {
       lastErr = err;
       if (isAbortError(err)) throw err;
       const status = err.status || err.code;
-      if (status !== 429 && status !== 503 && status !== 502 && status !== 529) throw lastErr;
+      const transportTimeout = isTransportTimeout(err);
+      // Transport timeouts are retried at most once: each attempt may take
+      // minutes, so a dead endpoint must fail fast instead of multiplying the
+      // user's wait by the whole retry budget.
+      if (transportTimeout && attempt >= 1) throw lastErr;
+      if (status !== 429 && status !== 503 && status !== 502 && status !== 529 && !(retryTransportTimeouts && transportTimeout)) throw lastErr;
       {
         // Honor Retry-After when the provider sends one (even on the first
         // retry); otherwise the first retry is immediate (transient blip)
@@ -208,11 +235,33 @@ async function retryWithBackoff(fn, maxTries, envKeyHint) {
           const secs = Number(ra);
           if (Number.isFinite(secs) && secs >= 0) delay = Math.min(secs * 1000, 60000);
         }
-        await new Promise((resolve) => setTimeout(resolve, delay + (delay > 0 ? Math.floor(Math.random() * 250) : 0)));
+        await new Promise((resolve) => {
+          const timer = setTimeout(() => resolve(undefined), delay + (delay > 0 ? Math.floor(Math.random() * 250) : 0));
+          if (signal && typeof signal.addEventListener === 'function') {
+            const onAbort = () => { clearTimeout(timer); resolve(undefined); };
+            if (signal.aborted) onAbort();
+            else signal.addEventListener('abort', onAbort, { once: true });
+          }
+        });
+        if (signal && signal.aborted) {
+          const abortErr = new Error('Request aborted');
+          abortErr.name = 'AbortError';
+          throw abortErr;
+        }
       }
     }
   }
   throw lastErr;
+}
+
+// The OpenAI SDK surfaces both connect stalls and its own timeout timer as
+// APIConnectionTimeoutError with the message "Request timed out." — the exact
+// string users see when an endpoint is unreachable or too slow.
+function isTransportTimeout(err) {
+  if (!err) return false;
+  const name = String(err.name || err.error?.name || '');
+  if (name === 'APIConnectionTimeoutError' || name === 'TimeoutError') return true;
+  return /request timed out|connection.*timed out|timed?\s?out|ETIMEDOUT/i.test(String(err.message || ''));
 }
 
 // Aborts surface as AbortError, APIUserAbortError (openai SDK), or wrapped
@@ -253,25 +302,23 @@ function createOpenAICompatProvider({ getKey, providerId, envKeyHint, clientFact
     if (!key) throw new Error(`${envKeyHint || 'API'} key not set. Use /connect or set the ${envKeyHint || 'API'}_API_KEY env var.`);
     const baseURL = getBaseUrl(providerId) || defaultBaseUrl || getDefaultBaseUrl(providerId);
     // maxRetries:0 — the SDK's default 2 retries stack on top of our
-    // retryWithBackoff, multiplying a dead endpoint's hang time; the 300s
-    // default is a hard cap for non-stream chat (streams override it per
-    // request and use the first-chunk/idle watchdogs instead).
-    return new OpenAI({ apiKey: key, baseURL, maxRetries: 0, timeout: 300000 });
+    // retryWithBackoff, multiplying a dead endpoint's hang time. The SDK
+    // timeout is a generous last-resort cap; per-request values below win.
+    return new OpenAI({ apiKey: key, baseURL, maxRetries: 0, timeout: 1800000 });
   }
 
   async function chat(messages, options = {}) {
     const client = getClient();
     const req = buildRequest(messages, options, providerId);
-    const requestOpts = { signal: options.signal, timeout: options.chatTimeoutMs > 0 ? Number(options.chatTimeoutMs) : 300000 };
+    const configured = Number(options.chatTimeoutMs) > 0 ? Number(options.chatTimeoutMs) : Number(options.requestTimeoutMs);
+    const timeout = configured > 0 ? configured : 600000;
+    const requestOpts = { signal: options.signal, timeout };
     try {
-      const resp = await retryWithBackoff(() => client.chat.completions.create(req, requestOpts), 4, envKeyHint);
+      const resp = await retryWithBackoff(() => client.chat.completions.create(req, requestOpts), 4, envKeyHint, true, options.signal);
       return normalize(resp);
     } catch (err) {
       if (isAbortError(err)) throw err;
-      const name = String(err && err.name || '');
-      if (name === 'APIConnectionTimeoutError' || /timed?\s?out/i.test(String(err && err.message || ''))) {
-        /** @type {any} */ (err).permanent = true;
-      }
+      if (isTransportTimeout(err)) /** @type {any} */ (err).permanent = true;
       throw wrapErr(err, options.model || '?', envKeyHint, getBaseUrl(providerId));
     }
   }
@@ -279,23 +326,33 @@ function createOpenAICompatProvider({ getKey, providerId, envKeyHint, clientFact
   async function stream(messages, options = {}, onDelta, onReasoning) {
     const client = getClient();
     const req = { ...buildRequest(messages, options, providerId), stream: true, stream_options: { include_usage: true } };
-    // timeout:0 — long streams are legitimate; the first-chunk/idle
-    // watchdogs below bound the silent-hang case instead.
-    const requestOpts = { signal: options.signal, timeout: 0 };
+    // A real per-request timeout. The installed OpenAI SDK aborts IMMEDIATELY
+    // when it receives timeout:0 (setTimeout(..., 0)), which surfaced as
+    // "Request timed out." for every OpenAI-compatible provider. Use the
+    // session's outer deadline as the SDK cap; the first-chunk/idle watchdogs
+    // below catch silent hangs much earlier.
+    const outer = Number(options.requestTimeoutMs) > 0 ? Number(options.requestTimeoutMs) : 600000;
+    const requestOpts = { signal: options.signal, timeout: Math.max(outer, 60000) };
     try {
-      const s = await retryWithBackoff(() => client.chat.completions.create(req, requestOpts), 4, envKeyHint);
+      // Watchdogs: endpoints for models the account cannot use accept the POST
+      // and then stream NOTHING. These bounds turn that silent hang into a
+      // precise error. Values are configurable; the session passes config
+      // defaults (180s), tests use small seams.
+      const firstChunkMs = Number(options.firstChunkTimeoutMs) > 0 ? Number(options.firstChunkTimeoutMs) : 180000;
+      const idleMs = Number(options.idleTimeoutMs) > 0 ? Number(options.idleTimeoutMs) : 180000;
+      // Bound the wait for response headers too: the create() promise resolves
+      // only after the server starts the SSE response, and a server that
+      // accepts the socket then stalls would otherwise sit until the outer
+      // deadline.
+      const s = await retryWithBackoff(
+        () => withTimeout(client.chat.completions.create(req, requestOpts), firstChunkMs, 'the endpoint never sent response headers'),
+        4, envKeyHint, true, options.signal);
       let content = '';
       let reasoning = '';
       let usage = null;
       let finishReason = null;
       const toolAcc = new Map();
 
-      // Watchdogs: NIM endpoints for models the account cannot use accept
-      // the POST and then stream NOTHING (measured: 83s to headers, zero
-      // chunks after) — without these bounds the turn hangs forever.
-      // The option values are test seams; the session leaves them default.
-      const firstChunkMs = Number(options.firstChunkTimeoutMs) > 0 ? Number(options.firstChunkTimeoutMs) : 90000;
-      const idleMs = Number(options.idleTimeoutMs) > 0 ? Number(options.idleTimeoutMs) : 120000;
       let iter;
       try { iter = s[Symbol.asyncIterator](); } catch { iter = s; }
       let sawChunk = false;
@@ -377,4 +434,4 @@ function getDefaultBaseUrl(providerId) {
   return defaults[providerId] || undefined;
 }
 
-module.exports = { createOpenAICompatProvider, wrapErr, buildRequest, formatMessages, formatTools, parseToolCalls, normalize, retryWithBackoff, sanitizeErrBody };
+module.exports = { createOpenAICompatProvider, wrapErr, buildRequest, formatMessages, formatTools, parseToolCalls, normalize, retryWithBackoff, sanitizeErrBody, isTransportTimeout };

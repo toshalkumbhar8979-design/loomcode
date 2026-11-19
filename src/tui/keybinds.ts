@@ -25,8 +25,6 @@ export const KB_ACTIONS: KeybindAction[] = [
   // â”€â”€ App / session â”€â”€
   { action: "app_exit", desc: "Quit Loom Code", def: "ctrl+c,<leader>q", opencode: "app_exit" },
   { action: "command_list", desc: "Open the command palette", def: "ctrl+p", opencode: "command_list" },
-  { action: "sidebar_toggle", desc: "Toggle the sidebar", def: "ctrl+b", opencode: "sidebar_toggle" },
-  { action: "sidebar_cycle_tab", desc: "Cycle the sidebar tab", def: "ctrl+i" },
   { action: "session_interrupt", desc: "Interrupt the running task / clear the draft", def: "escape", opencode: "session_interrupt" },
   { action: "modal_cancel", desc: "Close the open dialog", def: "escape" },
   { action: "user_expand", desc: "Expand/collapse the most recent long message", def: "ctrl+e" },

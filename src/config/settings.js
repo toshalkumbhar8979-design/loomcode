@@ -35,6 +35,17 @@ const DEFAULTS = {
   },
   maxTokens: 16384,
   temperature: 0.3,
+  // Hard service-level limits. A stuck provider, tool, or child cannot hold a
+  // production turn indefinitely.
+  requestTimeoutMs: 600000,
+  // Streaming watchdogs. Generous by default: reasoning models and cold local
+  // servers routinely need minutes before the first token. The outer
+  // requestTimeoutMs remains the hard ceiling.
+  firstChunkTimeoutMs: 180000,
+  idleTimeoutMs: 180000,
+  toolTimeoutMs: 180000,
+  subagentTimeoutMs: 900000,
+  maxParallelTools: 8,
   compactThreshold: 0.75,
   budgetLevel: 'auto', // free | cheap | best | auto (explicit picks)
   apiKeys: {},
@@ -63,6 +74,20 @@ function ensureLoomDir() {
   }
 }
 
+// Deep-merge the nested maps (model/baseUrls/apiKeys/customEndpoints) so a
+// config that customizes one provider keeps the defaults for every other one.
+function mergeConfig(raw) {
+  const out = { ...DEFAULTS, ...(raw && typeof raw === 'object' ? raw : {}) };
+  for (const key of ['model', 'baseUrls', 'apiKeys', 'customEndpoints']) {
+    const base = DEFAULTS[key];
+    const over = raw && typeof raw === 'object' ? raw[key] : null;
+    if (base && typeof base === 'object' && !Array.isArray(base)) {
+      out[key] = { ...base, ...(over && typeof over === 'object' ? over : {}) };
+    }
+  }
+  return out;
+}
+
 function loadConfig() {
   ensureLoomDir();
   const file = configFile();
@@ -70,7 +95,7 @@ function loadConfig() {
     try { fs.chmodSync(file, 0o600); } catch {}
     try {
       const raw = fs.readFileSync(file, 'utf8');
-      return { ...DEFAULTS, ...JSON.parse(raw) };
+      return mergeConfig(JSON.parse(raw));
     } catch {
       return { ...DEFAULTS };
     }
@@ -85,15 +110,18 @@ function saveConfig(config) {
   try { fs.chmodSync(file, 0o600); } catch {}
 }
 
+// Explicitly configured keys win over ambient env vars. Otherwise a stale
+// environment key silently shadows a freshly connected key and every request
+// fails with a 401 even though the UI says the provider is connected.
 function getApiKey(provider) {
+  const config = loadConfig();
+  const saved = config.apiKeys?.[provider];
+  if (saved) return saved;
   const { envNamesFor } = require('../providers/registry');
-  const envNames = envNamesFor(provider) || [];
-  for (const key of envNames) {
+  for (const key of (envNamesFor(provider) || [])) {
     if (process.env[key]) return process.env[key];
   }
-
-  const config = loadConfig();
-  return config.apiKeys?.[provider] || null;
+  return null;
 }
 
 function setApiKey(provider, key) {

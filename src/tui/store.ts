@@ -32,7 +32,7 @@ export const [thinkStart, setThinkStart] = createSignal<number | null>(null);
 // also sets this. Null = everything collapsed.
 export const [userExpandedIdx, setUserExpandedIdx] = createSignal<number | null>(null);
 // Settled reasoning parts (message index → part indices) the user expanded.
-// Clicking a settled "+ Thought" row toggles its part; absent = all collapsed.
+// Clicking a settled "Thinking" row toggles its part; absent = all collapsed.
 export const [thoughtExpanded, setThoughtExpanded] = createSignal<Map<number, Set<number>>>(new Map());
 // While a turn is RUNNING its thinking streams open by default; clicking the
 // "⠋ Thinking" header collapses it live (opencode toggles reasoning at any
@@ -138,15 +138,25 @@ export function closeModal() { setModal(null); }
 // question mode, where the user picks one of the provided options or types
 // their own answer instead of the Allow/Always/Deny choices.
 export type PermissionRequest = {
+  id: number;
   tool: string;
   command: string;
   label: string;
+  permKey?: string;
   isQuestion?: boolean;
   options?: string[];
   sessionStart?: boolean;
   resolve: (approved: boolean, note?: string) => void;
 };
 export const [permission, setPermission] = createSignal<PermissionRequest | null>(null);
+
+// Latest terminal-cell pointer position (bubbled from the root box). The
+// splash robot uses it to turn the head; `seen` stays false until the first
+// move so the robot can face straight ahead on startup.
+export const [pointer, setPointer] = createSignal({ x: 0, y: 0, seen: false });
+export function setPointerPos(x: number, y: number) {
+  setPointer({ x: Math.max(0, x | 0), y: Math.max(0, y | 0), seen: true });
+}
 
 // Draft caret position (index into input) — the chatbox is a real editing
 // surface: left/right arrows move it, typing inserts at it, backspace deletes
@@ -188,34 +198,55 @@ export function closeQuestion() {
 }
 
 // Raised by the session's onPermissionRequest callback; resolves once the user
-// answers the popup (Allow / Always allow / Deny, or a question option/answer).
-// The promise resolves { approved, note } — the session turns questions into
-// the answer (note) and permissions into an approve/deny verdict.
-export function requestPermission(tool: string, command: string, label: string, isQuestion?: boolean, options?: string[]): Promise<{ approved: boolean; note: string }> {
+// answers the popup (Allow / Always allow / Always deny / Deny, or a question
+// option/answer). The promise resolves { approved, note } — the session turns
+// questions into the answer (note) and permissions into an approve/deny
+// verdict. Requests are queued so two concurrent tool gates cannot overwrite
+// each other and leave the first promise hanging forever.
+let permissionSeq = 0;
+const permissionQueue: PermissionRequest[] = [];
+
+function nextPermission() {
+  if (permission() || permissionQueue.length === 0) return;
+  setPermission(permissionQueue.shift() || null);
+}
+
+function enqueuePermission(req: Omit<PermissionRequest, "id" | "resolve">): Promise<{ approved: boolean; note: string }> {
   return new Promise((resolve) => {
-    setPermission({
-      tool, command, label, isQuestion, options,
-      resolve: (approved, note) => { setPermission(null); resolve({ approved: !!approved, note: note || "" }); },
-    });
+    let settled = false;
+    const full: PermissionRequest = {
+      ...req,
+      id: ++permissionSeq,
+      resolve: (approved, note) => {
+        if (settled) return;
+        settled = true;
+        setPermission(cur => (cur && cur.id === full.id ? null : cur));
+        resolve({ approved: !!approved, note: note || "" });
+        queueMicrotask(nextPermission);
+      },
+    };
+    if (permission()) permissionQueue.push(full);
+    else setPermission(full);
   });
 }
 
-// One-time prompt shown at the start of a new session: "Allow all commands in
-// this session?" — picking "Allow all commands" flips on session-wide
+export function requestPermission(tool: string, command: string, label: string, isQuestion?: boolean, options?: string[], permKey?: string): Promise<{ approved: boolean; note: string }> {
+  return enqueuePermission({ tool, command, label, isQuestion, options, permKey });
+}
+
+// One-time prompt shown at the start of a new session: "Allow all tool prompts
+// for this session?" — picking "Allow all prompts" flips on session-wide
 // auto-approval (Shift+Tab also toggles it), "Ask each time" keeps per-command
 // asks. Fire-and-forget: the popup resolves itself once the user answers.
 export function askSessionPermissions(): Promise<void> {
-  return new Promise((resolve) => {
-    setPermission({
-      tool: "session",
-      command: "Allow all commands in this session?",
-      label: "",
-      isQuestion: true,
-      options: ["Allow all commands", "Ask each time"],
-      sessionStart: true,
-      resolve: () => { setPermission(null); resolve(); },
-    });
-  });
+  return enqueuePermission({
+    tool: "session",
+    command: "Allow all tool prompts for this session?",
+    label: "",
+    isQuestion: true,
+    options: ["Allow all prompts", "Ask each time"],
+    sessionStart: true,
+  }).then(() => {});
 }
 
 // ─── Floating toasts ───
@@ -231,11 +262,7 @@ export function showToast(text: string, kind: "info" | "ok" | "error" = "info", 
   setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), durationMs);
 }
 
-// ─── Sidebar ───
-export const [sidebarVisible, setSidebarVisible] = createSignal(true);
-export const [sidebarTab, setSidebarTab] = createSignal(0);
-
-// ─── Live model speed (sidebar "Speed" row) ───
+// ─── Live model speed (status row) ───
 export type SpeedSnapshot = {
   live: { elapsedMs: number; firstTokenMs: number | null; tokensPerSec: number } | null;
   last: { latencyMs: number | null; tokensPerSec: number | null; durationMs: number | null; tokens: number | null; model: string } | null;
@@ -261,7 +288,7 @@ export const [sessionUsage, setSessionUsage] = createSignal<{ tokens: number; pc
 export const [lifetimeUsage, setLifetimeUsage] = createSignal<{ tokens: number; cost: number; monthCost: number; pct: number; budget: number }>({ tokens: 0, cost: 0, monthCost: 0, pct: 0, budget: 25 });
 export const [modelMeta, setModelMeta] = createSignal<any>(null);
 export const [budgetLevel, setBudgetLevel] = createSignal<string>("auto");
-// Phase 2.4: the last skill(s) that fired this turn — drives the sidebar Skills row.
+// Phase 2.4: the last skill(s) that fired this turn — shown in the status row.
 export const [skillActive, setSkillActive] = createSignal<string[]>([]);
 
 const { PROVIDERS, PROVIDER_ORDER, PROVIDER_LABELS } = require("../providers/index.js");
@@ -287,11 +314,20 @@ export function refreshUsage() {
   const s = getSession();
   const { getModelMeta } = require("../providers/index.js");
   const meta = getModelMeta(providerName(), modelName());
-  const ctx = meta?.context || 200000;
   setModelMeta(meta);
+  // The gauge is CURRENT context usage, not cumulative session tokens. A long
+  // session can spend millions of tokens while its live window stays small;
+  // using tokensUsed made the bar climb past 100% and disagree with /context.
+  let ctxTokens = s.tokensUsed;
+  let ctxPct = 0;
+  try {
+    const ce = s.contextEstimate();
+    ctxTokens = ce.tokens;
+    ctxPct = ce.pct;
+  } catch {}
   setSessionUsage({
-    tokens: s.tokensUsed,
-    pct: ctx ? (s.tokensUsed / ctx) * 100 : 0,
+    tokens: ctxTokens,
+    pct: ctxPct,
     cost: s.sessionCost,
   });
   const { getUsage } = require("../core/usage.js");
@@ -386,7 +422,7 @@ export function patchMessageAt(idx: number, patch: any) {
 }
 
 // Matches bare markers ("[x] task") AND markdown checklist lines
-// ("- [x] task", "* [ ] task", "1. [~] task") so the sidebar mirrors todo
+// ("- [x] task", "* [ ] task", "1. [~] task") so the work area mirrors todo
 // lists the model writes in its reply even without the todowrite tool.
 const TODO_RX = /^\s*(?:[-*+]\s+|\d+\.\s+)?\[([x+~ \-])\]\s+(.+)/i;
 export function recomputeTodos() {
@@ -421,7 +457,7 @@ export function recomputeTodos() {
 const IGNORE = /(^|[\/])(node_modules|\.git|dist|build|\.next|\.venv|venv|coverage|__pycache__|\.loom|\.idea|\.vscode)([\/]|$)/i;
 let filesCache: string[] | null = null;
 // Reactive re-calc engine: bumping filesVersion invalidates the cache AND
-// re-runs every reactive caller (the Sidebar's file list) because
+// re-runs every reactive caller (the @-mention file list) because
 // getProjectFiles() reads the signal. Bump after writes/create/rm calls.
 const [filesVersion, setFilesVersion] = createSignal(0);
 
@@ -465,14 +501,14 @@ export function invalidateFilesCache() { filesCache = null; }
 
 export function bumpFilesVersion() { setFilesVersion(v => v + 1); invalidateFilesCache(); }
 
-// Recompute the sidebar's file list when a known mutator lands. Called by the
+// Recompute the cached file list when a known mutator lands. Called by the
 // tool-execution layer after write/edit/bash so the Files tab is always fresh.
 export function refreshFilesIfNeeded(src?: string) {
   if (src === "write" || src === "edit" || src === "bash" || src === "mcp") bumpFilesVersion();
 }
 
 // Live agent todos: Session.setTodos → core event "todos:changed" → here.
-// This _replaces_ any markdown-scan fallback so the sidebar mirrors the
+// This _replaces_ any markdown-scan fallback so the work area mirrors the
 // model's real todowrite output without waiting for a full assistant re-render.
 // Registration is idempotent: App remounts must not stack duplicate listeners.
 let _todoEvOff: (() => void) | null = null;
@@ -517,7 +553,7 @@ export const SLASH_LIST: SlashCmd[] = [
   { cmd: "new", desc: "New session" },
   { cmd: "clear", desc: "Clear the chat" },
   { cmd: "restore", desc: "Restore earlier state" },
-  { cmd: "settings", desc: "Settings — details, thinking, sidebar" },
+  { cmd: "settings", desc: "Settings — details and thinking" },
   { cmd: "sessions", desc: "Browse saved sessions" },
   { cmd: "theme", desc: "Switch UI theme" },
   { cmd: "graph", desc: "Memory graph" },
@@ -548,25 +584,13 @@ export const SLASH_LIST: SlashCmd[] = [
 
 // ─── TUI prefs ───
 const _p = loadTuiJson();
-if (_p.sidebarVisible !== undefined) setSidebarVisible(_p.sidebarVisible);
 if (_p.showToolDetails !== undefined) setShowToolDetails(_p.showToolDetails);
 if (_p.showThinking !== undefined) setShowThinking(_p.showThinking);
 
-// ─── First-run welcome tips (small sidebar card, dismissible with ✕) ───
-// Visible only until the user dismisses them once; the flag persists in
-// tui.json so existing users never see the card again.
-export const [welcomeTipSeen, setWelcomeTipSeen] = createSignal(!!_p.welcomeTipSeen);
-export function dismissWelcomeTips() {
-  setWelcomeTipSeen(true);
-  saveTuiJson({ welcomeTipSeen: true });
-}
-
 export function persistUi() {
   saveTuiJson({
-    sidebarVisible: sidebarVisible(),
     showToolDetails: showToolDetails(),
     showThinking: showThinking(),
-    welcomeTipSeen: welcomeTipSeen(),
   });
 }
 

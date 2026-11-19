@@ -42,6 +42,15 @@ const edits = new Map();
 export function snapshotBefore(filePath) {
   const abs = path.resolve(filePath);
   const before = readFileOrNull(abs);
+  const prev = edits.get(abs);
+  // Keep the earliest snapshot for the current turn so a second edit to the
+  // same file still shows the cumulative diff. App clears this map at the
+  // start of each turn.
+  if (prev) {
+    prev.after = before;
+    edits.set(abs, prev);
+    return { abs, before: prev.before };
+  }
   edits.set(abs, { before, after: before });
   return { abs, before };
 }
@@ -233,9 +242,12 @@ export function buildFileDiff(abs, before, after) {
 function diffToLines(parts) {
   const out = [];
   for (const part of parts) {
-    if (part.added) out.push({ kind: 'add', text: part.value });
-    else if (part.removed) out.push({ kind: 'del', text: part.value });
-    else out.push({ kind: 'ctx', text: part.value });
+    const kind = part.added ? 'add' : part.removed ? 'del' : 'ctx';
+    // diffLines groups whole hunks into one part; split them so each row is
+    // rendered (and clipped) as a single line instead of one giant blob.
+    const rows = String(part.value ?? '').split(/\r?\n/);
+    if (rows.length && rows[rows.length - 1] === '') rows.pop();
+    for (const text of rows) out.push({ kind, text });
   }
   return out;
 }
@@ -259,6 +271,46 @@ function trimContext(lines, ctx) {
     if (i - last > 1) out.push({ kind: 'ctx', text: '…' });
     out.push(lines[i]);
     last = i;
+  }
+  return out;
+}
+
+// Pair unified-diff rows into old/new columns for the inline side-by-side
+// renderer. Consecutive deletions and additions are zipped index-wise; a
+// missing counterpart becomes a blank cell. Context rows appear on both sides.
+/**
+ * @typedef {{kind: string, text: string}} DiffRow
+ * @typedef {{left: DiffRow|null, right: DiffRow|null}} SideBySideRow
+ * @param {Array<DiffRow>} lines
+ * @returns {Array<SideBySideRow>}
+ */
+export function toSideBySide(lines) {
+  const src = Array.isArray(lines) ? lines : [];
+  /** @type {Array<SideBySideRow>} */
+  const out = [];
+  let i = 0;
+  while (i < src.length) {
+    const ln = src[i];
+    if (!ln) { i++; continue; }
+    if (ln.kind === 'ctx') {
+      out.push({ left: ln, right: ln });
+      i++;
+      continue;
+    }
+    /** @type {Array<DiffRow>} */
+    const dels = [];
+    /** @type {Array<DiffRow>} */
+    const adds = [];
+    while (i < src.length && src[i] && src[i].kind === 'del') { dels.push(src[i]); i++; }
+    while (i < src.length && src[i] && src[i].kind === 'add') { adds.push(src[i]); i++; }
+    if (!dels.length && !adds.length) {
+      // Unknown row kind: never drop content.
+      out.push({ left: ln, right: ln });
+      i++;
+      continue;
+    }
+    const n = Math.max(dels.length, adds.length);
+    for (let j = 0; j < n; j++) out.push({ left: dels[j] || null, right: adds[j] || null });
   }
   return out;
 }

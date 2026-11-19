@@ -55,6 +55,17 @@ test("constructor: default build mode, empty messages, config loaded", () => {
   expect(s.config).toBeTruthy();
 });
 
+test("addMessage tags turn rows with the active turnId, not system rows", () => {
+  const s = freshSession();
+  s._currentTurnId = 7;
+  s.addMessage({ role: "assistant", content: "x" });
+  s.addMessage({ role: "system", content: "notice" });
+  s.addMessage({ role: "assistant", content: "y", turnId: 99 });
+  expect(s.messages[0].turnId).toBe(7);
+  expect(s.messages[1].turnId).toBeUndefined();
+  expect(s.messages[2].turnId).toBe(99);
+});
+
 test("setMode validates and rebuilds system prompt", () => {
   const s = freshSession();
   expect(s.setMode("plan")).toBe("plan");
@@ -200,6 +211,26 @@ test("runTurn: permission prompt denied blocks the bash call", async () => {
   expect(asks).toBe(1);
   const toolMsg = s.messages.find((m) => m.role === "tool");
   expect(String(toolMsg.content)).toContain("Permission denied");
+});
+
+test("runTurn: auto-approve still prompts for the ask tool (questions are not permissions)", async () => {
+  const s = freshSession();
+  s.permissions.setAuto(true);
+  let asks = 0;
+  let calls = 0;
+  s.getResponse = async () => {
+    calls++;
+    if (calls === 1) return { type: "assistant", content: "", toolCalls: [{ id: "a1", name: "ask", input: { question: "Color?", options: ["Red", "Blue"] } }] };
+    return { type: "assistant", content: "done", toolCalls: [] };
+  };
+  const res = await s.runTurn({
+    onPermissionRequest: async () => { asks++; return { approved: true, note: "Blue" }; },
+  });
+  expect(res.type).toBe("text");
+  expect(asks).toBe(1);
+  const toolMsg = s.messages.find((m) => m.role === "tool");
+  expect(String(toolMsg.content)).toContain("Blue");
+  expect(s.permissions.auto).toBe(true);
 });
 
 test("runTurn: abort preserves partial streamed text", async () => {
@@ -458,7 +489,32 @@ test("runTurn: a complete-looking final answer is NOT nudged despite stale todos
   expect(res.openTodos).toBeUndefined();
 });
 
-test("runTurn: empty-reply nudges are capped (3 per turn)", async () => {
+test("runTurn: reasoning-only stop quotes the plan and forces a tool on retry", async () => {
+  const s = freshSession();
+  let calls = 0;
+  let forced = null;
+  s.getResponse = async (_cb, opts = {}) => {
+    calls++;
+    if (calls === 1) {
+      return { type: "assistant", content: "", toolCalls: [{ id: "t1", name: "read", input: { filePath: __filename } }] };
+    }
+    if (calls === 2) {
+      return { type: "assistant", content: "", toolCalls: [], reasoning: "Now let me create the requirements.txt and core modules." };
+    }
+    forced = opts.forceToolChoice;
+    return { type: "assistant", content: "created", toolCalls: [] };
+  };
+  const res = await s.runTurn({});
+  expect(res.type).toBe("text");
+  expect(res.content).toBe("created");
+  expect(forced).toBe("required");
+  const nudge = s.messages.find((m) => m.role === "user" && String(m.content).includes("empty reply"));
+  expect(nudge).toBeTruthy();
+  expect(String(nudge.content)).toContain("Now let me create the requirements.txt");
+  expect(String(nudge.content)).toContain("Do not stop after thinking");
+});
+
+test("runTurn: empty-reply nudges escalate, coalesce, and are capped (3 per turn)", async () => {
   const s = freshSession();
   let calls = 0;
   s.getResponse = async () => {
@@ -471,7 +527,10 @@ test("runTurn: empty-reply nudges are capped (3 per turn)", async () => {
   expect(res.content).toBe("finally text");
   expect(calls).toBe(4);
   const nudges = s.messages.filter((m) => m.role === "user" && String(m.content).includes("was empty"));
-  expect(nudges.length).toBe(3);
+  // Retries replace the previous nudge instead of stacking duplicate user rows.
+  expect(nudges.length).toBe(1);
+  expect(String(nudges[0].content)).toContain("3 time(s)");
+  expect(String(nudges[0].content)).toContain("Do not stop after thinking");
 });
 
 test("primary agents: role prompt reaches the system prompt; children are exempt", () => {
@@ -733,9 +792,13 @@ test("contextEstimate: tokens/window/pct reflect the live conversation", () => {
   // doesn't shift whenever the default model's context length changes.
   s.provider.active = null;
   s.addMessage({ role: "user", content: "0".repeat(4000) }); // ~1000 tokens
+  // Cumulative spend is NOT live context: the TUI gauge used to read
+  // tokensUsed, which made long sessions look permanently near the limit.
+  s.tokensUsed = 10_000_000;
   const ce = s.contextEstimate();
   expect(ce.window).toBe(200000);
   expect(ce.tokens).toBeGreaterThanOrEqual(1000);
+  expect(ce.tokens).toBeLessThan(10000);
   expect(ce.pct).toBe(Math.min(100, Math.round((ce.tokens / ce.window) * 100)));
 });
 

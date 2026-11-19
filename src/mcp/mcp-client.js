@@ -196,12 +196,20 @@ async function getTools() {
   return out;
 }
 
-async function callTool(server, toolName, input) {
+async function callTool(server, toolName, input, opts = {}) {
   const cfg = loadServers().servers[server];
   if (!cfg) return { error: 'MCP server not found: ' + server };
   let child;
+  let abort = null;
   try {
     child = await connectToJson(cfg, 8000);
+    // A timed-out session must also kill the stdio server, otherwise a slow
+    // MCP call keeps consuming resources after the parent has moved on.
+    if (opts.signal) {
+      abort = () => killTree(child);
+      if (opts.signal.aborted) abort();
+      else opts.signal.addEventListener('abort', abort, { once: true });
+    }
     await callRpc(child, 'initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'loom', version: '1.0.0' } }, 10000).catch(() => ({}));
     notify(child, 'notifications/initialized', {});
     const res = await callRpc(child, 'tools/call', { name: toolName, arguments: input }, DEFAULT_RPC_TIMEOUT).catch(() => ({ isError: true, content: [] }));
@@ -214,6 +222,9 @@ async function callTool(server, toolName, input) {
   } catch (e) {
     return { error: e.message };
   } finally {
+    if (opts.signal && abort) {
+      try { opts.signal.removeEventListener('abort', abort); } catch {}
+    }
     killTree(child);
   }
 }

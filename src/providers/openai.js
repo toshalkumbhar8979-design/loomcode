@@ -1,7 +1,8 @@
 const { createOpenAICompatProvider } = require('./openai-compat');
+const { getApiKey } = require('../config/settings');
 
 function getKey() {
-  return process.env.OPENAI_API_KEY;
+  return getApiKey('openai') || process.env.OPENAI_API_KEY;
 }
 
 const provider = {

@@ -6,6 +6,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **New 3D SDF splash bot art.** The splash now uses the supplied 30x13
+  pre-baked 3D SDF frames: all ten are kept verbatim (center, eight gaze
+  directions, and blink). The bot looks toward the pointer or composer caret
+  and blinks on its own, instead of the previous Cline head / downsampled
+  ASCII path.
+- **Thinking is a real dropdown.** Every assistant turn now keeps its
+  `Thinking` row visible; click the row to expand the model's reasoning and
+  click again to collapse it. Live reasoning streams open by default when
+  thinking display is on, and a manual click still collapses/expands it.
+- **Write/edit blocks show a preparing state and an inline side-by-side diff.**
+  While a write/edit runs the tool row says `Preparing write...` /
+  `Preparing edit...`; when it finishes the same block shows the changed file
+  with old and new columns, replacing the single-column `+`/`-` list.
+
+### Fixed
+- **The context gauge now shows live context, not lifetime spend.** The
+  status-bar `██████░░░░ (N ctx)` gauge read `session.tokensUsed` (cumulative
+  tokens across the whole session), so long conversations appeared pinned near
+  the window limit and disagreed with `/context`. It now uses
+  `contextEstimate()` — current messages + system prompt + tool schemas — and
+  refreshes immediately after manual or automatic compaction. `/usage` reports
+  session totals and live context on separate lines, and `/context` prints the
+  auto-compact threshold (default 75%; `/compact` or `<leader>c` compacts on
+  demand).
+- **Reasoning-only stops now nudge with the model's own plan and force a
+  tool call.** Reasoning models (Nemotron 3 Ultra and similar) can end a tool
+  turn with thinking text but no final content and no next tool call. Loom
+  dropped that (empty) assistant row, losing the plan, then sent up to three
+  identical "continue" nudges — which the model often ignored. The
+  continuation now quotes the tail of the model's reasoning, explicitly tells
+  it to act instead of thinking again, escalates on retries, coalesces
+  repeated retries into one user row, and forces the next model call to choose
+  a tool when tools have already run (or on the second empty stop). The final
+  placeholder names the cause instead of the generic "ended the turn without
+  any text".
+- **Saved sessions no longer attach old thoughts/tool parts to the wrong
+  assistant row.** A turn stores several assistant rows (one per model pass)
+  but the TUI renders one row per turn; reverse-order pairing reused a
+  previous turn's `parts` on earlier tool-call rows. Turns now carry a stable
+  `turnId`, and the transcript attaches rendered parts only to the final
+  assistant row of the matching turn.
+- **Write/edit diffs now render every changed line.** Multi-line hunks were
+  stored as one diff row, so only the first line survived clipping and context
+  trimming was wrong; hunks are now split per line. Repeated edits to the same
+  file keep the turn's original baseline (cumulative diff), and write/edit
+  patch blocks now have a panel background.
+
 ## [1.6.2] — 2026-10-18
 
 ### Fixed

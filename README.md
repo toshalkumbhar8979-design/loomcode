@@ -151,7 +151,7 @@ Zed (add to `~/.config/zed/settings.json`, then Command Palette → `agent: new 
 Full transport spec, JetBrains/Neovim configs, the protocol walkthrough, and a
 self-test client (`node scripts/acp-smoke.js`) live in **[docs/acp.md](docs/acp.md)**.
 
-## Slash Commands (37 total)
+## Slash Commands (41 total)
 
 | Command | Args | Description |
 |---------|------|-------------|
@@ -171,7 +171,7 @@ self-test client (`node scripts/acp-smoke.js`) live in **[docs/acp.md](docs/acp.
 | `/new` | — | New session |
 | `/clear` | — | Clear the chat |
 | `/restore` | — | Restore earlier state |
-| `/settings` | — | Settings — details, thinking, sidebar |
+| `/settings` | — | Settings — details, thinking, vim |
 | `/sessions` | — | Browse saved sessions |
 | `/theme` | — | Switch UI theme |
 | `/graph` | — | Memory graph |
@@ -179,9 +179,9 @@ self-test client (`node scripts/acp-smoke.js`) live in **[docs/acp.md](docs/acp.
 | `/mcp` | `add\|remove\|toggle` | Manage MCP servers |
 | `/connectors` | `add\|remove\|toggle` | Manage connectors — presets (supabase, railway, vercel, …) or one-liners; also `loom add connector` |
 | `/permissions` | `reset\|auto` | Permission rules |
+| `/exit` | — | Quit Loom Code |
 | `/subagents` | — | Subagent runs |
 | `/context` | — | Context window usage (live estimate) |
-| `/compact` | — | Summarize older messages to free context |
 | `/think` | `off\|low\|medium\|high` | Thinking budget |
 | `/approve` | — | Approve plan → Build |
 | `/tasks` | — | Background tasks |
@@ -191,7 +191,11 @@ self-test client (`node scripts/acp-smoke.js`) live in **[docs/acp.md](docs/acp.
 | `/style` | `[preset\|text]` | Output style preset |
 | `/vim` | — | Toggle vim editing |
 | `/remember` | `<fact>` | Save a fact to LOOM.md |
-| `/exit` | — | Quit Loom Code |
+| `/compact` | — | Summarize older messages to free context |
+| `/undo` | — | Undo the last exchange |
+| `/redo` | — | Redo the last undone exchange |
+| `/undo-files` | — | Rewind working tree to last undo point |
+| `/export` | — | Export chat as markdown |
 
 Aliases still work when typed but are hidden from the picker to keep it
 clean: `/model` → `/models`, `/thinking` + `/details` → `/settings`,
@@ -207,12 +211,11 @@ action list, syntax, and opencode-compatible aliases. The defaults:
 |-----|--------|
 | **ESC** | Interrupt current operation (aborts API requests) / close dialogs / clear the draft |
 | **Ctrl+C** | Exit (copies a text selection first) |
-| **Ctrl+B** | Toggle sidebar (file browser) |
 | **Ctrl+P** | Open command palette |
 | **Ctrl+X** | Leader key — the next key runs a leader binding |
 | **Ctrl+X** then **b / p** | Build mode / Plan mode |
 | **Ctrl+X** then **n / l / x / c** | New session / sessions list / export / compact |
-| **Ctrl+X** then **m / a / h / e** | Model picker / agents / help / editor |
+| **Ctrl+X** then **m / a / j / h / e** | Model picker / agents / subagents / help / editor |
 | **Ctrl+X** then **q** | Quit |
 | **Tab** | Next suggestion, or cycle mode (Build → Plan → Chat) |
 | **Ctrl+A** | Select the whole draft (readline-style) |
@@ -241,9 +244,13 @@ tool when a subtask warrants it, or **manually**, when you prefix a message with
 | `explore` | read-only, minus `task` | Fast read-only codebase exploration: search symbols, read files, list files. Never modifies anything and never delegates (no recursion). |
 | `scout`   | `read`, `glob`, `grep`, `webfetch` | External research: fetch docs, check APIs and dependencies. Read-only. |
 | `general` | all tools, minus `task` | General-purpose autonomous subagent for self-contained implementation tasks, bug fixes, and multi-step work. |
+| `architect` | read-only, minus `task` | Maps system boundaries, risks, and a minimal implementation plan for broad changes. |
+| `coder` / `tester` / `reviewer` | scoped tools, minus `task` | Implement, verify, and review focused work packages. |
 
-Every subagent is **read-only or sandboxed** and **cannot delegate further**
-(subagents never get the `task` tool), so delegation always terminates.
+Every subagent cannot delegate further (subagents never get the `task` tool),
+so delegation always terminates. Tools run on the normal user system by default;
+the Docker sandbox is used only when the user or the agent explicitly selects
+the `sandbox` tool / `sandbox: true`.
 
 ### Two ways to invoke a subagent
 
@@ -328,6 +335,7 @@ LoomCode/
 │   │   ├── agents.js        # agent registry + subagent runner
 │   │   ├── permissions.js   # Command permission checks
 │   │   ├── platform.js      # OS/platform detection
+│   │   ├── pty.js           # PTY-backed shell streaming
 │   │   ├── session-store.js # Persisted sessions
 │   │   ├── restore.js       # Snapshot/restore project file tree
 │   │   ├── usage.js         # Token/cost tracking
@@ -348,15 +356,26 @@ LoomCode/
 │   │   ├── settings.js      # ~/.loom/config.json persistence
 │   │   └── provider-cmd.js  # /connect command logic
 │   └── tui/
-│       ├── App.tsx           # OpenTUI root component
-│       ├── store.ts          # SolidJS reactive store
-│       ├── theme.ts          # Theme / palette
-│       ├── components/
-│       │   ├── InputBar.tsx  # Chat input + autocomplete
-│       │   ├── ChatArea.tsx  # Message list
-│       │   ├── BreadcrumbBar.tsx  # Mode + provider bar
-│       │   ├── Modals.tsx    # Settings pickers
-│       │   └── Sidebar.tsx   # File sidebar
+│       ├── App.tsx           # Root component + keyboard routing + slash commands
+│       ├── design.ts         # Palette, themes, glyphs, wordmarks, splash robot
+│       ├── store.ts          # SolidJS signals + session wiring
+│       ├── keybinds.ts       # Configurable keymap
+│       ├── markdown.tsx      # Markdown renderer + code highlighting
+│       ├── toolkit.ts        # Tool output formatting helpers
+│       ├── reports.ts        # /help, /status, /keybinds text
+│       ├── suite-home.ts     # Temp HOME for the interactive test suite
+│       ├── test-interactive.tsx  # 40 keyboard-interaction tests
+│       ├── shell/
+│       │   ├── Boot.tsx      # Splash: anchored robot head, tagline, composer
+│       │   ├── LoomBar.tsx   # Composer + status rows
+│       │   └── Stage.tsx     # Transcript: messages, tools, diffs, todos
+│       └── overlays/
+│           ├── Layer.tsx     # Modal frame
+│           ├── Deck.tsx      # Command palette
+│           ├── Pickers.tsx   # Provider/model/theme/settings modals
+│           ├── Sheets.tsx    # Help, MCP, sandbox, subagents, sessions
+│           ├── Gate.tsx      # Permission + question prompts
+│           └── Toasts.tsx    # Transient notices
 ├── package.json
 ├── LOOM.md                    # Developer reference
 └── .gitignore
@@ -370,6 +389,8 @@ Config is stored at `~/.loom/config.json` (permissions: 0600). Includes:
 - `apiKeys` — API keys from `/connect` or manual edit
 - `baseUrls` — custom provider endpoints
 - `maxTokens`, `temperature` — model settings
+- `requestTimeoutMs`, `toolTimeoutMs`, `subagentTimeoutMs` — hard production
+  limits for model calls, tools, and delegated work (defaults: 10m, 3m, 15m)
 - `permission` — OpenCode-style permission tree (see below)
 - `permissionRules` — rules saved from the permission popup ("Always allow"/"Never")
 

@@ -80,6 +80,7 @@ const TOOL_TO_PERMISSION = {
   bash: 'bash',
   sandbox: 'bash',   // same command gate as bash (danger heuristics apply)
   task: 'task',
+  spawn_agents: 'task',
   skill: 'skill',
   lsp: 'lsp',
   question: 'question',
@@ -144,6 +145,20 @@ function normPathArg(arg, cwd) {
   return p.replace(/\\/g, '/');
 }
 
+// Persisted "Always allow/deny" rules are namespaced by permission key so the
+// same argument string cannot leak across tools (e.g. a path named "explore"
+// must not auto-allow the task tool, and a command must not auto-allow an
+// edit). Legacy flat rules still resolve as an exact fallback.
+function ruleKey(permKey, arg) {
+  return String(permKey || '') + '|' + String(arg ?? '');
+}
+
+function splitRuleKey(key) {
+  const s = String(key ?? '');
+  const i = s.indexOf('|');
+  return i === -1 ? null : { permKey: s.slice(0, i), arg: s.slice(i + 1) };
+}
+
 class PermissionManager {
   constructor() {
     this.sessionRules = new Map(); // legacy exact-command rules (popup picks)
@@ -179,14 +194,32 @@ class PermissionManager {
   isAdmin(cmd) { return !!this._match(cmd, ADMIN_PATTERNS); }
   isDangerous(cmd) { return !!this._match(cmd, DANGER_PATTERNS) || this.isAdmin(cmd); }
   getDangerLabel(cmd) {
-    return this._match(cmd, ADMIN_PATTERNS) || this._match(cmd, DANGER_PATTERNS) || 'dangerous command';
+    return this._match(cmd, ADMIN_PATTERNS) || this._match(cmd, DANGER_PATTERNS) || null;
   }
 
   getRule(key) { return this.sessionRules.get(key); }
 
+  // Namespaced lookup: the exact tool+argument rule wins. Legacy flat rules
+  // predate namespacing and were overwhelmingly saved for shell commands, so
+  // they only fall back for bash — a command must never authorize an edit,
+  // subagent, or MCP server with the same argument string.
+  getRuleFor(permKey, arg) {
+    const scoped = this.sessionRules.get(ruleKey(permKey, arg));
+    if (scoped) return scoped;
+    if (permKey === 'bash') return this.sessionRules.get(String(arg ?? '')) || null;
+    return null;
+  }
+
   setRule(key, value, persist) {
     this.sessionRules.set(key, value);
     if (persist && this.onRuleChange) this.onRuleChange(key, value);
+  }
+
+  setRuleFor(permKey, arg, value, persist) {
+    const key = ruleKey(permKey, arg);
+    this.sessionRules.set(key, value);
+    if (persist && this.onRuleChange) this.onRuleChange(key, value);
+    return key;
   }
 
   clearRule(key) {
@@ -198,6 +231,11 @@ class PermissionManager {
     if (this.sessionRules.has('*')) return this.sessionRules.get('*');
     if (this.sessionRules.has(key)) return this.sessionRules.get(key);
     return null;
+  }
+
+  checkRuleFor(permKey, arg) {
+    if (this.sessionRules.has('*')) return this.sessionRules.get('*');
+    return this.getRuleFor(permKey, arg);
   }
 
   // Legacy pre-OpenCode check: an exact command string. Kept for callers that
@@ -234,15 +272,16 @@ class PermissionManager {
     if (key === 'bash' && this.isDangerous(String(arg || ''))) {
       // An exact session rule overrides heuristics ("Always allow" picked in
       // the popup for this very command).
-      const exact = this.sessionRules.get(String(arg || ''));
+      const exact = this.getRuleFor(key, arg);
       if (exact === 'allow') return 'allow';
       if (exact === 'deny') return 'deny';
       return 'ask';
     }
 
-    // 1. Legacy exact session rule (popup "Always allow"/"Never") — the
-    //    strongest signal; the user picked it for this exact command/path.
-    const exact = this.sessionRules.get(String(arg ?? ''));
+    // 1. Exact session rule (popup "Always allow"/"Always deny") — the
+    //    strongest signal; namespaced by permission key, with legacy flat
+    //    rules as a fallback.
+    const exact = this.getRuleFor(key, arg);
     if (exact) return exact;
     if (key === 'bash' && this.sessionRules.has('*')) return this.sessionRules.get('*');
 
@@ -288,6 +327,9 @@ class PermissionManager {
    * and doom_loop which aren't tool names).
    */
   resolveKey(permKey, arg) {
+    const exact = this.getRuleFor(permKey, arg);
+    if (exact) return exact;
+    if (this.sessionRules.has('*')) return this.sessionRules.get('*');
     const cfgPerm = this.config && this.config.permission;
     const agentTree = this.agentId && this.config && this.config.agent && this.config.agent[this.agentId]
       ? this.config.agent[this.agentId].permission
@@ -318,6 +360,10 @@ class PermissionManager {
       case 'glob': return String(inp.pattern ?? '');
       case 'grep': return String(inp.pattern ?? '');
       case 'task': return String(inp.agent ?? inp.subagent ?? inp.agentId ?? '');
+      case 'spawn_agents': {
+        const first = Array.isArray(inp.tasks) && inp.tasks[0] ? inp.tasks[0] : {};
+        return String(first.agent ?? 'batch');
+      }
       case 'skill': return String(inp.name ?? inp.skill ?? '');
       case 'lsp': return String(inp.query ?? '');
       case 'question':
@@ -342,10 +388,7 @@ function commandRiskLabel(cmd) {
 }
 
 module.exports = {
-}
-
-module.exports = {
   PermissionManager, ADMIN_PATTERNS, DANGER_PATTERNS, commandRiskLabel,
   PERMISSION_KEYS, DEFAULT_PERMISSIONS, TOOL_TO_PERMISSION,
-  expandHome, wildcardToRegExp, matchNode, normPathArg,
+  expandHome, wildcardToRegExp, matchNode, normPathArg, ruleKey, splitRuleKey,
 };

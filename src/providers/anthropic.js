@@ -9,6 +9,30 @@ function getApiUrl() {
   return base.replace(/\/$/, '') + '/v1/messages';
 }
 
+// Race one stream read against a stall watchdog. A server that accepts the
+// request then goes silent must fail with a precise, actionable error instead
+// of hanging the whole turn until the outer deadline.
+function withStall(promise, ms, what) {
+  let timer;
+  const guard = promise.then((v) => ({ v }), (e) => ({ e }));
+  return Promise.race([
+    guard,
+    new Promise((res) => { timer = setTimeout(() => res({ timeout: true }), ms); }),
+  ]).then((winner) => {
+    clearTimeout(timer);
+    if (winner.timeout) {
+      const e = new Error(
+        `Anthropic produced no output for ${Math.round(ms / 1000)}s (${what}). ` +
+        'The endpoint may be overloaded or the model may not be enabled for this key. ' +
+        'Try again, switch models, or raise firstChunkTimeoutMs/idleTimeoutMs in config.');
+      /** @type {any} */ (e).permanent = true;
+      throw e;
+    }
+    if (winner.e) throw winner.e;
+    return winner.v;
+  });
+}
+
 function formatContentText(text) {
   return Array.isArray(text)
     ? text
@@ -23,6 +47,7 @@ function formatContentText(text) {
  * @property {string|Array<{type: string, text: string, cache_control?: {type: string}}>=} system
  * @property {number=} temperature
  * @property {Array<Object>=} tools
+ * @property {Object=} tool_choice
  * @property {{ type: 'enabled', budget_tokens: number }=} thinking
  * @property {boolean=} cache
  */
@@ -126,8 +151,9 @@ function buildBody(messages, options) {
   // each tool result — the opencode-style multi-pass thinking). Only enabled
   // when the active model supports it (options.reasoning set by the session
   // from the model's 'reasoning' tag). Anthropic requires temperature unset
-  // and max_tokens comfortably above the budget.
-  if (options.reasoning) {
+  // and max_tokens comfortably above the budget. A forced tool choice is
+  // incompatible with thinking, so drop thinking for that one retry.
+  if (options.reasoning && options.toolChoice !== 'required') {
     let maxTokens = options.maxTokens || 8192;
     // Explicit per-turn budget (/think low|medium|high) wins over the default.
     const budget = options.thinkingBudget
@@ -147,6 +173,13 @@ function buildBody(messages, options) {
       description: t.description,
       input_schema: t.input_schema || { type: 'object', properties: {} },
     }));
+    if (options.toolChoice) {
+      body.tool_choice = options.toolChoice === 'required'
+        ? { type: 'any' }
+        : options.toolChoice === 'none'
+          ? { type: 'none' }
+          : { type: 'auto' };
+    }
   }
 
   return body;
@@ -253,8 +286,21 @@ async function stream(messages, options = {}, onDelta, onReasoning) {
   let finishReason;
   let sawEnd = false;
   const toolAcc = new Map();
+  const firstChunkMs = Number(options.firstChunkTimeoutMs) > 0 ? Number(options.firstChunkTimeoutMs) : 180000;
+  const idleMs = Number(options.idleTimeoutMs) > 0 ? Number(options.idleTimeoutMs) : 180000;
+  /** @type {any} */
+  let iter;
+  try { iter = resp.body[Symbol.asyncIterator] ? resp.body[Symbol.asyncIterator]() : resp.body; } catch { iter = resp.body; }
+  let sawChunk = false;
 
-  for await (const chunk of resp.body) {
+  for (;;) {
+    const step = await withStall(
+      iter.next(),
+      sawChunk ? idleMs : firstChunkMs,
+      sawChunk ? 'the stream stalled mid-response' : 'the first token never arrived');
+    if (step.done) break;
+    const chunk = step.value;
+    sawChunk = true;
     buf += decoder.decode(chunk, { stream: true });
     const lines = buf.split('\n');
     buf = lines.pop() || '';

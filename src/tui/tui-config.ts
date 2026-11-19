@@ -1,4 +1,4 @@
-// Shared tui.json access (theme.ts, store.ts, keybinds.ts): one path
+// Shared tui.json access (design.ts, store.ts, keybinds.ts): one path
 // resolution honoring LOOM_CONFIG_DIR, with read-modify-write saves so
 // concurrent updates never clobber each other's fields.
 import fs from "fs";

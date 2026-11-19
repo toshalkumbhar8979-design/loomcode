@@ -240,6 +240,27 @@ test("runSubagent: cancelSubagent aborts a live child and the run resolves inter
   }
 });
 
+test("runSubagent: deadline interrupts a child and reports an actionable timeout", async () => {
+  const origRunTurn = Session.prototype.runTurn;
+  Session.prototype.runTurn = async function () {
+    return await new Promise((resolve) => {
+      const check = setInterval(() => {
+        if (this.interrupted) {
+          clearInterval(check);
+          resolve({ type: "text", content: "partial", interrupted: true });
+        }
+      }, 5);
+    });
+  };
+  try {
+    const res = await agents.runSubagent({ agentId: "general", prompt: "long task", timeoutMs: 20 });
+    expect(res.error).toContain("subagent timeout");
+    expect(res.interrupted).toBe(true);
+  } finally {
+    Session.prototype.runTurn = origRunTurn;
+  }
+}, 5000);
+
 test("registry: specialist subagents (research/coder/reviewer/tester/web) + build orchestrator prompt", () => {
   const all = agents.loadAgents();
   for (const id of ["research", "coder", "reviewer", "tester", "web"]) {

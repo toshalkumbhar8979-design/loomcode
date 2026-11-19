@@ -153,3 +153,46 @@ test("todoread maps to read; tasks never prompts", () => {
   const p = pm({});
   expect(p.resolve("todoread", "/abs/anything.md")).toBe("allow");
 });
+
+// ─── namespaced saved rules ───
+
+test("setRuleFor scopes saved rules by permission key", () => {
+  const p = pm({ permission: { bash: "ask", edit: "ask", task: "ask" } });
+  p.setRuleFor("bash", "explore", "allow");
+  expect(p.getRuleFor("bash", "explore")).toBe("allow");
+  expect(p.getRuleFor("task", "explore")).toBe(null);
+  expect(p.resolve("bash", "explore")).toBe("allow");
+  expect(p.resolve("task", "explore")).toBe("ask");
+  // A command rule must not become a path rule for edit.
+  p.setRuleFor("bash", "src/app.js", "allow");
+  expect(p.resolve("edit", "src/app.js")).toBe("ask");
+  expect(p.resolve("bash", "src/app.js")).toBe("allow");
+});
+
+test("legacy flat rules still resolve for bash, but do not leak into another tool", () => {
+  const p = pm({ permission: { bash: "ask", edit: "ask" } });
+  p.setRule("echo hi", "allow");
+  expect(p.resolve("bash", "echo hi")).toBe("allow");
+  expect(p.getRuleFor("bash", "echo hi")).toBe("allow");
+  expect(p.getRuleFor("edit", "echo hi")).toBe(null);
+  expect(p.resolve("edit", "echo hi")).toBe("ask");
+});
+
+test("resolveKey honors saved namespaced doom_loop and external_directory rules", () => {
+  const p = pm({});
+  expect(p.resolveKey("doom_loop", "bash:...")).toBe("ask");
+  p.setRuleFor("doom_loop", "bash:...", "allow");
+  expect(p.resolveKey("doom_loop", "bash:...")).toBe("allow");
+  expect(p.resolveKey("doom_loop", "bash:other")).toBe("ask");
+  p.setRuleFor("external_directory", "C:/outside", "deny");
+  expect(p.resolveKey("external_directory", "C:/outside")).toBe("deny");
+  p.setRuleFor("external_directory", "C:/other/x.js", "allow");
+  p.cwd = "C:/proj";
+  expect(p.checkExternal("C:/other/x.js")).toBe("allow");
+});
+
+test("getDangerLabel only labels actual risky commands", () => {
+  const p = pm({});
+  expect(p.getDangerLabel("rm -rf build")).toContain("recursive force delete");
+  expect(p.getDangerLabel("echo hi")).toBe(null);
+});

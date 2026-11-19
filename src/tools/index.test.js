@@ -27,7 +27,7 @@ function tmpFile(name, content) {
 
 test("getToolDefinitions: build exposes all base tools", () => {
   const defs = tools.getToolDefinitions("build");
-  expect(defs.map((d) => d.name).sort()).toEqual(["ask", "bash", "browser", "edit", "glob", "grep", "lsp", "mcp", "read", "sandbox", "task", "tasks", "todoread", "todowrite", "webfetch", "websearch", "write"]);
+  expect(defs.map((d) => d.name).sort()).toEqual(["ask", "bash", "browser", "edit", "glob", "grep", "lsp", "mcp", "read", "sandbox", "spawn_agents", "task", "tasks", "todoread", "todowrite", "webfetch", "websearch", "write"]);
   for (const d of defs) {
     expect(d.description).toBeTruthy();
     expect(d.input_schema).toBeTruthy();
@@ -37,7 +37,7 @@ test("getToolDefinitions: build exposes all base tools", () => {
 
 test("getToolDefinitions: plan exposes read-only tools + task, chat none", () => {
   const plan = tools.getToolDefinitions("plan");
-  expect(plan.map((d) => d.name).sort()).toEqual(["glob", "grep", "read", "task", "todoread", "todowrite", "webfetch", "websearch"]);
+  expect(plan.map((d) => d.name).sort()).toEqual(["glob", "grep", "read", "spawn_agents", "task", "todoread", "todowrite", "webfetch", "websearch"]);
   expect(tools.getToolDefinitions("chat")).toEqual([]);
 });
 
@@ -67,17 +67,29 @@ test("write: creates parent dirs and writes content", async () => {
 });
 
 test("edit: single replace, replaceAll, and error cases", async () => {
-  const p = tmpFile("edit.txt", "aaa bbb aaa");
+  const p = tmpFile("edit.txt", "aaa bbb ccc");
   const r1 = await tools.executeTool("edit", { filePath: p, oldString: "aaa", newString: "XXX" });
   expect(r1.result).toContain("replaced 1 occurrence");
-  expect(fs.readFileSync(p, "utf8")).toBe("XXX bbb aaa");
+  expect(fs.readFileSync(p, "utf8")).toBe("XXX bbb ccc");
   const r2 = await tools.executeTool("edit", { filePath: p, oldString: "XXX", newString: "YYY", replaceAll: true });
   expect(r2.result).toContain("replaced 1 occurrences");
-  expect(fs.readFileSync(p, "utf8")).toBe("YYY bbb aaa");
+  expect(fs.readFileSync(p, "utf8")).toBe("YYY bbb ccc");
   const notFound = await tools.executeTool("edit", { filePath: p, oldString: "zzz", newString: "q" });
   expect(notFound.error).toBe("oldString not found in content");
   const noFile = await tools.executeTool("edit", { filePath: path.join(tmpDir, "missing.txt"), oldString: "a", newString: "b" });
   expect(noFile.error).toContain("File not found");
+});
+
+test("edit: ambiguous and no-op replacements are rejected", async () => {
+  const p = tmpFile("ambiguous.txt", "aaa bbb aaa");
+  const amb = await tools.executeTool("edit", { filePath: p, oldString: "aaa", newString: "XXX" });
+  expect(amb.error).toContain("2 matches");
+  expect(amb.error).toContain("replaceAll");
+  expect(fs.readFileSync(p, "utf8")).toBe("aaa bbb aaa");
+  const same = await tools.executeTool("edit", { filePath: p, oldString: "aaa", newString: "aaa" });
+  expect(same.error).toContain("identical");
+  const empty = await tools.executeTool("edit", { filePath: p, oldString: "", newString: "x" });
+  expect(empty.error).toContain("cannot be empty");
 });
 
 test("bash: echo runs and returns stdout", async () => {
@@ -94,6 +106,23 @@ test.skipIf(process.platform === "win32")("bash: non-zero exit is reported", asy
 test("bash: empty command completes cleanly", async () => {
   const res = await tools.executeTool("bash", { command: "   " });
   expect(String(res.result)).toContain("empty");
+});
+
+test("windowsShellCommand: translates Unix idioms and shell operators", () => {
+  expect(tools.windowsShellCommand("ls -la")).toBe("Get-ChildItem -Force");
+  expect(tools.windowsShellCommand("cat README.md")).toBe("Get-Content README.md");
+  expect(tools.windowsShellCommand("mkdir -p a/b")).toBe("New-Item -ItemType Directory -Force -Path a/b");
+  expect(tools.windowsShellCommand("rm -rf tmp")).toBe("Remove-Item -Recurse -Force -LiteralPath tmp");
+  expect(tools.windowsShellCommand("find . -name \"*.js\"")).toBe("Get-ChildItem -Recurse -Filter \"*.js\"");
+  expect(tools.windowsShellCommand("echo a && echo b")).toBe("echo a; if ($?) { echo b }");
+  expect(tools.windowsShellCommand("ls -la && cat foo")).toBe("Get-ChildItem -Force; if ($?) { Get-Content foo }");
+  expect(tools.windowsShellCommand("a || b")).toBe("a; if (-not $?) { b }");
+});
+
+test.skipIf(process.platform !== "win32")("bash: ls -la runs on Windows", async () => {
+  const res = await tools.executeTool("bash", { command: "ls -la " + tmpDir });
+  expect(res.error).toBeUndefined();
+  expect(String(res.result)).toContain("readme.txt");
 });
 
 test("bash: dangerous commands are blocked unless approved", async () => {
@@ -317,6 +346,23 @@ test("bash: ctx.signal abort kills the running command", async () => {
   }, "build", { signal: ac.signal });
   expect(String(res.result)).toContain("aborted by user");
 }, 15000);
+
+test("executeTool: a deadline returns promptly even when a tool ignores abort", async () => {
+  // This is the important production property: an uncooperative plugin must
+  // not pin the main agent loop after its time budget is exhausted.
+  tools.TOOLS.__deadline_probe = {
+    name: "__deadline_probe", description: "test-only", parameters: {},
+    execute: () => new Promise((resolve) => setTimeout(() => resolve("late"), 200)),
+  };
+  try {
+    const t0 = Date.now();
+    const res = await tools.executeTool("__deadline_probe", {}, "build", { toolTimeoutMs: 25 });
+    expect(Date.now() - t0).toBeLessThan(150);
+    expect(res.error).toContain("timed out after 1s");
+  } finally {
+    delete tools.TOOLS.__deadline_probe;
+  }
+});
 
 test("tasks: list/output/kill round-trip a background task", async () => {
   const bt = require("../core/background-tasks.js");

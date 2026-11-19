@@ -129,6 +129,29 @@ test("anthropic buildBody: extended thinking enabled for reasoning models", () =
   expect(plain.thinking).toBeUndefined();
 });
 
+test("anthropic buildBody: forced tool choice maps to any and drops thinking", () => {
+  const body = anthropic.buildBody(
+    [{ role: "user", content: "x" }],
+    {
+      model: SONNET,
+      reasoning: true,
+      toolChoice: "required",
+      tools: [{ name: "read", description: "d", input_schema: { type: "object" } }],
+    }
+  );
+  expect(body.tool_choice).toEqual({ type: "any" });
+  expect(body.thinking).toBeUndefined();
+});
+
+test("openai-compat buildRequest: passes forced tool choice only with tools", () => {
+  const build = openaiCompat.buildRequest;
+  const tools = [{ name: "read", description: "d", input_schema: { type: "object" } }];
+  const withTools = build([{ role: "user", content: "x" }], { model: "gpt-5", tools, toolChoice: "required" });
+  expect(withTools.tool_choice).toBe("required");
+  const withoutTools = build([{ role: "user", content: "x" }], { model: "gpt-5", toolChoice: "required" });
+  expect(withoutTools.tool_choice).toBeUndefined();
+});
+
 test("openai-compat buildRequest: reasoning effort high for o-series", () => {
   const build = openaiCompat.buildRequest;
   const o = build([{ role: "user", content: "x" }], { model: "o3-mini", reasoning: true });
@@ -223,6 +246,25 @@ test("retryWithBackoff: abort errors are never retried", async () => {
   const fn = async () => { calls++; const e = new Error("aborted"); e.name = "AbortError"; throw e; };
   await expect(openaiCompat.retryWithBackoff(fn, 4, "test")).rejects.toThrow("aborted");
   expect(calls).toBe(1);
+});
+
+test("retryWithBackoff: transport timeouts get one bounded retry", async () => {
+  let calls = 0;
+  const flaky = async () => {
+    calls++;
+    if (calls < 2) throw new Error("Request timed out");
+    return "recovered";
+  };
+  const result = await openaiCompat.retryWithBackoff(flaky, 4, "NVIDIA", true);
+  expect(result).toBe("recovered");
+  expect(calls).toBe(2);
+});
+
+test("retryWithBackoff: a dead endpoint fails after one retry, not four", async () => {
+  let calls = 0;
+  const dead = async () => { calls++; throw new Error("Request timed out"); };
+  await expect(openaiCompat.retryWithBackoff(dead, 4, "NVIDIA", true)).rejects.toThrow("timed out");
+  expect(calls).toBe(2);
 });
 
 test("wrapErr: friendly 401/403/402 messages, status passthrough", () => {
@@ -398,7 +440,7 @@ test("stream watchdog: no first token within budget rejects with a permanent err
     await p.stream([{ role: "user", content: "hi" }], { model: "dead-model", firstChunkTimeoutMs: 50 });
   } catch (e) { caught = e; }
   expect(caught).toBeDefined();
-  expect(String(caught.message)).toMatch(/no output for 0s \(the first token never arrived\)/);
+  expect(String(caught.message)).toMatch(/timed out after 0s \(the first token never arrived\)/);
   expect(caught.permanent).toBe(true);
 });
 
@@ -422,6 +464,6 @@ test("stream watchdog: idle stall mid-response rejects with a permanent error", 
     await p.stream([{ role: "user", content: "hi" }], { model: "dead-model", firstChunkTimeoutMs: 50, idleTimeoutMs: 50 });
   } catch (e) { caught = e; }
   expect(caught).toBeDefined();
-  expect(String(caught.message)).toMatch(/no output for 0s \(the stream stalled mid-response\)/);
+  expect(String(caught.message)).toMatch(/timed out after 0s \(the stream stalled mid-response\)/);
   expect(caught.permanent).toBe(true);
 });

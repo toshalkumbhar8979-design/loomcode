@@ -1,35 +1,23 @@
-// md-render — the TUI's markdown renderer for assistant chat output.
-//
-// Block-level markdown needs a real parser to get right; line-level + inline
-// markdown is predictable, cheap, and covers 99% of what the model prints in
-// chat (bold, inline code, headers, bullets, quotes, rule lines). This keeps
-// output styling predictable without dragging in the full MarkdownRenderable
-// (which needs a syntax-style theme and handles streaming differently).
-//
-// Each logical line is rendered as a separate <text> element with styled
-// <span>/<b>/<em>/<a> children so wrapping composes cleanly.
+// Markdown — parse once, render as OpenTUI text. Block-level lines,
+// inline emphasis, fenced code with lightweight syntax tinting. Links keep
+// their URL visible (terminals have no hover).
+import { palette } from "./design.ts";
 
-export type MdSpan =
-  | { text: string; bold?: false; italic?: false; code?: false; link?: undefined }
-  | { text: string; bold: true; italic?: boolean; code?: undefined; link?: undefined }
-  | { text: string; italic: true; bold?: boolean; code?: undefined; link?: undefined }
-  | { text: string; code: true; bold?: undefined; italic?: undefined; link?: undefined };
+const ui = palette();
 
-// Parse one line of markdown into styled spans. Order: code spans first
-// (inside them everything is literal), then strong/em emphasis, then links.
-function parseInline(line: string): { text: string; bold?: boolean; italic?: boolean; code?: boolean; link?: string }[] {
-  const tokens: { text: string; bold?: boolean; italic?: boolean; code?: boolean; link?: string }[] = [];
+type Inline = { text: string; bold?: boolean; italic?: boolean; code?: boolean; link?: string };
+
+function parseInline(line: string): Inline[] {
+  const tokens: Inline[] = [];
   let i = 0;
   let buf = "";
   const flush = () => { if (buf) { tokens.push({ text: buf }); buf = ""; } };
   while (i < line.length) {
-    // escaping: \* renders a literal *
     if (line[i] === "\\" && i + 1 < line.length && /[\\*_`\[\]()#~-]/.test(line[i + 1])) {
       buf += line[i + 1];
       i += 2;
       continue;
     }
-    // inline code `code`
     if (line[i] === "`") {
       const close = line.indexOf("`", i + 1);
       if (close > i) {
@@ -38,12 +26,10 @@ function parseInline(line: string): { text: string; bold?: boolean; italic?: boo
         i = close + 1;
         continue;
       }
-      // unmatched ` — literal
       buf += line[i];
       i++;
       continue;
     }
-    // strong emphasis **bold** (greedy to the LAST closing ** permite nesting-ish)
     if (line.startsWith("**", i)) {
       const close = line.indexOf("**", i + 2);
       if (close > i + 2) {
@@ -53,9 +39,6 @@ function parseInline(line: string): { text: string; bold?: boolean; italic?: boo
         continue;
       }
     }
-    // italic emphasis *italic* (next char must be non-space; closing * picked
-    // by skipping over "**" sequences so **bold** inside a paragraph is safe).
-    // Never treat a "**" opening as italic — the strong branch above owns those.
     if (line[i] === "*" && line[i + 1] !== "*" && i + 1 < line.length && /\S/.test(line[i + 1])) {
       let close = -1;
       for (let j = i + 1; ; j = close + 1) {
@@ -72,24 +55,19 @@ function parseInline(line: string): { text: string; bold?: boolean; italic?: boo
         i = close + 1;
         continue;
       }
-      // unmatched * — literal
       buf += "*";
       i++;
       continue;
     }
-    // links [label](href)
     if (line[i] === "[") {
       const closeL = line.indexOf("](", i);
       const closeP = closeL > i ? line.indexOf(")", closeL + 2) : -1;
       if (closeL > i && closeP > closeL) {
         flush();
-        const label = line.slice(i + 1, closeL);
-        const href = line.slice(closeL + 2, closeP);
-        tokens.push({ text: label + " (" + href + ")", link: href });
+        tokens.push({ text: line.slice(i + 1, closeL), link: line.slice(closeL + 2, closeP) });
         i = closeP + 1;
         continue;
       }
-      // not a link — literal
       buf += line[i];
       i++;
       continue;
@@ -102,15 +80,13 @@ function parseInline(line: string): { text: string; bold?: boolean; italic?: boo
 }
 
 export type MdLine =
-  | { kind: "heading"; level: 1 | 2 | 3; spans: ReturnType<typeof parseInline> }
-  | { kind: "bullet"; indent: number; spans: ReturnType<typeof parseInline> }
-  | { kind: "quote"; spans: ReturnType<typeof parseInline> }
+  | { kind: "heading"; level: 1 | 2 | 3; spans: Inline[] }
+  | { kind: "bullet"; indent: number; spans: Inline[] }
+  | { kind: "quote"; spans: Inline[] }
   | { kind: "rule" }
-  | { kind: "text"; spans: ReturnType<typeof parseInline> }
+  | { kind: "text"; spans: Inline[] }
   | { kind: "code"; code: string; lang: string };
 
-// Split markdown text into per-line blocks. Fenced ``` blocks keep verbatim
-// (their contents are already "rendered" code; the ChatArea palette boxes them).
 export function parseMarkdown(md: string): MdLine[] {
   const out: MdLine[] = [];
   const lines = String(md).split("\n");
@@ -132,41 +108,26 @@ export function parseMarkdown(md: string): MdLine[] {
       continue;
     }
     if (fence) { codeBuf.push(raw); continue; }
-
     if (/^\s*$/.test(raw)) { out.push({ kind: "text", spans: [] }); continue; }
-
-    // horizontal rule
     if (/^\s*(-{3,}|_{3,}|\*{3,})\s*$/.test(raw)) { out.push({ kind: "rule" }); continue; }
-
-    // heading: # text / ## text / ### text
     const hm = raw.match(/^(#{1,3})\s+(.*)$/);
     if (hm) {
       out.push({ kind: "heading", level: Math.min(3, hm[1].length) as 1 | 2 | 3, spans: parseInline(hm[2]) });
       continue;
     }
-
-    // blockquote
     const qm = raw.match(/^\s*>\s?(.*)$/);
     if (qm) { out.push({ kind: "quote", spans: parseInline(qm[1]) }); continue; }
-
-    // list bullet: leading spaces + -/*/+ or 1. marker
     const bm = raw.match(/^(\s*)([-*+]|\d+\.)\s+(.*)$/);
     if (bm) {
       out.push({ kind: "bullet", indent: Math.min(12, bm[1].length), spans: parseInline(bm[3]) });
       continue;
     }
-
-    // plain paragraph line — merge inline styles
     out.push({ kind: "text", spans: parseInline(raw) });
   }
   if (fence && codeBuf.length) out.push({ kind: "code", code: codeBuf.join("\n"), lang: fenceLang });
   return out;
 }
 
-// ─── Lightweight code highlighting ───
-// opencode-style palette mapping: keywords / strings / comments / numbers /
-// calls get distinct colors instead of one flat white block. Regex-per-line
-// tokenising is plenty for chat output (we never need parse trees).
 export type CodeTok = { text: string; style: "kw" | "str" | "com" | "num" | "call" | "plain" };
 
 const KW: Record<string, string[]> = {
@@ -189,20 +150,16 @@ function kwSetFor(lang: string): string[] {
   return fam && KW[fam] ? KW[fam] : KW_ALL;
 }
 
-// One regex line-scanner: comments → strings → numbers → keywords → calls.
-// Anything else stays "plain". Cheap and predictable for chat-sized blocks.
 function highlightLine(line: string, kws: string[]): CodeTok[] {
   const out: CodeTok[] = [];
   const isPyBash = kws.includes("lambda") || kws.includes("elif");
-  // Keep a strict group layout: 1=comment 2=string 3=number 4=keyword 5=call.
-  // The keyword alternation must NOT add inner captures or the later groups shift.
   const kwAlt = "\\b(?:" + kws.join("|") + ")\\b";
   const re = new RegExp(
-    "(" + (isPyBash ? "#.*$" : "\\/\\/.*$|\\/\\*.*") + ")" +            // 1 comment
-      "|(" + "\"(?:[^\"\\\\\\n]|\\\\.)*\"|'(?:[^'\\\\\\n]|\\\\.)*'|`(?:[^`\\\\\\n]|\\\\.)*`" + ")" + // 2 string
-      "|(\\b\\d[\\d._xa-fA-F]*\\b)" +                                    // 3 number
-      "|(" + kwAlt + ")" +                                               // 4 keyword
-      "|([A-Za-z_$][\\w$]*(?=\\())",                                     // 5 call
+    "(" + (isPyBash ? "#.*$" : "\\/\\/.*$|\\/\\*.*") + ")" +
+      "|(" + "\"(?:[^\"\\\\\\n]|\\\\.)*\"|'(?:[^'\\\\\\n]|\\\\.)*'|`(?:[^`\\\\\\n]|\\\\.)*`" + ")" +
+      "|(\\b\\d[\\d._xa-fA-F]*\\b)" +
+      "|(" + kwAlt + ")" +
+      "|([A-Za-z_$][\\w$]*(?=\\())",
     "g"
   );
   let last = 0;
@@ -225,4 +182,82 @@ function highlightLine(line: string, kws: string[]): CodeTok[] {
 export function highlightCode(code: string, lang: string): CodeTok[][] {
   const kws = kwSetFor(lang);
   return String(code).split("\n").map(l => highlightLine(l, kws));
+}
+
+const CODE_COLORS: Record<CodeTok["style"], () => string> = {
+  kw: () => ui.syntax.kw,
+  str: () => ui.syntax.str,
+  com: () => ui.syntax.com,
+  num: () => ui.syntax.num,
+  call: () => ui.syntax.call,
+  plain: () => ui.syntax.plain,
+};
+
+function renderSpans(spans: Inline[]): any[] {
+  const out: any[] = [];
+  spans.forEach((s) => {
+    if (s.code) {
+      out.push(<span style={{ fg: ui.accent }}>{s.text}</span>);
+      return;
+    }
+    if (s.link) {
+      out.push(<span style={{ fg: ui.secondary }}>{s.text}</span>);
+      out.push(<span style={{ fg: ui.fgMuted }}>{" (" + s.link + ")"}</span>);
+      return;
+    }
+    if (s.bold && s.italic) {
+      out.push(<span style={{ fg: ui.fg }}><b><i>{s.text}</i></b></span>);
+      return;
+    }
+    if (s.bold) out.push(<b><span style={{ fg: ui.fg }}>{s.text}</span></b>);
+    else if (s.italic) out.push(<i><span style={{ fg: ui.fgDim }}>{s.text}</span></i>);
+    else out.push(<span>{s.text}</span>);
+  });
+  return out;
+}
+
+export function Md(props: { md: string }) {
+  const lines = parseMarkdown(props.md);
+  return (
+    <box flexDirection="column">
+      {lines.map((ln: any) => {
+        switch (ln.kind) {
+          case "heading": {
+            const color = ln.level === 1 ? ui.primary : ln.level === 2 ? ui.fg : ui.fgDim;
+            return <text fg={color}><b>{renderSpans(ln.spans)}</b></text>;
+          }
+          case "bullet":
+            return (
+              <text paddingLeft={(ln.indent || 0) + 1}>
+                <span style={{ fg: ui.primarySoft }}>{"• "}</span>
+                {renderSpans(ln.spans)}
+              </text>
+            );
+          case "quote":
+            return <text fg={ui.fgDim} paddingLeft={1}>{"│ "}{renderSpans(ln.spans)}</text>;
+          case "rule":
+            return <text fg={ui.border}>{"─".repeat(40)}</text>;
+          case "code": {
+            const rows = highlightCode(ln.code, ln.lang);
+            return (
+              <box marginTop={1} marginBottom={1} flexDirection="column">
+                <text fg={ui.fgMuted}>{"┌─ " + (ln.lang || "code")}</text>
+                {rows.map((toks: any) => (
+                  <text>
+                    <span style={{ fg: ui.border }}>{"│ "}</span>
+                    {toks.map((t: any) => (
+                      <span style={{ fg: CODE_COLORS[t.style]() }}>{t.text}</span>
+                    ))}
+                  </text>
+                ))}
+                <text fg={ui.fgMuted}>{"└─"}</text>
+              </box>
+            );
+          }
+          default:
+            return <text>{renderSpans(ln.spans)}</text>;
+        }
+      })}
+    </box>
+  );
 }

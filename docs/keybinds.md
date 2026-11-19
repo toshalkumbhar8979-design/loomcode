@@ -2,7 +2,7 @@
 
 Every key in the Loom TUI is configurable. Bindings live in the `keybinds`
 object of `~/.loom/tui.json` (the same file the TUI uses for its theme and
-sidebar state). Restart Loom after editing, or run `/keybinds` inside the TUI
+display state). Restart Loom after editing, or run `/keybinds` inside the TUI
 to see every action with its current key.
 
 ## Quick example
@@ -11,7 +11,6 @@ to see every action with its current key.
 {
   "keybinds": {
     "command_list": "ctrl+j",
-    "sidebar_toggle": ["ctrl+b", "ctrl+s"],
     "session_interrupt": "ctrl+z",
     "app_exit": "none"
   },
@@ -59,8 +58,6 @@ Order of modifiers doesn't matter; the canonical display form is
 | --- | --- | --- | --- |
 | `app_exit` | `ctrl+c`, `<leader>q` | `app_exit` | |
 | `command_list` | `ctrl+p` | `command_list` | |
-| `sidebar_toggle` | `ctrl+b` | `sidebar_toggle` | |
-| `sidebar_cycle_tab` | `ctrl+i` | | |
 | `session_interrupt` | `escape` | `session_interrupt` | |
 | `modal_cancel` | mirrors `session_interrupt` | | |
 | `user_expand` | `ctrl+e` | `user_expand` | |
@@ -70,6 +67,7 @@ Order of modifiers doesn't matter; the canonical display form is
 | `session_compact` | `<leader>c` | `session_compact` | `/compact` |
 | `model_list` | `<leader>m` | `model_list`, `model_provider_list` | `/models` |
 | `agent_list` | `<leader>a` | `agent_list` | `/agents` |
+| `subagent_list` | `<leader>j` | | `/subagents` |
 | `help_show` | `<leader>h` | `help_show` | `/help` |
 | `editor_open` | `<leader>e` | `editor_open` | `/editor` |
 | `display_thinking` | `<leader>t` | `display_thinking` | `/thinking` |
