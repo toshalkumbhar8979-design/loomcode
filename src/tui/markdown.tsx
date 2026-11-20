@@ -193,6 +193,10 @@ const CODE_COLORS: Record<CodeTok["style"], () => string> = {
   plain: () => ui.syntax.plain,
 };
 
+export function codeColor(style: CodeTok["style"]): string {
+  return (CODE_COLORS[style] || CODE_COLORS.plain)();
+}
+
 function renderSpans(spans: Inline[]): any[] {
   const out: any[] = [];
   spans.forEach((s) => {

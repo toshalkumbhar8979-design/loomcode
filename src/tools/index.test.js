@@ -112,8 +112,17 @@ test("windowsShellCommand: translates Unix idioms and shell operators", () => {
   expect(tools.windowsShellCommand("ls -la")).toBe("Get-ChildItem -Force");
   expect(tools.windowsShellCommand("cat README.md")).toBe("Get-Content README.md");
   expect(tools.windowsShellCommand("mkdir -p a/b")).toBe("New-Item -ItemType Directory -Force -Path a/b");
+  expect(tools.windowsShellCommand("mkdir -p a b")).toBe("New-Item -ItemType Directory -Force -Path @(a,b)");
   expect(tools.windowsShellCommand("rm -rf tmp")).toBe("Remove-Item -Recurse -Force -LiteralPath tmp");
-  expect(tools.windowsShellCommand("find . -name \"*.js\"")).toBe("Get-ChildItem -Recurse -Filter \"*.js\"");
+  expect(tools.windowsShellCommand("find . -name \"*.js\"")).toBe("Get-ChildItem -Path . -Recurse -Filter \"*.js\"");
+  expect(tools.windowsShellCommand("find src -type f -name \"*.js\"")).toBe("Get-ChildItem -Path src -Recurse -File -Filter \"*.js\"");
+  expect(tools.windowsShellCommand("grep -rn \"foo bar\" src")).toBe("Get-ChildItem -Path src -Recurse -File | Select-String -Pattern \"foo bar\" -CaseSensitive");
+  expect(tools.windowsShellCommand("ls -la | head -n 5")).toBe("Get-ChildItem -Force | Select-Object -First 5");
+  expect(tools.windowsShellCommand("echo a; ls -la")).toBe("echo a; Get-ChildItem -Force");
+  expect(tools.windowsShellCommand("cd C:\\foo; ls -la")).toBe("Set-Location -LiteralPath C:\\foo; Get-ChildItem -Force");
+  expect(tools.windowsShellCommand("ls -la 2>/dev/null")).toBe("Get-ChildItem -Force 2> $null");
+  expect(tools.windowsShellCommand("npm run build 2>/dev/null")).toBe("npm run build 2> $null");
+  expect(tools.windowsShellCommand("export FOO=bar")).toBe("$env:FOO = \"bar\"");
   expect(tools.windowsShellCommand("echo a && echo b")).toBe("echo a; if ($?) { echo b }");
   expect(tools.windowsShellCommand("ls -la && cat foo")).toBe("Get-ChildItem -Force; if ($?) { Get-Content foo }");
   expect(tools.windowsShellCommand("a || b")).toBe("a; if (-not $?) { b }");
@@ -123,6 +132,15 @@ test.skipIf(process.platform !== "win32")("bash: ls -la runs on Windows", async 
   const res = await tools.executeTool("bash", { command: "ls -la " + tmpDir });
   expect(res.error).toBeUndefined();
   expect(String(res.result)).toContain("readme.txt");
+});
+
+test.skipIf(process.platform !== "win32")("bash: mkdir -p handles multiple Windows paths", async () => {
+  const a = path.join(tmpDir, "multi a");
+  const b = path.join(tmpDir, "multi b");
+  const res = await tools.executeTool("bash", { command: `mkdir -p "${a}" "${b}"` });
+  expect(res.error).toBeUndefined();
+  expect(fs.existsSync(a)).toBe(true);
+  expect(fs.existsSync(b)).toBe(true);
 });
 
 test("bash: dangerous commands are blocked unless approved", async () => {

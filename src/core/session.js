@@ -278,7 +278,7 @@ class Session {
     const memory = this.loadMemory();
     const plat = require('./platform').detect();
     const shell = plat.platform === 'win32'
-      ? 'PowerShell 5.1 (prefer Get-ChildItem/Get-Content/New-Item; avoid Unix flags like `ls -la` and `&&`)'
+      ? 'PowerShell 5.1 (prefer Get-ChildItem/Get-Content/New-Item; pass bash workdir instead of cd — each call is a fresh shell)'
       : 'bash/zsh';
     const hasWSL = plat.isWSL ? ' (WSL)' : '';
     const hasTools = this.mode === 'build' || this.mode === 'plan';

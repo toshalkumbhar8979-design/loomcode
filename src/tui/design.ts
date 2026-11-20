@@ -11,6 +11,7 @@ import { loadTuiJson, saveTuiJson } from "./tui-config.ts";
 
 export type Palette = {
   bg: string; bgMsg: string; bgPanel: string; bgPanelAlt: string; bgInput: string; bgHover: string;
+  bgDiffAdd: string; bgDiffDel: string;
   border: string; borderFocus: string;
   fg: string; fgDim: string; fgMuted: string;
   primary: string; primarySoft: string;
@@ -28,6 +29,8 @@ const LOOM: Palette = {
   bgPanelAlt: "#242424",
   bgInput: "#101010",
   bgHover: "#2a2a2a",
+  bgDiffAdd: "#13251a",
+  bgDiffDel: "#2a151a",
   border: "#2e2e2e",
   borderFocus: "#7aa2f7",
   fg: "#e6e6e6",
@@ -51,6 +54,8 @@ const PAPER: Palette = {
   bgPanelAlt: "#e5ddcd",
   bgInput: "#fffdf8",
   bgHover: "#d9cfbc",
+  bgDiffAdd: "#e1ecd9",
+  bgDiffDel: "#f2dcd7",
   border: "#c6b9a2",
   borderFocus: "#2f5d8a",
   fg: "#262420",
@@ -74,6 +79,8 @@ const GLACIER: Palette = {
   bgPanelAlt: "#17253c",
   bgInput: "#0d1726",
   bgHover: "#1d2f4a",
+  bgDiffAdd: "#122a22",
+  bgDiffDel: "#2a171c",
   border: "#2b405c",
   borderFocus: "#6cb8e8",
   fg: "#dbe7f2",
@@ -97,6 +104,8 @@ const NOCTURNE: Palette = {
   bgPanelAlt: "#211a2d",
   bgInput: "#130f1b",
   bgHover: "#2b2239",
+  bgDiffAdd: "#1b2a22",
+  bgDiffDel: "#2a1824",
   border: "#3a2f4c",
   borderFocus: "#b59ce8",
   fg: "#e6e0f2",
@@ -120,6 +129,8 @@ const MONO: Palette = {
   bgPanelAlt: "#232323",
   bgInput: "#121212",
   bgHover: "#2c2c2c",
+  bgDiffAdd: "#202020",
+  bgDiffDel: "#2a2a2a",
   border: "#383838",
   borderFocus: "#e6e6e6",
   fg: "#e6e6e6",

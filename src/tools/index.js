@@ -17,89 +17,432 @@ function globIgnore(full) {
   return ['node_modules', '.git'].map((n) => path.posix.join(base, '**', n, '**'));
 }
 
+function unquoteToken(token) {
+  const t = String(token || '');
+  if (t.length >= 2 && ((t[0] === '"' && t[t.length - 1] === '"') || (t[0] === "'" && t[t.length - 1] === "'"))) {
+    return t.slice(1, -1);
+  }
+  return t;
+}
+
+function shellTokens(command) {
+  const tokens = [];
+  let cur = '';
+  let quote = null;
+  let has = false;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (ch === '`' && quote !== "'") {
+      cur += ch;
+      if (i + 1 < command.length) cur += command[++i];
+      has = true;
+      continue;
+    }
+    if (quote) {
+      cur += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      cur += ch;
+      has = true;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (has) {
+        tokens.push(cur);
+        cur = '';
+        has = false;
+      }
+      continue;
+    }
+    cur += ch;
+    has = true;
+  }
+  if (has) tokens.push(cur);
+  return tokens;
+}
+
+function isFlagToken(token) {
+  return /^--?[A-Za-z]/.test(String(token || ''));
+}
+
+function commandTargets(args) {
+  const targets = [];
+  let stop = false;
+  for (const t of args) {
+    if (!stop && t === '--') {
+      stop = true;
+      continue;
+    }
+    if (!stop && isFlagToken(t)) continue;
+    targets.push(t);
+  }
+  return targets;
+}
+
+function arrayArg(tokens) {
+  return tokens.length > 1 ? `@(${tokens.join(',')})` : tokens[0];
+}
+
+function hasFlag(args, re) {
+  return args.some((t) => re.test(unquoteToken(t)));
+}
+
+function splitRedirections(args) {
+  const clean = [];
+  const redirects = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (/^(?:[12]?>>?|\*>>?|&>>?)$/.test(a)) {
+      redirects.push(a);
+      if (i + 1 < args.length) redirects.push(args[++i]);
+      continue;
+    }
+    if (/^(?:[12]?>>?|\*>>?|&>>?).+/.test(a) || /^[12]>&[12]$/.test(a)) {
+      redirects.push(a);
+      continue;
+    }
+    clean.push(a);
+  }
+  return { args: clean, redirects };
+}
+
+function lineCount(args, fallback) {
+  for (let i = 0; i < args.length; i++) {
+    const a = unquoteToken(args[i]);
+    const m = /^--lines=(\d+)$/.exec(a) || /^-n(\d+)$/.exec(a) || /^-(\d+)$/.exec(a);
+    if (m) return Number(m[1]);
+    if ((a === '-n' || a === '--lines') && i + 1 < args.length) {
+      const n = Number(unquoteToken(args[i + 1]));
+      if (Number.isFinite(n) && n > 0) return n;
+      i++;
+    }
+  }
+  return fallback;
+}
+
+function fileTargets(args) {
+  const files = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = unquoteToken(args[i]);
+    if (a === '-n' || a === '--lines') {
+      i++;
+      continue;
+    }
+    if (/^--lines=/.test(a) || /^-n\d+$/.test(a) || /^-\d+$/.test(a)) continue;
+    if (a === '-f' || a === '--follow' || a === '-q' || a === '--quiet' || a === '-v' || a === '--verbose') continue;
+    if (isFlagToken(a)) continue;
+    files.push(args[i]);
+  }
+  return files;
+}
+
+function normalizeRedirections(command) {
+  return String(command || '')
+    .replace(/&>\s*\/dev\/null/gi, '*> $null')
+    .replace(/2>\s*\/dev\/null/gi, '2> $null')
+    .replace(/1>\s*\/dev\/null/gi, '> $null')
+    .replace(/>\s*\/dev\/null/gi, '> $null')
+    .replace(/2>\s*NUL\b/gi, '2> $null')
+    .replace(/>\s*NUL\b/gi, '> $null');
+}
+
+function splitCommandOps(command) {
+  /** @type {Array<{cmd?: string, op?: string}>} */
+  const out = [];
+  let buf = '';
+  let quote = null;
+  let depth = 0;
+  const flush = () => {
+    const t = buf.trim();
+    if (t) out.push({ cmd: t });
+    buf = '';
+  };
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (ch === '`' && quote !== "'") {
+      buf += ch;
+      if (i + 1 < command.length) buf += command[++i];
+      continue;
+    }
+    if (quote) {
+      buf += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      buf += ch;
+      continue;
+    }
+    if (ch === '(' || ch === '{') {
+      depth++;
+      buf += ch;
+      continue;
+    }
+    if (ch === ')' || ch === '}') {
+      depth = Math.max(0, depth - 1);
+      buf += ch;
+      continue;
+    }
+    if (depth === 0) {
+      const two = command.slice(i, i + 2);
+      if (two === '&&' || two === '||') {
+        flush();
+        out.push({ op: two });
+        i++;
+        continue;
+      }
+      if (ch === ';' || ch === '|') {
+        flush();
+        out.push({ op: ch });
+        continue;
+      }
+    }
+    buf += ch;
+  }
+  flush();
+  return out;
+}
+
 /**
  * Translate one POSIX-flavoured command into Windows PowerShell 5.1.
  * Models routinely emit `ls -la`, `cat file`, or `mkdir -p dir`; PowerShell
  * rejects those flags before the command runs. Only the leading utility is
- * rewritten; pipes, redirection and PowerShell cmdlets pass through untouched.
+ * rewritten; PowerShell cmdlets pass through untouched.
  * @param {string} command
  * @returns {string}
  */
 function translateWindowsPart(command) {
   const c = String(command || '').trim();
-  const m = /^([a-zA-Z][\w.-]*)(?:\s+([\s\S]*))?$/.exec(c);
-  if (!m) return c;
-  const cmd = m[1];
-  const rest = (m[2] || '').trim();
-  switch (cmd) {
+  if (!c) return c;
+  const tokens = shellTokens(c);
+  if (!tokens.length) return c;
+  const name = unquoteToken(tokens[0]).toLowerCase();
+  const rawArgs = tokens.slice(1);
+  const split = splitRedirections(rawArgs);
+  const args = split.args;
+  const targets = commandTargets(args);
+  const redirects = split.redirects.length ? ' ' + split.redirects.join(' ') : '';
+  const done = (out) => (out === c ? out : out + redirects);
+
+  switch (name) {
     case 'ls': {
-      const force = /(^|\s)-[a-zA-Z]*a/.test(rest) || /--all\b/.test(rest);
-      const target = rest.replace(/(^|\s)--?[a-zA-Z-]+/g, ' ').trim();
-      return `Get-ChildItem${force ? ' -Force' : ''}${target ? ' ' + target : ''}`;
+      const force = args.some((t) => {
+        const a = unquoteToken(t);
+        return a === '--all' || /^-[a-zA-Z]*a/.test(a);
+      });
+      return done(`Get-ChildItem${force ? ' -Force' : ''}${targets.length ? ' -Path ' + arrayArg(targets) : ''}`);
     }
-    case 'cat': {
-      const target = rest.replace(/^--?[\w-]+\s+/, '').trim();
-      return target ? `Get-Content ${target}` : c;
-    }
+    case 'cat':
+      return targets.length ? done(`Get-Content ${arrayArg(targets)}`) : c;
     case 'pwd':
-      return 'Get-Location';
-    case 'mkdir': {
-      const target = rest.replace(/^-[pP]\s+/, '').trim();
-      return target ? `New-Item -ItemType Directory -Force -Path ${target}` : c;
+      return done('Get-Location');
+    case 'cd': {
+      const rest = args.filter((t) => unquoteToken(t) !== '/d');
+      if (!rest.length) return done('Set-Location');
+      if (rest.length > 1) return c;
+      return done(`Set-Location -LiteralPath ${rest[0]}`);
     }
+    case 'mkdir':
+      return targets.length ? done(`New-Item -ItemType Directory -Force -Path ${arrayArg(targets)}`) : c;
     case 'rm': {
-      const recursive = /(^|\s)-[a-zA-Z]*[rR]/.test(rest);
-      const force = /(^|\s)-[a-zA-Z]*f/.test(rest);
-      const target = rest.replace(/(^|\s)--?[a-zA-Z-]+/g, ' ').trim();
-      if (!target) return c;
-      return `Remove-Item${recursive ? ' -Recurse' : ''}${force ? ' -Force' : ''} -LiteralPath ${target}`;
+      const recursive = hasFlag(args, /^-[a-zA-Z]*r/i) || args.some((t) => unquoteToken(t) === '--recursive');
+      const force = hasFlag(args, /^-[a-zA-Z]*f/i) || args.some((t) => unquoteToken(t) === '--force');
+      if (!targets.length) return c;
+      return done(`Remove-Item${recursive ? ' -Recurse' : ''}${force ? ' -Force' : ''} -LiteralPath ${arrayArg(targets)}`);
     }
     case 'cp': {
-      const recursive = /(^|\s)-[a-zA-Z]*[rR]/.test(rest);
-      const args = rest.replace(/(^|\s)--?[a-zA-Z-]+/g, ' ').trim();
-      return args ? `Copy-Item${recursive ? ' -Recurse' : ''} -Force ${args}` : c;
+      const recursive = hasFlag(args, /^-[a-zA-Z]*r/i) || args.some((t) => unquoteToken(t) === '--recursive');
+      if (!targets.length) return c;
+      if (targets.length === 1) return done(`Copy-Item${recursive ? ' -Recurse' : ''} -Force ${targets[0]}`);
+      if (targets.length === 2) return done(`Copy-Item${recursive ? ' -Recurse' : ''} -Force ${targets[0]} ${targets[1]}`);
+      return done(`Copy-Item${recursive ? ' -Recurse' : ''} -Force -Path ${arrayArg(targets.slice(0, -1))} -Destination ${targets[targets.length - 1]}`);
     }
     case 'mv': {
-      const args = rest.replace(/(^|\s)--?[a-zA-Z-]+/g, ' ').trim();
-      return args ? `Move-Item -Force ${args}` : c;
+      if (!targets.length) return c;
+      if (targets.length === 1) return done(`Move-Item -Force ${targets[0]}`);
+      if (targets.length === 2) return done(`Move-Item -Force ${targets[0]} ${targets[1]}`);
+      return done(`Move-Item -Force -Path ${arrayArg(targets.slice(0, -1))} -Destination ${targets[targets.length - 1]}`);
     }
     case 'touch':
-      return rest ? `New-Item -ItemType File -Force -Path ${rest}` : c;
+      return targets.length ? done(`New-Item -ItemType File -Force -Path ${arrayArg(targets)}`) : c;
     case 'which':
-      return rest ? `(Get-Command ${rest}).Source` : c;
+    case 'whereis': {
+      const target = targets[0] || unquoteToken(args[0] || '');
+      return target ? done(`(Get-Command ${target} -ErrorAction SilentlyContinue).Source`) : c;
+    }
     case 'head': {
-      const n = /-n\s*(\d+)/.exec(rest);
-      const file = rest.replace(/-n\s*\d+/, '').trim();
-      return file ? `Get-Content -LiteralPath ${file} -TotalCount ${n ? n[1] : 10}` : c;
+      const n = lineCount(args, 10);
+      const files = fileTargets(args);
+      if (!files.length) return done(`Select-Object -First ${n}`);
+      return done(`Get-Content -LiteralPath ${arrayArg(files)} -TotalCount ${n}`);
     }
     case 'tail': {
-      const n = /-n\s*(\d+)/.exec(rest);
-      const file = rest.replace(/-n\s*\d+/, '').trim();
-      return file ? `Get-Content -LiteralPath ${file} -Tail ${n ? n[1] : 10}` : c;
+      const n = lineCount(args, 10);
+      const follow = args.some((t) => {
+        const a = unquoteToken(t);
+        return a === '-f' || a === '--follow';
+      });
+      const files = fileTargets(args);
+      if (!files.length) return done(`Select-Object -Last ${n}`);
+      return done(`Get-Content -LiteralPath ${arrayArg(files)} -Tail ${n}${follow ? ' -Wait' : ''}`);
     }
     case 'grep': {
-      const recursive = /(^|\s)-[a-zA-Z]*r/.test(rest);
-      const args = rest.replace(/(^|\s)--?[a-zA-Z-]+/g, ' ').trim();
-      const parts = /^(".*?"|'.*?'|\S+)\s+(.*)$/.exec(args);
-      if (!parts) return c;
-      return recursive
-        ? `Get-ChildItem -Recurse -File | Select-String -Pattern ${parts[1]}`
-        : `Select-String -Path ${parts[2]} -Pattern ${parts[1]}`;
+      let recursive = false;
+      let ignoreCase = false;
+      let list = false;
+      let invert = false;
+      let fixed = false;
+      const rest = [];
+      for (let i = 0; i < args.length; i++) {
+        const a = unquoteToken(args[i]);
+        if (a === '--') {
+          rest.push(...args.slice(i + 1));
+          break;
+        }
+        if (a === '--recursive' || a === '--dereference-recursive') {
+          recursive = true;
+          continue;
+        }
+        if (a === '--ignore-case') {
+          ignoreCase = true;
+          continue;
+        }
+        if (a === '--files-with-matches') {
+          list = true;
+          continue;
+        }
+        if (a === '--invert-match') {
+          invert = true;
+          continue;
+        }
+        if (a === '--fixed-strings') {
+          fixed = true;
+          continue;
+        }
+        if (a === '-e' || a === '--regexp') {
+          if (i + 1 < args.length) rest.push(args[++i]);
+          continue;
+        }
+        if (isFlagToken(a)) {
+          for (const ch of a.slice(1)) {
+            if (ch === 'r' || ch === 'R') recursive = true;
+            else if (ch === 'i') ignoreCase = true;
+            else if (ch === 'l') list = true;
+            else if (ch === 'v') invert = true;
+            else if (ch === 'F') fixed = true;
+          }
+          continue;
+        }
+        rest.push(args[i]);
+      }
+      const pattern = rest.shift();
+      if (!pattern) return c;
+      const paths = rest;
+      const opts = [];
+      if (!ignoreCase) opts.push('-CaseSensitive');
+      if (list) opts.push('-List');
+      if (invert) opts.push('-NotMatch');
+      if (fixed) opts.push('-SimpleMatch');
+      const optText = opts.length ? ' ' + opts.join(' ') : '';
+      if (recursive) {
+        const pathText = paths.length ? ` -Path ${arrayArg(paths)}` : '';
+        return done(`Get-ChildItem${pathText} -Recurse -File | Select-String -Pattern ${pattern}${optText}`);
+      }
+      const pathText = paths.length ? ` -Path ${arrayArg(paths)}` : '';
+      return done(`Select-String${pathText} -Pattern ${pattern}${optText}`);
     }
     case 'find': {
-      const name = /-name\s+("[^"]+"|'[^']+'|\S+)/.exec(rest);
-      return name ? `Get-ChildItem -Recurse -Filter ${name[1]}` : 'Get-ChildItem -Recurse';
+      let dir = '.';
+      let name = null;
+      let type = null;
+      let depth = null;
+      let pathSeen = false;
+      for (let i = 0; i < args.length; i++) {
+        const a = unquoteToken(args[i]);
+        if (a === '-name' || a === '-iname') {
+          if (i + 1 < args.length) name = args[++i];
+          continue;
+        }
+        if (a === '-type') {
+          if (i + 1 < args.length) type = unquoteToken(args[++i]);
+          continue;
+        }
+        if (a === '-maxdepth' || a === '-depth') {
+          if (i + 1 < args.length) depth = unquoteToken(args[++i]);
+          continue;
+        }
+        if (a === '-mindepth') {
+          i++;
+          continue;
+        }
+        if (isFlagToken(a)) return c;
+        if (pathSeen) return c;
+        dir = args[i];
+        pathSeen = true;
+      }
+      let out = `Get-ChildItem -Path ${dir} -Recurse`;
+      if (type === 'f') out += ' -File';
+      else if (type === 'd') out += ' -Directory';
+      if (name) out += ` -Filter ${name}`;
+      if (depth) out += ` -Depth ${depth}`;
+      return done(out);
+    }
+    case 'dir': {
+      let recursive = false;
+      let bare = false;
+      let force = false;
+      let translated = false;
+      const paths = [];
+      for (const t of args) {
+        const a = unquoteToken(t);
+        if (/^\/[a-zA-Z]+$/.test(a)) {
+          translated = true;
+          for (const ch of a.slice(1).toLowerCase()) {
+            if (ch === 's') recursive = true;
+            else if (ch === 'b') bare = true;
+            else if (ch === 'a') force = true;
+            else if (ch === 'w' || ch === 'p' || ch === 'q' || ch === 'o' || ch === 't') continue;
+            else return c;
+          }
+        } else if (isFlagToken(a)) {
+          return c;
+        } else {
+          paths.push(t);
+        }
+      }
+      if (!translated) return c;
+      let out = 'Get-ChildItem';
+      if (paths.length) out += ` -Path ${arrayArg(paths)}`;
+      if (recursive) out += ' -Recurse';
+      if (force) out += ' -Force';
+      if (bare) out += ' -Name';
+      return done(out);
     }
     case 'env':
-      return 'Get-ChildItem Env:';
+      return done('Get-ChildItem Env:');
     case 'date':
-      return 'Get-Date';
+      return done('Get-Date');
     case 'ps':
-      return 'Get-Process';
-    case 'kill': {
-      const pid = rest.replace(/(^|\s)--?[a-zA-Z-]+/g, ' ').trim();
-      return pid ? `Stop-Process -Id ${pid} -Force` : c;
+      return done('Get-Process');
+    case 'kill':
+      return targets.length ? done(`Stop-Process -Id ${arrayArg(targets)} -Force`) : c;
+    case 'export': {
+      const assigns = args.map(unquoteToken).filter((a) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(a));
+      if (!assigns.length) return c;
+      const out = assigns.map((a) => {
+        const eq = a.indexOf('=');
+        const key = a.slice(0, eq);
+        const value = a.slice(eq + 1).replace(/`/g, '``').replace(/"/g, '`"');
+        return `$env:${key} = "${value}"`;
+      }).join('; ');
+      return done(out);
     }
+    case 'source':
+      return targets.length ? done(`. ${targets[0]}`) : c;
     default:
       return c;
   }
@@ -112,21 +455,40 @@ function translateWindowsPart(command) {
  * @returns {string}
  */
 function windowsShellCommand(command) {
-  const c = String(command || '').trim();
+  const c = normalizeRedirections(String(command || '').trim());
   if (!c) return c;
-  const orParts = c.split(/\s*\|\|\s*/);
-  if (orParts.length > 1) {
-    return orParts
-      .map((part, i) => (i === 0 ? windowsShellCommand(part) : `if (-not $?) { ${windowsShellCommand(part)} }`))
-      .join('; ');
+  const parts = splitCommandOps(c);
+  /** @type {Array<{connector: string|null, segments: string[]}>} */
+  const pipelines = [];
+  /** @type {{connector: string|null, segments: string[]}|null} */
+  let current = null;
+  /** @type {string|null} */
+  let pending = null;
+  for (const part of parts) {
+    if (part.op) {
+      pending = part.op;
+      continue;
+    }
+    const translated = translateWindowsPart(part.cmd || '');
+    if (pending === '|' && current) {
+      current.segments.push(translated);
+    } else {
+      if (current) pipelines.push(current);
+      current = { connector: pending, segments: [translated] };
+    }
+    pending = null;
   }
-  const andParts = c.split(/\s*&&\s*/);
-  if (andParts.length > 1) {
-    return andParts
-      .map((part, i) => (i === 0 ? translateWindowsPart(part) : `if ($?) { ${translateWindowsPart(part)} }`))
-      .join('; ');
+  if (current) pipelines.push(current);
+  if (!pipelines.length) return c;
+  let out = pipelines[0].segments.join(' | ');
+  for (let i = 1; i < pipelines.length; i++) {
+    const p = pipelines[i];
+    const body = p.segments.join(' | ');
+    if (p.connector === '&&') out += `; if ($?) { ${body} }`;
+    else if (p.connector === '||') out += `; if (-not $?) { ${body} }`;
+    else out += `; ${body}`;
   }
-  return translateWindowsPart(c);
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -355,7 +717,7 @@ const TOOLS = {
   },
   bash: {
     name: 'bash',
-    description: 'Execute a shell command on the user\'s machine. On Windows this runs Windows PowerShell 5.1: prefer PowerShell cmdlets (Get-ChildItem, Get-Content, New-Item, Select-String) and avoid Unix-only flags. Common Unix commands (ls/cat/mkdir/rm/cp/mv/touch/grep/find/head/tail) and && are translated automatically, but PowerShell syntax is safer. Pass sandbox:true to run it INSIDE the Docker sandbox instead (docker exec into loom-sandbox, project at /workspace) — required for anything the user asks to run "in the sandbox".',
+    description: 'Execute a shell command on the user\'s machine. On Windows this runs Windows PowerShell 5.1: prefer PowerShell cmdlets (Get-ChildItem, Get-Content, New-Item, Select-String) and avoid Unix-only flags. Common Unix commands (ls/cat/mkdir/rm/cp/mv/touch/grep/find/head/tail), pipes, &&/||, ;, and /dev/null redirections are translated automatically, but PowerShell syntax is safer. Pass workdir instead of cd — each call starts a fresh shell. Pass sandbox:true to run it INSIDE the Docker sandbox instead (docker exec into loom-sandbox, project at /workspace) — required for anything the user asks to run "in the sandbox".',
     parameters: {
       command: { type: 'string', required: true, description: 'The command to execute' },
       workdir: { type: 'string', required: false, description: 'Working directory' },

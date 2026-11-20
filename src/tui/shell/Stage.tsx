@@ -3,7 +3,7 @@
 // bordered blocks that stream their output live while they run.
 import { createSignal, createMemo, onMount, onCleanup, Show, For } from "solid-js";
 import { GLYPH, SPIN, TICK_MS, palette, topRule, botRule, fmtMs, fit } from "../design.ts";
-import { Md } from "../markdown.tsx";
+import { Md, highlightCode, codeColor } from "../markdown.tsx";
 import {
   showThinking, userExpandedIdx, setUserExpandedIdx,
   thoughtClosed, setThoughtClosed, thoughtExpanded, setThoughtExpanded,
@@ -77,18 +77,57 @@ function UserTurn(props: { m: any; idx: number }) {
   );
 }
 
+function diffLang(file: string): string {
+  const base = String(file || "").split(/[\\/]/).pop() || "";
+  const dot = base.lastIndexOf(".");
+  return dot >= 0 ? base.slice(dot + 1).toLowerCase() : "";
+}
+
+function clipCode(tokens: any[], width: number): any[] {
+  if (width <= 0) return [];
+  const out: any[] = [];
+  let left = width;
+  for (const t of tokens) {
+    if (left <= 0) break;
+    if (t.text.length <= left) {
+      out.push(t);
+      left -= t.text.length;
+    } else {
+      if (left > 1) out.push({ text: t.text.slice(0, left - 1), style: t.style });
+      out.push({ text: GLYPH.ellipsis, style: "plain" });
+      break;
+    }
+  }
+  return out;
+}
+
+function DiffCell(props: { ln: any; colW: number; lang: string }) {
+  const ln = props.ln;
+  const kind = ln?.kind || "";
+  const marker = kind === "del" ? "- " : kind === "add" ? "+ " : "  ";
+  const avail = Math.max(0, props.colW - marker.length);
+  const raw = ln ? clean(ln.text).replace(/\n$/, "") : "";
+  const toks = ln ? clipCode(highlightCode(raw, props.lang)[0] || [], avail) : [];
+  const used = toks.reduce((n: number, t: any) => n + t.text.length, 0);
+  const pad = Math.max(0, avail - used);
+  const markerColor = kind === "del" ? ui.error : kind === "add" ? ui.success : ui.fgMuted;
+  const bg = kind === "del" ? ui.bgDiffDel : kind === "add" ? ui.bgDiffAdd : undefined;
+  return (
+    <text width={props.colW} bg={bg}>
+      <span style={{ fg: markerColor }}>{marker}</span>
+      {toks.map((t: any) => <span style={{ fg: codeColor(t.style) }}>{t.text}</span>)}
+      <span>{" ".repeat(pad)}</span>
+    </text>
+  );
+}
+
 function PatchBlock(props: { d: any; toolName?: string }) {
   const d = props.d;
   if (!d) return null;
   const W = Math.max(20, blockW() - 2);
   const divider = " " + GLYPH.bar + " ";
   const colW = Math.max(8, Math.floor((W - divider.length) / 2));
-  const clipTo = (t: string, n: number) => (t.length > n ? t.slice(0, Math.max(0, n - 1)) + GLYPH.ellipsis : t);
-  const cell = (ln: any) => {
-    if (!ln) return " ".repeat(colW);
-    const marker = ln.kind === "del" ? "- " : ln.kind === "add" ? "+ " : "  ";
-    return clipTo(marker + clean(ln.text).replace(/\n$/, ""), colW).padEnd(colW);
-  };
+  const lang = diffLang(d.path);
   const verb = d.isNew ? "wrote " : props.toolName === "edit" ? "edit " : "patch ";
   const head = verb + (d.path || "");
   return (
@@ -96,9 +135,9 @@ function PatchBlock(props: { d: any; toolName?: string }) {
       <text fg={ui.border} height={1}>{topRule(W, undefined, { left: GLYPH.markOpen + " " + head, right: formatDiffCount(d) })}</text>
       <For each={toSideBySide(d.lines || [])}>{(row: any) => (
         <box flexDirection="row">
-          <text fg={row.left?.kind === "del" ? ui.error : ui.fgMuted} width={colW}>{cell(row.left)}</text>
+          <DiffCell ln={row.left} colW={colW} lang={lang} />
           <text fg={ui.border}>{divider}</text>
-          <text fg={row.right?.kind === "add" ? ui.success : ui.fgMuted} width={colW}>{cell(row.right)}</text>
+          <DiffCell ln={row.right} colW={colW} lang={lang} />
         </box>
       )}</For>
       <text fg={ui.border} height={1}>{botRule(W)}</text>

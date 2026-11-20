@@ -19,9 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Write/edit blocks show a preparing state and an inline side-by-side diff.**
   While a write/edit runs the tool row says `Preparing write...` /
   `Preparing edit...`; when it finishes the same block shows the changed file
-  with old and new columns, replacing the single-column `+`/`-` list.
+  with old and new columns, replacing the single-column `+`/`-` list. Diff
+  cells now use the same syntax colors as fenced code blocks, with subtle
+  added/removed row backgrounds in every theme.
 
 ### Fixed
+- **PowerShell commands now translate pipelines, `;`, multiple paths, and
+  redirections.** The Windows adapter only rewrote the first Unix command and
+  broke on `ls -la | head`, `mkdir -p a b`, `cd dir; ls`, `grep -rn`, `find
+  src -type f`, `2>/dev/null`, and `export`. It now splits command sequences
+  outside quotes, translates each pipeline stage, uses PowerShell array
+  arguments for multiple paths, maps `/dev/null` to `$null`, and handles
+  `head`/`tail` in pipelines.
 - **The context gauge now shows live context, not lifetime spend.** The
   status-bar `██████░░░░ (N ctx)` gauge read `session.tokensUsed` (cumulative
   tokens across the whole session), so long conversations appeared pinned near
