@@ -4,6 +4,7 @@
 import { render } from "@opentui/solid";
 import { App } from "./tui/App.tsx";
 import { defaultMcpInstall } from "./core/plugin-cmd.js";
+import { loadSession, latestSession } from "./core/session-store.js";
 
 globalThis.__loomTrace?.("entry", new Error("module imports evaluated"));
 const args = process.argv.slice(2);
@@ -43,7 +44,8 @@ if (args.includes("--help") || args.includes("-h")) {
   console.log("Usage: bun run src/tui-open.tsx [prompt...]");
   console.log("  bun run src/tui-open.tsx            Start interactive TUI");
   console.log("  bun run src/tui-open.tsx \"prompt\"   Start with prompt");
-  console.log("  bun run src/tui-open.tsx -s <id>    Resume session");
+  console.log("  bun run src/tui-open.tsx -s <id>    Resume session (--session also works)");
+  console.log("  bun run src/tui-open.tsx -c         Continue the last session here");
   console.log("  bun run src/tui-open.tsx -p \"q\"     Print mode (one-shot)");
   console.log("  bun run src/tui-open.tsx --auto     Auto-approve permissions");
   process.exit(0);
@@ -51,10 +53,24 @@ if (args.includes("--help") || args.includes("-h")) {
 
 const pIdx = args.indexOf("-p");
 const printMode = pIdx !== -1;
-const sIdx = args.indexOf("-s");
-const sessionId = sIdx !== -1 ? args[sIdx + 1] : null;
+const sIdx = args.findIndex((a) => a === "-s" || a === "--session");
+const continueMode = args.includes("-c") || args.includes("--continue");
+let sessionId = sIdx !== -1 ? args[sIdx + 1] : null;
+if (!sessionId && continueMode) sessionId = latestSession()?.id || null;
 const autoMode = args.includes("--auto") || args.includes("-a");
 const initialPrompt = args.filter((a, i) => !a.startsWith("-") && (sIdx === -1 || i !== sIdx + 1)).join(" ");
+
+if (sessionId) {
+  const data = loadSession(sessionId);
+  if (!data) {
+    console.error("Session not found: " + sessionId);
+    process.exit(1);
+  }
+  if (!data.messages?.length) {
+    console.error("Session is empty: " + (data.title || sessionId));
+    process.exit(1);
+  }
+}
 
 globalThis.__loomTrace?.("mcp-start", new Error("defaultMcpInstall beginning"));
 try {
@@ -67,6 +83,13 @@ if (printMode) {
   const { Session } = require("./core/session.js");
   const sess = new Session();
   if (autoMode) sess.permissions.setAuto(true);
+  if (sessionId) {
+    const data = loadSession(sessionId);
+    if (data) {
+      sess.messages = data.messages || [];
+      sess.conversationId = data.id || sess.conversationId;
+    }
+  }
   const query = args[pIdx + 1] || initialPrompt || "Hello";
   const resp = await sess.sendUserMessage(query);
   if (resp.type === "text") console.log(resp.content);

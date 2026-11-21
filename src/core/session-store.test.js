@@ -1,6 +1,7 @@
 // Unit tests for session persistence (src/core/session-store.js).
-// Layout: <cfgDir>/sessions/<id>/{session.json,messages.jsonl} (v3), with
-// read-through for legacy flat <id>.json files (v1/v2).
+// Layout: <cfgDir>/sessions/<id>/{session.json,messages.jsonl} (v4), with
+// read-through for project-local sessions and legacy flat <id>.json files
+// (v1/v2).
 // Runs with:  bun test src/core/session-store.test.js
 import { test, expect, beforeEach, afterAll } from "bun:test";
 import fs from "node:fs";
@@ -170,4 +171,67 @@ test("exportChat: writes a markdown file", () => {
   expect(body).toContain("# Loom Code Chat Export");
   expect(body).toContain("### User");
   try { fs.unlinkSync(file); } catch {}
+});
+
+test("saveSession: titles come from the first user message", () => {
+  store.saveSession(fakeSession({
+    conversationId: "titled",
+    messages: [
+      { role: "system", content: "ignored" },
+      { role: "user", content: "Fix the parser\nplease." },
+      { role: "assistant", content: "working" },
+    ],
+  }));
+  const back = store.loadSession("titled");
+  expect(back.title).toBe("Fix the parser please.");
+  const listed = store.listSessions().find((s) => s.id === "titled");
+  expect(listed.title).toBe("Fix the parser please.");
+});
+
+test("saveSession: never creates an empty session; old empties stay hidden", () => {
+  const skipped = store.saveSession({ conversationId: "empty-new", messages: [] });
+  expect(skipped.skipped).toBe(true);
+  expect(skipped.file).toBeNull();
+  expect(store.loadSession("empty-new")).toBeNull();
+
+  const dir = path.join(cfgDir, "sessions", "empty-old");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "session.json"), JSON.stringify({
+    id: "empty-old", schemaVersion: 4, createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z", messageCount: 0,
+  }), "utf8");
+  fs.writeFileSync(path.join(dir, "messages.jsonl"), "", "utf8");
+
+  expect(store.listSessions().map((s) => s.id)).not.toContain("empty-old");
+  expect(store.listSessions({ includeEmpty: true }).map((s) => s.id)).toContain("empty-old");
+});
+
+test("listSessions: scopes to the current project and latestSession picks it", () => {
+  const original = process.cwd();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "loom-scope-"));
+  const projectA = path.join(root, "a");
+  const projectB = path.join(root, "b");
+  fs.mkdirSync(projectA, { recursive: true });
+  fs.mkdirSync(projectB, { recursive: true });
+  try {
+    process.chdir(projectA);
+    store.saveSession(fakeSession({ conversationId: "scope-a" }));
+    process.chdir(projectB);
+    store.saveSession(fakeSession({ conversationId: "scope-b" }));
+
+    const scoped = store.listSessions().map((s) => s.id);
+    expect(scoped).toContain("scope-b");
+    expect(scoped).not.toContain("scope-a");
+    expect(store.latestSession().id).toBe("scope-b");
+
+    const all = store.listSessions({ allProjects: true }).map((s) => s.id);
+    expect(all).toContain("scope-a");
+    expect(all).toContain("scope-b");
+
+    // Explicit IDs keep working outside their project, like `opencode -s`.
+    expect(store.loadSession("scope-a").messages).toHaveLength(3);
+  } finally {
+    process.chdir(original);
+    try { fs.rmSync(root, { recursive: true, force: true }); } catch {}
+  }
 });

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **Sessions now resume like opencode.** Sessions are stored in the global
+  `~/.loom/sessions` store with their project directory and a title derived
+  from the first user message. `/sessions` and `loom -c` are scoped to the
+  current git project, are newest-first, and hide empty sessions; `loom -s
+  <id>` still works from any directory. `/resume` and `/continue` resume the
+  latest project session, and a fresh TUI open no longer creates an empty
+  session that can never be resumed.
+- **Compaction is a clickable dropdown.** Manual and automatic compaction rows
+  now show the method, removed-message count, and remaining tokens; click the
+  row to expand the generated summary and click again to collapse it, matching
+  the `Thinking` row behavior.
 - **New 3D SDF splash bot art.** The splash now uses the supplied 30x13
   pre-baked 3D SDF frames: all ten are kept verbatim (center, eight gaze
   directions, and blink). The bot looks toward the pointer or composer caret
@@ -24,6 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   added/removed row backgrounds in every theme.
 
 ### Fixed
+- **A new session starts at 0 used context.** The status-bar gauge counted the
+  fixed system/tool prompt, so every fresh session (including a brand-new
+  install) looked pre-filled before the first message. `contextEstimate()` now
+  reports 0 used until the first user/assistant turn while `/context` still
+  shows the fixed prompt separately; `/clear` and resume refresh it too.
 - **PowerShell commands now translate pipelines, `;`, multiple paths, and
   redirections.** The Windows adapter only rewrote the first Unix command and
   broke on `ls -la | head`, `mkdir -p a b`, `cd dir; ls`, `grep -rn`, `find

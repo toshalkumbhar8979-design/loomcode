@@ -136,6 +136,7 @@ await sleep(400);
   const f = await waitForFrame(x => x.includes("What can I do for you?"), "splash tagline");
   console.assert(f.includes("Use / for slash commands"), "FAIL: splash hint missing");
   console.assert(f.includes("What can I do for you?"), "FAIL: splash prompt missing");
+  console.assert(f.includes("(0 ctx)"), "FAIL: a new session must not start with preloaded context");
   console.assert(f.includes("ctx)"), "FAIL: context gauge should label live context tokens");
   console.assert(SPLASH_ART.length === 13, "FAIL: robot art should be thirteen rows");
   console.assert(SPLASH_ART.join("\n").includes("@@@@@@@@@"), "FAIL: robot art missing");
@@ -747,6 +748,43 @@ header("40: numeric keys answer question options");
   console.assert(r.approved === true, "FAIL: picking an option should answer the question");
   console.assert(r.note === "Green", "FAIL: numeric option should resolve to Green, got: " + r.note);
   ok("question numeric options");
+}
+
+header("41: compaction row expands on click like thinking");
+{
+  resetUi();
+  setMessages([
+    { role: "user", content: "long task" },
+    {
+      role: "system",
+      content: "Compacted (summary): summarized 24 earlier messages.",
+      compaction: {
+        method: "summary",
+        removed: 24,
+        tokensBefore: 80000,
+        tokensAfter: 12000,
+        summary: "step one\nstep two\nstep three\nhidden-compaction-tail",
+      },
+    },
+  ]);
+  await sleep(200);
+  const f0 = await waitForFrame(x => x.includes("Compaction"), "compaction row");
+  console.assert(f0.includes("step one"), "FAIL: compaction preview missing");
+  console.assert(!f0.includes("hidden-compaction-tail"), "FAIL: collapsed compaction leaked its summary tail");
+  const rows = f0.split("\n");
+  const y = rows.findIndex(l => l.includes("Compaction"));
+  const x = rows[y].indexOf("Compaction") + 2;
+  await setup.mockMouse.click(x, y);
+  const f1 = await waitForFrame(x => x.includes("hidden-compaction-tail"), "expanded compaction");
+  console.assert(f1.includes("hidden-compaction-tail"), "FAIL: click should expand the compaction summary");
+  const rows1 = f1.split("\n");
+  const y1 = rows1.findIndex(l => l.includes("Compaction"));
+  const x1 = rows1[y1].indexOf("Compaction") + 2;
+  await setup.mockMouse.click(x1, y1);
+  const f2 = await waitForFrame(x => !x.includes("hidden-compaction-tail"), "collapsed compaction");
+  console.assert(!f2.includes("hidden-compaction-tail"), "FAIL: second click should collapse the compaction summary");
+  console.assert(f2.includes("step one"), "FAIL: collapsed compaction preview should remain");
+  ok("compaction toggles open and closed");
 }
 
 console.log("");

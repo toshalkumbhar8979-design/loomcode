@@ -6,7 +6,7 @@ const { Session, MEMORY_TEMPLATE } = require('./session');
 const { connect, disconnect, status } = require('../config/provider-cmd');
 const { loadConfig, saveConfig, LOOM_DIR } = require('../config/settings');
 const { ProviderRouter, PROVIDERS } = require('../providers');
-const { saveSession, loadSession } = require('./session-store');
+const { saveSession, loadSession, latestSession } = require('./session-store');
 const { defaultMcpInstall } = require('./plugin-cmd');
 
 // Single source of truth for every version string the CLI prints (banner,
@@ -129,6 +129,10 @@ class LoomCLI {
       process.exit(1);
     }
     this.session = new Session();
+    if (this.initialSession) {
+      this.session.messages = this.initialSession.messages || [];
+      this.session.conversationId = this.initialSession.id || this.session.conversationId;
+    }
     const resp = await this.session.sendUserMessage(text);
     if (resp.type === 'text') {
       process.stdout.write(resp.content + '\n');
@@ -457,8 +461,10 @@ class LoomCLI {
   cmdExit() {
     if (this.session) {
       const res = saveSession(this.session);
-      console.log('\nSession saved as: ' + res.id);
-      console.log('Resume with: loom -s ' + res.id);
+      if (res.file) {
+        console.log('\nSession saved as: ' + res.id);
+        console.log('Resume with: loom -s ' + res.id);
+      }
     }
     console.log('\nGoodbye from Loom Code!');
     process.exit(0);
@@ -547,14 +553,16 @@ if (args.includes('--help') || args.includes('-h')) {
     console.log('  loom acp                ACP server (JSON-RPC over stdio, for editor plugins)');
     console.log('  loom add mcp <spec>     Add an MCP server (same syntax as /mcp add)');
     console.log('  loom add connector <spec>  Add a connector (preset like supabase, or one-liner)');
-    console.log('  loom -s <session-id>    Resume a saved session');
+    console.log('  loom -s, --session <id> Resume a saved session');
+    console.log('  loom -c, --continue     Continue the last session in this project');
     console.log('  loom --version           Show version');
     console.log('  loom --help              Show this help');
     process.exit(0);
   }
 
-  const sIndex = args.indexOf('-s');
-  const sessionId = sIndex !== -1 ? args[sIndex + 1] : null;
+  const sIndex = args.findIndex((a) => a === '-s' || a === '--session');
+  const continueMode = args.includes('-c') || args.includes('--continue');
+  const sessionId = sIndex !== -1 ? args[sIndex + 1] : (continueMode ? (latestSession()?.id || null) : null);
 
   // loom graph [open] — memory graph subcommand.
   //   loom graph         rebuild + print the graph as text, exit
@@ -604,28 +612,35 @@ if (args.includes('--help') || args.includes('-h')) {
     process.exit(ok ? 0 : 1);
   }
 
-  if (sessionId && sIndex !== -1) {
+  if (sessionId) {
     const data = loadSession(sessionId);
-    if (data && data.messages && data.messages.length) {
-      console.log(`Resuming session ${sessionId} (${data.messages.length} messages)`);
-      cli.initialSession = data;
-    } else {
+    if (!data) {
       console.error('Session not found: ' + sessionId);
       process.exit(1);
     }
+    if (!data.messages || !data.messages.length) {
+      console.error('Session is empty: ' + (data.title || sessionId));
+      process.exit(1);
+    }
+    console.log(`Resuming session ${sessionId} (${data.messages.length} messages)`);
+    cli.initialSession = data;
+  } else if (continueMode) {
+    console.log('No saved sessions in this project yet - starting a new one.');
   }
 
   process.on('SIGINT', () => {
     if (cli.session) {
-      const id = saveSession(cli.session).id;
-      console.log('\nSession saved: ' + id);
-      console.log('Resume with: loom -s ' + id);
+      const res = saveSession(cli.session);
+      if (res.file) {
+        console.log('\nSession saved: ' + res.id);
+        console.log('Resume with: loom -s ' + res.id);
+      }
     }
     process.exit(0);
   });
   defaultMcpInstall();
 
-  const promptArgs = args.filter(a => !a.startsWith('-'));
+  const promptArgs = args.filter((a, i) => !a.startsWith('-') && (sIndex === -1 || i !== sIndex + 1));
 
   if (printMode) {
     await cli.headless(promptArgs.join(' '));

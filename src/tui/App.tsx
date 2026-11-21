@@ -57,7 +57,7 @@ import {
   SubagentPanel, SubagentDetailPanel,
 } from "./overlays/Sheets.tsx";
 import { showHelpText, showProvidersText, showAgentsText } from "./reports.ts";
-import { saveSession, loadSession, listSessions } from "../core/session-store.js";
+import { saveSession, loadSession, listSessions, latestSession } from "../core/session-store.js";
 import { loadConfig, saveConfig } from "../config/settings.js";
 import { loadAgents, resolveAgent } from "../core/agents.js";
 import { snapshotBefore, snapshotAfter, snapshotBashBefore, diffBashAfter, clearFileDiffs } from "../core/file-diffs.js";
@@ -99,14 +99,18 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
   function quit(code: number = 0) {
     persistUi();
     let sid = "";
-    try { sid = saveSession(syncSessionForSave()).id; } catch {}
+    try {
+      const saved = saveSession(syncSessionForSave());
+      if (saved.file) sid = saved.id;
+    } catch {}
     try { renderer.destroy(); } catch {}
     setTimeout(() => {
       console.log("");
       console.log(WORDMARK_CODE_PLAIN);
       console.log("");
       const binName = process.env.LOOM_BIN_NAME || "loom";
-      console.log("   Resume this session: " + binName + (sid ? " -s " + sid : ""));
+      if (sid) console.log("   Resume this session: " + binName + " -s " + sid);
+      else console.log("   Nothing to save yet. Start chatting and Loom will save automatically.");
       console.log("");
       process.exit(code);
     }, 150);
@@ -350,7 +354,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
         },
         onAutoCompact(res: any) {
           if (res?.compacted) {
-            appendMessage({ role: "system", content: "Auto-compacted: " + res.method + " — summarized/truncated " + res.removed + " earlier messages. Context was near the model limit." });
+            appendMessage(compactionMessage(res));
             refreshUsage();
           }
         },
@@ -539,9 +543,32 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
     return sess;
   }
 
+  function compactionMessage(r: any) {
+    const method = String(r?.method || "summary");
+    const removed = Number(r?.removed || 0);
+    const after = typeof r?.tokensAfter === "number" ? r.tokensAfter : null;
+    const summary = typeof r?.summary === "string" && r.summary.trim() ? r.summary : null;
+    return {
+      role: "system",
+      content: "Compacted (" + method + "): " + (summary ? "summarized" : "truncated") + " " + removed +
+        " earlier messages" + (after != null ? "; ~" + after + " tokens remain." : "."),
+      compaction: {
+        method,
+        removed,
+        tokensBefore: typeof r?.tokensBefore === "number" ? r.tokensBefore : null,
+        tokensAfter: after,
+        summary,
+      },
+    };
+  }
+
   function resumeSessionById(id: string) {
     const data = loadSession(id);
-    if (!data?.messages?.length) { showToast("Session not found: " + id, "error"); return; }
+    if (!data) { showToast("Session not found: " + id, "error"); return; }
+    if (!data.messages?.length) {
+      showToast("Session is empty: " + (data.title || id), "error");
+      return;
+    }
     getSession().conversationId = id;
     const pendingParts: Record<string, any> = {};
     getSession().messages = data.messages.map((m: any) => {
@@ -581,8 +608,8 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
       }
       return out;
     }).filter((x: any) => x !== null));
-    appendMessage({ role: "system", content: "Resumed " + id });
-    refreshProviderState();
+    showToast("Resumed " + (data.title || id) + " (" + data.messages.length + " messages)", "ok");
+    refreshUsage();
   }
 
   function processSlash(raw: string) {
@@ -627,7 +654,9 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
         let autoLine = "";
         try {
           const ce = getSession().contextEstimate();
-          winLine = "Window:  ~" + ce.tokens.toLocaleString() + " / " + ce.window.toLocaleString() + " tokens (" + ce.pct + "% used)";
+          winLine = ce.active
+            ? "Window:  ~" + ce.tokens.toLocaleString() + " / " + ce.window.toLocaleString() + " tokens (" + ce.pct + "% used)"
+            : "Window:  no messages yet (fixed system/tool prompt ~" + ce.totalTokens.toLocaleString() + " tokens; gauge starts at 0)";
           const threshold = Math.round((getSession().config.compactThreshold ?? 0.75) * 100);
           autoLine = "Auto-compact at: " + threshold + "% of the window";
         } catch {}
@@ -647,18 +676,27 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
       }
       case "compact": {
         appendMessage({ role: "system", content: "Compacting…" });
+        const compactIdx = messages().length - 1;
         getSession().compact({
           onCompact: (r: any) => {
-            appendMessage({ role: "system", content: r.compacted
-              ? "Compacted (" + r.method + "): summarized/truncated " + r.removed + " earlier messages; ~" + (r.tokensAfter ?? "?") + " tokens remain."
-              : "Nothing to compact — the conversation is still short." });
+            patchMessageAt(compactIdx, compactionMessage(r));
             refreshUsage();
           },
         }).then((r: any) => {
-          if (!r.compacted && !r.reason) appendMessage({ role: "system", content: "Compaction failed — try again." });
+          if (!r.compacted) {
+            patchMessageAt(compactIdx, {
+              role: "system",
+              content: r.reason === "conversation too short"
+                ? "Nothing to compact — the conversation is still short."
+                : "Compaction failed — try again.",
+            });
+          }
           refreshUsage();
           try { saveSession(syncSessionForSave()); } catch {}
-        }).catch((e: any) => appendMessage({ role: "system", content: "Compaction failed: " + String(e?.message || e) }));
+        }).catch((e: any) => patchMessageAt(compactIdx, {
+          role: "system",
+          content: "Compaction failed: " + String(e?.message || e),
+        }));
         return;
       }
       case "think": {
@@ -1171,15 +1209,27 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
       }
       case "sessions": {
         const saved = listSessions();
-        if (!saved.length) { appendMessage({ role: "system", content: "No saved sessions yet." }); return; }
+        if (!saved.length) {
+          appendMessage({ role: "system", content: "No saved sessions yet. This project's next conversation will appear here automatically." });
+          return;
+        }
         openModal({
           type: "select", title: "Saved Sessions", searchable: true,
           options: saved.map(s => {
-            const when = (s.updatedAt || s.createdAt || s.mtime || "").replace("T", " ").slice(0, 16);
-            return { label: s.id, sub: when + " — " + s.messageCount + " msgs", value: s.id };
+            const when = (s.updatedAt || s.createdAt || s.mtime || "").replace("T", " ").slice(5, 16);
+            return { label: s.title || s.id, sub: when + " / " + s.messageCount + " msgs", value: s.id };
           }),
           onPick(id: string) { closeModal(); resumeSessionById(id); },
         });
+        return;
+      }
+      case "resume": case "continue": {
+        const last = latestSession();
+        if (!last) {
+          showToast("No saved sessions in this project yet.", "info");
+          return;
+        }
+        resumeSessionById(last.id);
         return;
       }
       case "settings": openModal({ type: "settings" }); return;
@@ -1207,8 +1257,11 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
         return;
       }
       case "exit": {
-        persistUi(); saveSession(syncSessionForSave());
-        showToast("Session saved: " + (sess.conversationId || "???") + " — Goodbye!", "ok");
+        persistUi();
+        let saved: any = null;
+        try { saved = saveSession(syncSessionForSave()); } catch {}
+        if (saved?.file) showToast("Session saved: " + (sess.conversationId || "???") + " - Goodbye!", "ok");
+        else showToast("Nothing to save yet - Goodbye!", "info");
         setTimeout(() => quit(), 500);
         return;
       }

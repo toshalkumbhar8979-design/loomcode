@@ -141,10 +141,13 @@ test("compact: truncate fallback when no provider is active", async () => {
     s.addMessage({ role: "user", content: "Message " + i + " some padding here" });
   }
   s.provider.active = null; // no summary call -> truncate fallback (no network)
-  const res = await s.compact();
+  let reported = null;
+  const res = await s.compact({ onCompact: (r) => { reported = r; } });
   expect(res.compacted).toBe(true);
   expect(res.method).toBe("truncate");
   expect(res.removed).toBeGreaterThan(0);
+  expect(res.tokensAfter).toBeTypeOf("number");
+  expect(reported?.tokensAfter).toBe(res.tokensAfter);
   expect(s.messages.length).toBeLessThanOrEqual(9);
   expect(s.messages[0].content).toContain("truncated");
 });
@@ -800,6 +803,20 @@ test("contextEstimate: tokens/window/pct reflect the live conversation", () => {
   expect(ce.tokens).toBeGreaterThanOrEqual(1000);
   expect(ce.tokens).toBeLessThan(10000);
   expect(ce.pct).toBe(Math.min(100, Math.round((ce.tokens / ce.window) * 100)));
+});
+
+test("contextEstimate: a pristine session starts at zero used context", () => {
+  const s = freshSession();
+  const fresh = s.contextEstimate();
+  expect(fresh.active).toBe(false);
+  expect(fresh.tokens).toBe(0);
+  expect(fresh.pct).toBe(0);
+  expect(fresh.totalTokens).toBeGreaterThan(0); // fixed system/tool prompt is still real
+  s.addMessage({ role: "user", content: "hello" });
+  const active = s.contextEstimate();
+  expect(active.active).toBe(true);
+  expect(active.tokens).toBe(active.totalTokens);
+  expect(active.tokens).toBeGreaterThan(0);
 });
 
 test("speed telemetry: thinking tokens count as first token and in totals", async () => {

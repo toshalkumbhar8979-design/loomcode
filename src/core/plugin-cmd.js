@@ -332,17 +332,18 @@ function exportCmd(messages) {
 
 function sessionsCmd() {
   const list = sessionStore.listSessions();
-  if (!list.length) return 'No saved sessions. Type /exit or /fork to save current.';
+  if (!list.length) return 'No saved sessions for this project. Start chatting; sessions save automatically.';
   const lines = ['Saved sessions (resume with: loom -s <id>):', ''];
   for (const s of list) {
-    lines.push('  ' + s.id + '  [ ' + (s.createdAt || 'unknown') + ' ]  ' + s.messageCount + ' messages');
+    lines.push('  ' + s.id + '  ' + (s.title || '(untitled)') + '  [ ' + (s.updatedAt || s.createdAt || 'unknown') + ' ]  ' + s.messageCount + ' messages');
   }
   return lines.join('\n');
 }
 
 function forkCmd(session) {
   if (!session) return 'No active session to fork.';
-  const dup = { conversationId: session.conversationId, messages: session.messages.slice(), config: session.config };
+  if (!session.messages || !session.messages.length) return 'Nothing to fork yet.';
+  const dup = { messages: session.messages.slice(), config: session.config };
   const saved = sessionStore.saveSession(dup);
   return 'Forked session saved as: ' + saved.id + '\nResume with: loom -s ' + saved.id;
 }

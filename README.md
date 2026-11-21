@@ -121,6 +121,8 @@ npm only checks install-time metadata against the Node you ran npm with.
 ```bash
 loom                              # interactive TUI session
 loom "explain this project"       # start with initial prompt
+loom -c                           # continue the newest session in this project
+loom -s <session-id>              # resume a saved session (works from any cwd)
 loom -p "list files in src/"      # one-shot, print result, exit
 cat logs.txt | loom -p "explain"  # analyze piped content
 loom --version
@@ -172,7 +174,9 @@ self-test client (`node scripts/acp-smoke.js`) live in **[docs/acp.md](docs/acp.
 | `/clear` | — | Clear the chat |
 | `/restore` | — | Restore earlier state |
 | `/settings` | — | Settings — details, thinking, vim |
-| `/sessions` | — | Browse saved sessions |
+| `/sessions` | — | Browse saved sessions (this project) |
+| `/resume` | — | Resume the latest session in this project |
+| `/continue` | — | Alias for `/resume` |
 | `/theme` | — | Switch UI theme |
 | `/graph` | — | Memory graph |
 | `/skills` | `install\|remove` | Manage skills |
@@ -364,7 +368,7 @@ LoomCode/
 │       ├── toolkit.ts        # Tool output formatting helpers
 │       ├── reports.ts        # /help, /status, /keybinds text
 │       ├── suite-home.ts     # Temp HOME for the interactive test suite
-│       ├── test-interactive.tsx  # 40 keyboard-interaction tests
+│       ├── test-interactive.tsx  # 41 keyboard-interaction tests
 │       ├── shell/
 │       │   ├── Boot.tsx      # Splash: anchored robot head, tagline, composer
 │       │   ├── LoomBar.tsx   # Composer + status rows

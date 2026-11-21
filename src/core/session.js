@@ -82,6 +82,17 @@ function looksUnfinished(text) {
  * @property {string} lastModel
  */
 
+/**
+ * @typedef {Object} CompactResult
+ * @property {boolean} compacted
+ * @property {string} method
+ * @property {number} removed
+ * @property {string} [reason]
+ * @property {string|null} [summary]
+ * @property {number} [tokensBefore]
+ * @property {number} [tokensAfter]
+ */
+
 // Aborts surface as DOMException AbortError (anthropic fetch), APIUserAbortError
 // (openai SDK), or wrapped messages containing "aborted". Never let an interrupt
 // leak into a retry or an error bubble.
@@ -655,14 +666,31 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
     return meta?.context || 200000;
   }
 
+  // True once the user or model has actually exchanged a message. A live
+  // Session always carries a system prompt, but that fixed prompt is not
+  // conversation context: a brand-new (or freshly cleared) session should
+  // show 0 tokens used instead of a non-zero gauge before the first turn.
+  hasConversation() {
+    return this.messages.some((m) => m && (m.role === 'user' || m.role === 'assistant'));
+  }
+
   // Live context estimate for the /context TUI command: tokens (messages +
   // system prompt + tool schemas), window size, and percent used. Recomputed
   // on every call so it reflects the CURRENT conversation, not a startup
-  // snapshot.
+  // snapshot. `totalTokens` keeps the preloaded system/tool prompt visible
+  // even while `tokens` (the user-facing gauge) is 0 before the first turn.
   contextEstimate() {
-    const tokens = this.estimateTokens();
+    const totalTokens = this.estimateTokens();
+    const active = this.hasConversation();
+    const tokens = active ? totalTokens : 0;
     const window = this.getContextWindow();
-    return { tokens, window, pct: Math.min(100, Math.round((tokens / window) * 100)) };
+    return {
+      tokens,
+      totalTokens,
+      active,
+      window,
+      pct: Math.min(100, Math.round((tokens / window) * 100)),
+    };
   }
 
   shouldCompact() {
@@ -688,6 +716,11 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
   // stored as a USER-role row (not system): openai-compat drops history rows
   // with role 'system', which silently discarded the summary on every
   // non-Anthropic provider.
+  /**
+   * @param {Object} [callbacks]
+   * @param {(result: CompactResult) => void} [callbacks.onCompact]
+   * @returns {Promise<CompactResult>}
+   */
   async compact(callbacks = {}) {
     if (this.messages.length <= COMPACT_KEEP_MESSAGES + 2) {
       return { compacted: false, reason: 'conversation too short', removed: 0, method: 'none' };
@@ -725,8 +758,9 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
       this._normalizeHistory();
       this.compactCount = (this.compactCount || 0) + 1;
       this.lastCompact = { at: Date.now(), method: 'summary', removed: head.length };
-      if (callbacks.onCompact) callbacks.onCompact({ method: 'summary', removed: head.length, summary });
-      return { compacted: true, removed: head.length, method: 'summary', summary, tokensBefore: before, tokensAfter: this.estimateTokens() };
+      const result = { compacted: true, method: 'summary', removed: head.length, summary, tokensBefore: before, tokensAfter: this.estimateTokens() };
+      if (callbacks.onCompact) callbacks.onCompact(result);
+      return result;
     }
 
     // Fallback: drop the oldest messages, keep the recent tail verbatim.
@@ -737,8 +771,9 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
     this._normalizeHistory();
     this.compactCount = (this.compactCount || 0) + 1;
     this.lastCompact = { at: Date.now(), method: 'truncate', removed: head.length };
-    if (callbacks.onCompact) callbacks.onCompact({ method: 'truncate', removed: head.length, summary: null });
-    return { compacted: true, removed: head.length, method: 'truncate', summary: null, tokensBefore: before, tokensAfter: this.estimateTokens() };
+    const result = { compacted: true, method: 'truncate', removed: head.length, summary: null, tokensBefore: before, tokensAfter: this.estimateTokens() };
+    if (callbacks.onCompact) callbacks.onCompact(result);
+    return result;
   }
 
   async runTurn(callbacks = {}) {

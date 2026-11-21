@@ -318,6 +318,9 @@ export function refreshUsage() {
   // The gauge is CURRENT context usage, not cumulative session tokens. A long
   // session can spend millions of tokens while its live window stays small;
   // using tokensUsed made the bar climb past 100% and disagree with /context.
+  // contextEstimate() reports 0 until the first user/assistant turn, so a
+  // freshly opened session does not look pre-filled just because Loom always
+  // carries a system prompt.
   let ctxTokens = s.tokensUsed;
   let ctxPct = 0;
   try {
@@ -580,6 +583,8 @@ export const SLASH_LIST: SlashCmd[] = [
   { cmd: "redo", desc: "Redo the last undone exchange" },
   { cmd: "undo-files", desc: "Rewind working tree to last undo point" },
   { cmd: "export", desc: "Export chat as markdown" },
+  { cmd: "resume", desc: "Resume the last session" },
+  { cmd: "continue", desc: "Resume the last session" },
 ];
 
 // ─── TUI prefs ───

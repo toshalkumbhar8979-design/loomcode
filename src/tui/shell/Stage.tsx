@@ -299,6 +299,35 @@ function ThoughtRow(props: { p: any; m: any; idx: number; partIdx: number }) {
   );
 }
 
+function CompactionRow(props: { m: any }) {
+  const [open, setOpen] = createSignal(false);
+  const c = () => props.m.compaction || {};
+  const summary = () => clean(c().summary || "");
+  const preview = () => {
+    const t = summary();
+    const first = t.split("\n").slice(0, 3).join("\n");
+    return first.length > 900 ? first.slice(0, 900) + GLYPH.ellipsis : first;
+  };
+  const body = () => (open() ? summary().slice(0, 20000) : preview());
+  const long = () => summary().length > 900 || summary().split("\n").length > 3;
+  const details = () => {
+    const bits = [String(c().method || "summary")];
+    if (c().removed) bits.push(c().removed + " earlier messages");
+    if (typeof c().tokensAfter === "number") bits.push("~" + c().tokensAfter.toLocaleString("en-US") + " tokens left");
+    return bits.join("  ");
+  };
+  return (
+    <box flexDirection="column" marginTop={1} paddingLeft={2} flexShrink={0} onMouseUp={() => { if (long()) setOpen((v) => !v); }}>
+      <text fg={ui.secondary}>
+        {"* Compaction  " + details() + (long() ? "  (click to " + (open() ? "collapse" : "expand") + ")" : "")}
+      </text>
+      <Show when={!!summary()}>
+        <text fg={ui.fgDim} paddingLeft={2}>{body()}</text>
+      </Show>
+    </box>
+  );
+}
+
 function SubagentRow(props: { s: any }) {
   const s = props.s;
   const done = !!s.done;
@@ -349,6 +378,7 @@ function PartFlow(props: { m: any; idx: number }) {
 function AssistantTurn(props: { m: any; idx: number }) {
   const m = props.m;
   if (m.role === "system") {
+    if (m.compaction) return <CompactionRow m={m} />;
     return (
       <box flexDirection="column" marginTop={1} paddingLeft={1} flexShrink={0}>
         <For each={String(m.content || "").split("\n")}>{(ln: string) => (
