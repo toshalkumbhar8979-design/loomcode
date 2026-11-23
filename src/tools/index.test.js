@@ -409,3 +409,40 @@ test("todoread: returns the parent session todo list", async () => {
   const empty = await tools.executeTool("todoread", {}, "build", { parentSession: { todos: [] } });
   expect(String(empty.result)).toContain("no todos");
 });
+
+test("websearch: uses the open-source SearXNG JSON fallback when configured", async () => {
+  const saved = { brave: process.env.BRAVE_API_KEY, tavily: process.env.TAVILY_API_KEY, searx: process.env.SEARXNG_URL, list: process.env.SEARXNG_INSTANCES };
+  delete process.env.BRAVE_API_KEY;
+  delete process.env.TAVILY_API_KEY;
+  delete process.env.SEARXNG_INSTANCES;
+  let requested = "";
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      requested = req.url;
+      return Response.json({ results: [
+        { title: "Result <b>A</b>", url: "https://example.com/a", content: "First <i>snippet</i>" },
+        { title: "Result B", url: "https://example.com/b", content: "Second snippet" },
+        { title: "Ignored", url: "https://example.com/c", content: "beyond count" },
+      ] });
+    },
+  });
+  process.env.SEARXNG_URL = server.url.origin;
+  try {
+    const res = await tools.executeTool("websearch", { query: "loom search", count: 2 });
+    expect(String(res.result)).toContain("1. Result A");
+    expect(String(res.result)).toContain("https://example.com/a");
+    expect(String(res.result)).toContain("First snippet");
+    expect(String(res.result)).not.toContain("Ignored");
+    const u = new URL(requested);
+    expect(u.pathname).toBe("/search");
+    expect(u.searchParams.get("q")).toBe("loom search");
+    expect(u.searchParams.get("format")).toBe("json");
+  } finally {
+    await server.stop(true);
+    if (saved.brave == null) delete process.env.BRAVE_API_KEY; else process.env.BRAVE_API_KEY = saved.brave;
+    if (saved.tavily == null) delete process.env.TAVILY_API_KEY; else process.env.TAVILY_API_KEY = saved.tavily;
+    if (saved.searx == null) delete process.env.SEARXNG_URL; else process.env.SEARXNG_URL = saved.searx;
+    if (saved.list == null) delete process.env.SEARXNG_INSTANCES; else process.env.SEARXNG_INSTANCES = saved.list;
+  }
+});

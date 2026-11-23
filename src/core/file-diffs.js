@@ -31,9 +31,17 @@ function relPath(abs) {
   return rel || abs;
 }
 
-// Read file content, or null if missing.
+// The diff panel is a visual aid, not a backup. Cap files so a huge log or
+// generated bundle cannot freeze the TUI while diffing it.
+const DIFF_FILE_CAP = 512 * 1024;
+
+// Read file content, or null if missing/too large.
 function readFileOrNull(abs) {
-  try { return fs.readFileSync(abs, 'utf8'); } catch { return null; }
+  try {
+    const st = fs.statSync(abs);
+    if (st.size > DIFF_FILE_CAP) return null;
+    return fs.readFileSync(abs, 'utf8');
+  } catch { return null; }
 }
 
 // Track edits per session: abs path -> { before, after }
@@ -94,7 +102,25 @@ function git(args) {
   }
 }
 
-export function snapshotBashBefore() {
+// Read-only shell commands cannot change the working tree, so their `git
+// status`/`git diff` snapshots are pure latency. Shell operators are rejected
+// because `git status && rm -rf x` and `ls > file` do write.
+const READ_ONLY_CMD = /^\s*(?:ls|dir|pwd|cd|cat|type|head|tail|grep|rg|ag|fd|find|which|where|whoami|hostname|date|echo|printf|wc|stat|file|du|df|tree|Get-ChildItem|Get-Content|Get-Location|Get-Date|Get-Process|Get-Service|Select-String|node\s+(?:--version|-v)|bun\s+(?:--version|-v)|npm\s+(?:--version|ls|list|view|outdated)|docker\s+(?:ps|images|version|info)|kubectl\s+(?:get|describe)|systeminfo)\b/i;
+const READ_ONLY_GIT = /^\s*git\s+(?:status|diff|log|show|rev-parse|ls-files|blame|shortlog|describe|remote\s+-v|config\s+--get|--version)\b/i;
+
+export function isReadOnlyBash(command) {
+  const cmd = String(command || '').trim();
+  if (!cmd) return false;
+  if (/[;&<>]|\||\r|\n/.test(cmd)) return false;
+  if (/\s--output(?:=|\s)|(?:^|\s)-o(?:\s|$)/.test(cmd)) return false;
+  return READ_ONLY_CMD.test(cmd) || READ_ONLY_GIT.test(cmd);
+}
+
+export function snapshotBashBefore(command) {
+  if (command && isReadOnlyBash(command)) {
+    bashBefore = null;
+    return false;
+  }
   const isGit = git('rev-parse --is-inside-work-tree') === 'true';
   const files = new Map();
   if (isGit) {

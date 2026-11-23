@@ -1,5 +1,6 @@
-const { loadConfig, saveConfig } = require('./settings');
-const { loadRegistry, envNamesFor } = require('../providers/registry');
+const { loadConfig, saveConfig, hasApiKey } = require('./settings');
+const { loadRegistry } = require('../providers/registry');
+const store = require('../auth/store');
 
 function connect(provider, apiKey) {
   const valid = ['anthropic', 'openai', 'nvidia', 'google', 'local'];
@@ -8,9 +9,11 @@ function connect(provider, apiKey) {
     throw new Error(`Unknown provider: ${provider}. Run /providers to list every supported provider.`);
   }
   const config = loadConfig();
+  if (apiKey) {
+    store.saveCredential(provider, { type: 'api', method: 'api', apiKey, label: provider + ' API key' });
+    if (config.apiKeys) delete config.apiKeys[provider];
+  }
   config.provider = provider;
-  config.apiKeys = config.apiKeys || {};
-  if (apiKey) config.apiKeys[provider] = apiKey;
   saveConfig(config);
   return `Connected to ${provider}.`;
 }
@@ -30,7 +33,7 @@ function status() {
   return {
     provider: config.provider,
     model: config.model?.[config.provider] || 'default',
-    hasKey: !!(config.apiKeys?.[config.provider] || (envNamesFor(config.provider) || []).some(n => !!process.env[n]))
+    hasKey: hasApiKey(config.provider),
   };
 }
 

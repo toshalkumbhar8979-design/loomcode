@@ -1014,7 +1014,7 @@ const TOOLS = {
   },
   websearch: {
     name: 'websearch',
-    description: 'Web search. Uses Brave (BRAVE_API_KEY) or Tavily (TAVILY_API_KEY) when configured, else the DuckDuckGo HTML endpoint (no key). Returns top results with titles, URLs and snippets.',
+    description: 'Web search. Uses Brave (BRAVE_API_KEY) or Tavily (TAVILY_API_KEY) when configured, then open-source SearXNG (set SEARXNG_URL or use public instances), then the DuckDuckGo HTML endpoint and Wikipedia — all no-key fallbacks. Returns top results with titles, URLs and snippets.',
     parameters: {
       query: { type: 'string', required: true, description: 'Search query' },
       count: { type: 'number', required: false, description: 'Max results 1-10 (default 6)' },
@@ -1039,21 +1039,64 @@ const TOOLS = {
           const rows = (j.results || []).slice(0, n).map((x, i) => `${i + 1}. ${decode(x.title)}\n   ${x.url}\n   ${decode(x.content).slice(0, 220)}`);
           return rows.length ? rows.join('\n') : 'No results for "' + q + '".';
         }
-        // 3) DuckDuckGo HTML fallback (no key)
-        const resp = await fetch('https://html.duckduckgo.com/html/?q=' + encodeURIComponent(q), { signal: AbortSignal.timeout(15000), headers: { 'User-Agent': 'Mozilla/5.0' } });
-        const html = await resp.text();
-        const rows = [];
-        const re = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
-        let m;
-        while ((m = re.exec(html)) && rows.length < n) {
-          let url = m[1];
-          const u = url.match(/[?&]uddg=([^&]+)/);
-          if (u) url = decodeURIComponent(u[1]);
-          rows.push(`${rows.length + 1}. ${decode(m[2])}\n   ${url}`);
+        // 3) Open-source SearXNG (no key). Use SEARXNG_URL for a self-hosted
+        // instance, SEARXNG_INSTANCES for a comma list, else a few public ones.
+        const envUrl = String(process.env.SEARXNG_URL || '').trim();
+        const envList = String(process.env.SEARXNG_INSTANCES || '').split(',').map(s => s.trim()).filter(Boolean);
+        const searx = envUrl ? [envUrl] : envList.length ? envList : [
+          'https://searx.be',
+          'https://search.inetol.net',
+          'https://searx.tiekoetter.com',
+          'https://priv.au',
+        ];
+        for (const base of searx) {
+          try {
+            const endpoint = new URL(String(base).replace(/\/+$/, '') + '/search');
+            endpoint.searchParams.set('q', q);
+            endpoint.searchParams.set('format', 'json');
+            endpoint.searchParams.set('safesearch', '1');
+            const r = await fetch(endpoint.toString(), {
+              signal: AbortSignal.timeout(6000),
+              headers: { Accept: 'application/json', 'User-Agent': 'LoomCode/1.7 (+https://github.com/toshalkumbhar8979-design/loomcode)' },
+            });
+            if (!r.ok) continue;
+            const j = /** @type {{results?: any[]}} */ (await r.json());
+            const rows = (j.results || []).slice(0, n).map((x, i) =>
+              `${i + 1}. ${decode(x.title)}\n   ${x.url}\n   ${decode(x.content || x.snippet).slice(0, 220)}`);
+            if (rows.length) return rows.join('\n');
+          } catch {}
         }
-        const snips = [...html.matchAll(/class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g)].map(x => decode(x[1]));
-        const out = rows.map((r2, i) => snips[i] ? r2 + '\n   ' + snips[i].slice(0, 220) : r2);
-        return out.length ? out.join('\n') : 'No results for "' + q + '" (DDG returned nothing — set BRAVE_API_KEY or TAVILY_API_KEY for reliable search).';
+
+        // 4) DuckDuckGo HTML fallback (no key)
+        try {
+          const resp = await fetch('https://html.duckduckgo.com/html/?q=' + encodeURIComponent(q), { signal: AbortSignal.timeout(15000), headers: { 'User-Agent': 'Mozilla/5.0' } });
+          const html = await resp.text();
+          const rows = [];
+          const re = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
+          let m;
+          while ((m = re.exec(html)) && rows.length < n) {
+            let url = m[1];
+            const u = url.match(/[?&]uddg=([^&]+)/);
+            if (u) url = decodeURIComponent(u[1]);
+            rows.push(`${rows.length + 1}. ${decode(m[2])}\n   ${url}`);
+          }
+          const snips = [...html.matchAll(/class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g)].map(x => decode(x[1]));
+          const out = rows.map((r2, i) => snips[i] ? r2 + '\n   ' + snips[i].slice(0, 220) : r2);
+          if (out.length) return out.join('\n');
+        } catch {}
+
+        // 5) Wikipedia OpenSearch — free, keyless, and reliable for factual
+        // queries when every general search backend is blocked.
+        try {
+          const api = 'https://en.wikipedia.org/w/api.php?action=query&list=search&format=json&srlimit=' + n + '&srsearch=' + encodeURIComponent(q);
+          const r = await fetch(api, { signal: AbortSignal.timeout(10000), headers: { 'User-Agent': 'LoomCode/1.7' } });
+          const j = /** @type {{query?: {search?: any[]}}} */ (await r.json());
+          const rows = (j.query && j.query.search || []).slice(0, n).map((x, i) =>
+            `${i + 1}. ${decode(x.title)} (Wikipedia)\n   https://en.wikipedia.org/wiki/${encodeURIComponent(String(x.title).replace(/ /g, '_'))}\n   ${decode(x.snippet).slice(0, 220)}`);
+          if (rows.length) return rows.join('\n');
+        } catch {}
+
+        return 'No results for "' + q + '" (set SEARXNG_URL to a self-hosted instance, or BRAVE_API_KEY / TAVILY_API_KEY for reliable search).';
       } catch (e) {
         return { error: 'websearch failed: ' + e.message };
       }

@@ -235,3 +235,52 @@ test("listSessions: scopes to the current project and latestSession picks it", (
     try { fs.rmSync(root, { recursive: true, force: true }); } catch {}
   }
 });
+
+test("saveSessionAsync: live save appends only the new messages", async () => {
+  const first = fakeSession();
+  const saved = await store.saveSessionAsync(first, { append: true });
+  const extra = { role: "assistant", content: "third pass" };
+  const next = fakeSession({ messages: first.messages.concat([extra]) });
+  let appended = "";
+  const original = fs.promises.appendFile;
+  fs.promises.appendFile = async function (file, data) {
+    appended += String(data);
+    return original.call(fs.promises, file, data);
+  };
+  try {
+    await store.saveSessionAsync(next, { append: true });
+  } finally {
+    fs.promises.appendFile = original;
+  }
+  expect(appended).toBe(JSON.stringify(extra) + "\n");
+  const lines = fs.readFileSync(path.join(saved.dir, "messages.jsonl"), "utf8").trim().split("\n");
+  expect(lines).toHaveLength(4);
+  const meta = JSON.parse(fs.readFileSync(saved.file, "utf8"));
+  expect(meta.messageCount).toBe(4);
+});
+
+test("saveSessionAsync: rewrite mode drops removed messages", async () => {
+  const first = fakeSession();
+  const saved = await store.saveSessionAsync(first);
+  await store.saveSessionAsync(fakeSession({ messages: first.messages.slice(0, 2) }), { append: false });
+  const lines = fs.readFileSync(path.join(saved.dir, "messages.jsonl"), "utf8").trim().split("\n");
+  expect(lines).toHaveLength(2);
+  const meta = JSON.parse(fs.readFileSync(saved.file, "utf8"));
+  expect(meta.messageCount).toBe(2);
+});
+
+test("saveSession: overwriting does not re-read messages.jsonl", () => {
+  store.saveSession(fakeSession());
+  const original = fs.readFileSync;
+  let readMessages = false;
+  fs.readFileSync = function (file, ...args) {
+    if (String(file).endsWith("messages.jsonl")) readMessages = true;
+    return original.call(fs, file, ...args);
+  };
+  try {
+    store.saveSession(fakeSession());
+  } finally {
+    fs.readFileSync = original;
+  }
+  expect(readMessages).toBe(false);
+});

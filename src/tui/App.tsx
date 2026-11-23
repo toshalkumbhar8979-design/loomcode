@@ -57,11 +57,11 @@ import {
   SubagentPanel, SubagentDetailPanel,
 } from "./overlays/Sheets.tsx";
 import { showHelpText, showProvidersText, showAgentsText } from "./reports.ts";
-import { saveSession, loadSession, listSessions, latestSession } from "../core/session-store.js";
-import { loadConfig, saveConfig } from "../config/settings.js";
+import { saveSession, saveSessionAsync, loadSession, listSessions, latestSession } from "../core/session-store.js";
+import { loadConfig, saveConfig, hasApiKey } from "../config/settings.js";
 import { loadAgents, resolveAgent } from "../core/agents.js";
 import { snapshotBefore, snapshotAfter, snapshotBashBefore, diffBashAfter, clearFileDiffs } from "../core/file-diffs.js";
-import { createRestorePoint, listRestorePoints, restoreTo } from "../core/restore.js";
+import { createRestorePointAsync, listRestorePoints, restoreTo } from "../core/restore.js";
 import { TranscriptUndo } from "../core/transcript-undo.js";
 import { PROVIDERS, PROVIDER_ORDER, PROVIDER_LABELS } from "../providers/index.js";
 import * as plugin from "../core/plugin-cmd.js";
@@ -83,6 +83,15 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
   let pointerTimer: any = null;
   let pendingPointer = { x: 0, y: 0 };
 
+  // Session writes run on the JS timer queue and use async fs calls, so a big
+  // transcript no longer blocks streaming or keystrokes. Live turn saves
+  // append; structural edits rewrite. Quit waits for any in-flight write.
+  let sessionSaveTimer: any = null;
+  let sessionSaveInFlight: Promise<any> | null = null;
+  let sessionSaveQueued = false;
+  let sessionSaveAppend = true;
+  let sessionClosing = false;
+
   // Mouse movement is only consumed by the splash robot. Coalesce it to one
   // update per frame and skip it entirely once the transcript is docked, so
   // hovering/scrolling the slash list does not re-render the splash art.
@@ -96,8 +105,12 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
     }, 16);
   }
 
-  function quit(code: number = 0) {
+  async function quit(code: number = 0) {
     persistUi();
+    sessionClosing = true;
+    if (sessionSaveTimer) { clearTimeout(sessionSaveTimer); sessionSaveTimer = null; }
+    sessionSaveQueued = false;
+    if (sessionSaveInFlight) { try { await sessionSaveInFlight; } catch {} }
     let sid = "";
     try {
       const saved = saveSession(syncSessionForSave());
@@ -234,9 +247,9 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
     const preStep = _undo.push({ ui: preUi, session: preSess, todos: preTodos }, raw);
 
     if (!shown) appendMessage({ role: "user", content: raw });
-    setTimeout(() => {
+    setTimeout(async () => {
       try {
-        const rp = createRestorePoint(raw);
+        const rp = await createRestorePointAsync(raw);
         if (rp && rp.id) {
           _lastRestoreId = rp.id;
           if (preStep) preStep.restoreId = rp.id;
@@ -372,7 +385,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
             const fp = inp?.filePath;
             if (fp) snapshotBefore(fp);
           }
-          if (dsp.diffs === "bash") snapshotBashBefore();
+          if (dsp.diffs === "bash") snapshotBashBefore(inp?.command);
         },
         onPermissionRequest(name: string, command: string, label: string, options?: string[], permKey?: string) {
           return requestPermission(
@@ -477,7 +490,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
         clearInterval(speedTimer);
         if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
         if (offTodos) offTodos();
-        try { saveSession(syncSessionForSave()); } catch {}
+        scheduleSessionSave();
         if (subAcc.agent) patchMessageAt(idx, { subagent: { agent: subAcc.agent, text: subAcc.text, log: subAcc.log, status: subAcc.status, done: true } });
         setTimeout(() => {
           setThinking(false); setThinkStart(null); recomputeTodos(); refreshUsage();
@@ -541,6 +554,29 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
     }
     sess.messages = sessMsgs;
     return sess;
+  }
+
+  function pumpSessionSave() {
+    if (sessionClosing || !sessionSaveQueued || sessionSaveInFlight) return;
+    sessionSaveQueued = false;
+    const append = sessionSaveAppend;
+    sessionSaveAppend = true;
+    const p = saveSessionAsync(syncSessionForSave(), { append }).catch(() => {});
+    sessionSaveInFlight = p;
+    p.finally(() => {
+      if (sessionSaveInFlight === p) sessionSaveInFlight = null;
+      if (sessionSaveQueued && !sessionClosing && !sessionSaveTimer) {
+        sessionSaveTimer = setTimeout(() => { sessionSaveTimer = null; pumpSessionSave(); }, 0);
+      }
+    });
+  }
+
+  function scheduleSessionSave(append = true, delay = 350) {
+    if (sessionClosing) return;
+    sessionSaveAppend = sessionSaveQueued ? (sessionSaveAppend && append) : append;
+    sessionSaveQueued = true;
+    if (sessionSaveTimer) clearTimeout(sessionSaveTimer);
+    sessionSaveTimer = setTimeout(() => { sessionSaveTimer = null; pumpSessionSave(); }, delay);
   }
 
   function compactionMessage(r: any) {
@@ -692,7 +728,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
             });
           }
           refreshUsage();
-          try { saveSession(syncSessionForSave()); } catch {}
+          scheduleSessionSave(false, 0);
         }).catch((e: any) => patchMessageAt(compactIdx, {
           role: "system",
           content: "Compaction failed: " + String(e?.message || e),
@@ -867,9 +903,8 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
       }
       case "providers": showProvidersText(); return;
       case "status": {
-        const { envNamesFor } = require("../providers/index.js");
-        const keySet = !!(cfg.apiKeys?.[cfg.provider] || (envNamesFor(cfg.provider) || []).some((n: string) => !!process.env[n]));
-        appendMessage({ role: "system", content: "Provider: " + cfg.provider + "\nModel: " + (cfg.model?.[cfg.provider] || "default") + "\nKey: " + (keySet ? "configured" : "NOT SET") });
+        const keySet = hasApiKey(cfg.provider);
+        appendMessage({ role: "system", content: "Provider: " + cfg.provider + "\nModel: " + (cfg.model?.[cfg.provider] || "default") + "\nCredential: " + (keySet ? "configured" : "NOT SET") });
         return;
       }
       case "memory": {
@@ -1021,7 +1056,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
           undoLine += "\nAlso rewind the working tree to match? Run /undo-files to restore files from the same point.";
         }
         appendMessage({ role: "system", content: undoLine });
-        try { saveSession(syncSessionForSave()); } catch {}
+        scheduleSessionSave(false, 0);
         refreshUsage();
         return;
       }
@@ -1040,7 +1075,7 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
         getSession().todos = (target2.todos || []).slice();
         if (target2.restoreId) _lastRestoreId = target2.restoreId;
         appendMessage({ role: "system", content: "Redone — transcript restored" + (target2.label ? " to: " + target2.label.slice(0, 60) : "") + "." });
-        try { saveSession(syncSessionForSave()); } catch {}
+        scheduleSessionSave(false, 0);
         refreshUsage();
         return;
       }

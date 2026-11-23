@@ -1,7 +1,27 @@
 const { getApiKey, getBaseUrl } = require('../config/settings');
+const { ensureFreshAuth, credentialFor } = require('../auth');
 
 function getKey() {
   return getApiKey('anthropic') || process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY;
+}
+
+/**
+ * @returns {Promise<{ oauth: boolean, headers: Object<string, string> }>}
+ */
+async function authHeaders() {
+  const cred = await ensureFreshAuth('anthropic');
+  if (cred && cred.type === 'oauth' && cred.accessToken) {
+    return {
+      oauth: true,
+      headers: {
+        Authorization: 'Bearer ' + cred.accessToken,
+        'anthropic-beta': 'oauth-2025-04-20',
+      },
+    };
+  }
+  const key = getKey();
+  if (!key) throw new Error("Anthropic API key not set. Use /connect anthropic or set ANTHROPIC_API_KEY.");
+  return { oauth: false, headers: { 'x-api-key': key } };
 }
 
 function getApiUrl() {
@@ -213,23 +233,33 @@ function isRetryableStatus(status) {
 }
 
 async function post(body, options) {
-  const key = getKey();
-  if (!key) throw new Error("Anthropic API key not set. Use /connect anthropic or set ANTHROPIC_API_KEY.");
+  let headers = await authHeaders();
   const apiUrl = getApiUrl();
   const maxTries = 4;
+  let refreshed = false;
   let resp = null;
   for (let attempt = 0; attempt < maxTries; attempt++) {
     resp = await fetch(apiUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': key,
         'anthropic-version': '2023-06-01',
+        ...headers.headers,
       },
       body: JSON.stringify(body),
       signal: options.signal,
     });
     if (resp.ok) return resp;
+    if (resp.status === 401 && headers.oauth && !refreshed) {
+      refreshed = true;
+      const cred = credentialFor('anthropic');
+      if (cred && cred.refreshToken) {
+        await ensureFreshAuth('anthropic', { force: true });
+        headers = await authHeaders();
+        attempt--;
+        continue;
+      }
+    }
     if (!isRetryableStatus(resp.status) || attempt === maxTries - 1) break;
     // Honor the provider's Retry-After (seconds); else exponential backoff
     // with jitter so parallel retries don't stampede.

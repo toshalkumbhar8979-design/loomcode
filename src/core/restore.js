@@ -1,38 +1,58 @@
 // Restore points — snapshot the project's file tree on every user prompt so
 // the user can /restore to any earlier state if the agent breaks something.
 const fs = require('fs');
+const fsp = fs.promises;
 const path = require('path');
 const os = require('os');
 
 const RESTORE_FILE = process.env.LOOM_RESTORE_FILE || path.join(os.homedir(), '.loom', 'restore.json');
 const MAX_POINTS = 20;
 
-// Mirrors the TUI file walker's ignore list (node_modules, .git, dist, …).
-const IGNORE_RX = /(^|[\/])(node_modules|\.git|dist|build|\.next|\.venv|venv|coverage|__pycache__|\.loom|\.idea|\.vscode)([\/]|$)/i;
+// Mirrors the TUI file walker's ignore list (node_modules, .git, dist, …) and
+// skips OS/user-data trees that are never project source. Snapshotting a home
+// directory recursively was the main source of multi-second synchronous
+// writes in restore.json.
+const IGNORE_RX = /(^|[\/\\])(node_modules|\.git|dist|build|\.next|\.venv|venv|coverage|__pycache__|\.loom|\.idea|\.vscode|AppData|Application Data|Local Settings|Library|System Volume Information|\$Recycle\.Bin)([\/\\]|$)/i;
 
 const cwd = process.cwd();
+const MAX_FILES = 400;
+const MAX_DEPTH = 5;
 
 function walkFiles(root, depth, out) {
-  if (depth > 5 || out.length > 400) return;
+  if (depth > MAX_DEPTH || out.length >= MAX_FILES) return;
   let entries;
   try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return; }
   for (const e of entries) {
+    if (out.length >= MAX_FILES) break;
     const full = path.join(root, e.name);
-    if (IGNORE_RX.test(full)) continue;
+    if (IGNORE_RX.test(e.name)) continue;
     if (e.isDirectory()) walkFiles(full, depth + 1, out);
+    else out.push(full);
+  }
+}
+
+async function walkFilesAsync(root, depth, out) {
+  if (depth > MAX_DEPTH || out.length >= MAX_FILES) return;
+  let entries;
+  try { entries = await fsp.readdir(root, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    if (out.length >= MAX_FILES) break;
+    const full = path.join(root, e.name);
+    if (IGNORE_RX.test(e.name)) continue;
+    if (e.isDirectory()) await walkFilesAsync(full, depth + 1, out);
     else out.push(full);
   }
 }
 
 // Per-file content cap: larger files (lockfiles, bundles, big data) are not
 // snapshotted — they are recorded as null and left untouched by a restore.
-const FILE_CAP = 200 * 1024;
+const FILE_CAP = 128 * 1024;
 // Total snapshot cap: keeps restore.json small (~MBs, not hundreds of MBs).
 // Once the budget is spent, remaining files are recorded as null.
-const TOTAL_CAP = 2 * 1024 * 1024;
+const TOTAL_CAP = 1024 * 1024;
 // Store-wide budget: when the restore file exceeds this, the oldest points
-// are dropped on load (20 x TOTAL_CAP would otherwise mean 40MB on disk).
-const FILE_BUDGET = 8 * 1024 * 1024;
+// are dropped on load (20 x TOTAL_CAP would otherwise mean 20MB on disk).
+const FILE_BUDGET = 4 * 1024 * 1024;
 
 // Snapshot current project: rel path -> content.
 //   - string  = file was captured (small, text); restore overwrites it.
@@ -63,10 +83,31 @@ function snapshotProject(base) {
   return files;
 }
 
-function loadPoints() {
-  let points;
-  try { points = JSON.parse(fs.readFileSync(RESTORE_FILE, 'utf8')); } catch { return []; }
-  if (!Array.isArray(points)) return [];
+async function snapshotProjectAsync(base) {
+  const list = [];
+  await walkFilesAsync(base, 0, list);
+  const files = {};
+  let budget = TOTAL_CAP;
+  for (const abs of list) {
+    const rel = path.relative(base, abs).replace(/\\/g, '/');
+    let content = null;
+    try {
+      const st = await fsp.stat(abs);
+      if (st.size <= FILE_CAP && st.size <= budget) {
+        const raw = await fsp.readFile(abs, 'utf8');
+        if (!raw.includes('\u0000')) {
+          content = raw;
+          budget -= st.size;
+        }
+      }
+    } catch {}
+    files[rel] = content;
+  }
+  return files;
+}
+
+function compactPoints(points) {
+  if (!Array.isArray(points)) return { points: [], changed: false };
   // Self-heal: older points could snapshot whole trees (huge files, hundreds
   // of MB). Compacting here keeps the file small forever after the first load.
   let size = 0;
@@ -81,7 +122,7 @@ function loadPoints() {
     }
   }
   // File-level budget: drop the oldest points until the whole store fits.
-  // MAX_POINTS caps count; this caps bytes (20 x 2MB snapshots would be 40MB).
+  // MAX_POINTS caps count; this caps bytes (20 x 1MB snapshots would be 20MB).
   if (size > FILE_BUDGET) {
     needsCompact = true;
     while (points.length > 1 && size > FILE_BUDGET) {
@@ -103,35 +144,77 @@ function loadPoints() {
       }
       return Object.assign({}, p, { files });
     });
-    savePoints(points);
   }
-  return points;
+  return { points, changed: needsCompact };
+}
+
+function loadPoints() {
+  let points;
+  try { points = JSON.parse(fs.readFileSync(RESTORE_FILE, 'utf8')); } catch { return []; }
+  const result = compactPoints(points);
+  if (result.changed) savePoints(result.points);
+  return result.points;
+}
+
+async function loadPointsAsync() {
+  let points;
+  try { points = JSON.parse(await fsp.readFile(RESTORE_FILE, 'utf8')); } catch { return []; }
+  const result = compactPoints(points);
+  if (result.changed) await savePointsAsync(result.points);
+  return result.points;
 }
 
 function savePoints(points) {
   try {
     fs.mkdirSync(path.dirname(RESTORE_FILE), { recursive: true });
-    fs.writeFileSync(RESTORE_FILE, JSON.stringify(points, null, 1));
+    fs.writeFileSync(RESTORE_FILE, JSON.stringify(points));
     try { fs.chmodSync(RESTORE_FILE, 0o600); } catch {}
   } catch {}
 }
 
-// Create a restore point labeled with the user prompt. Keeps the last
-// MAX_POINTS, oldest dropped.
-export function createRestorePoint(label, base) {
-  base = base || cwd;
-  const files = snapshotProject(base);
-  const point = {
+async function savePointsAsync(points) {
+  const tmp = RESTORE_FILE + '.' + process.pid + '.tmp';
+  try {
+    await fsp.mkdir(path.dirname(RESTORE_FILE), { recursive: true });
+    await fsp.writeFile(tmp, JSON.stringify(points));
+    await fsp.rename(tmp, RESTORE_FILE);
+    try { await fsp.chmod(RESTORE_FILE, 0o600); } catch {}
+  } catch {
+    try { await fsp.rm(tmp, { force: true }); } catch {}
+  }
+}
+
+function makePoint(label, base, files) {
+  return {
     id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     at: Date.now(),
     label: String(label || '').slice(0, 80),
     cwd: base,
     files,
   };
+}
+
+// Create a restore point labeled with the user prompt. Keeps the last
+// MAX_POINTS, oldest dropped.
+export function createRestorePoint(label, base) {
+  base = base || cwd;
+  const point = makePoint(label, base, snapshotProject(base));
   const points = loadPoints();
   points.push(point);
   while (points.length > MAX_POINTS) points.shift();
   savePoints(points);
+  return point;
+}
+
+// Async variant used by the TUI so scanning/reading/writing the (up to a few
+// MB) restore file never blocks streaming or keyboard input.
+export async function createRestorePointAsync(label, base) {
+  base = base || cwd;
+  const point = makePoint(label, base, await snapshotProjectAsync(base));
+  const points = await loadPointsAsync();
+  points.push(point);
+  while (points.length > MAX_POINTS) points.shift();
+  await savePointsAsync(points);
   return point;
 }
 
@@ -201,7 +284,7 @@ function walkDirs(root, curDepth, maxDepth, out) {
   try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return; }
   for (const e of entries) {
     const full = path.join(root, e.name);
-    if (IGNORE_RX.test(full)) continue;
+    if (IGNORE_RX.test(e.name)) continue;
     if (e.isDirectory()) { out.push(full); walkDirs(full, curDepth + 1, maxDepth, out); }
   }
 }

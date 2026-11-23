@@ -1,16 +1,31 @@
 const { createOpenAICompatProvider } = require('./openai-compat');
 const { getApiKey } = require('../config/settings');
+const { isChatGPT } = require('../auth');
+const codex = require('./codex');
 
 function getKey() {
   return getApiKey('openai') || process.env.OPENAI_API_KEY;
 }
 
+const compat = createOpenAICompatProvider({
+  getKey,
+  providerId: 'openai',
+  envKeyHint: 'OPENAI',
+});
+
+async function chat(messages, options = {}) {
+  if (isChatGPT('openai')) return codex.chat(messages, options);
+  return compat.chat(messages, options);
+}
+
+async function stream(messages, options = {}, onDelta, onReasoning) {
+  if (isChatGPT('openai')) return codex.stream(messages, options, onDelta, onReasoning);
+  return compat.stream(messages, options, onDelta, onReasoning);
+}
+
 const provider = {
-  ...createOpenAICompatProvider({
-    getKey,
-    providerId: 'openai',
-    envKeyHint: 'OPENAI',
-  }),
+  chat,
+  stream,
   models: [
   // ── GPT-6 Series ──
   { id: 'gpt-6-astra', name: 'GPT-6 Astra', provider: 'openai', tags: ['frontier', 'reasoning'], context: 1050000, priceIn: 10, priceOut: 50 },

@@ -74,3 +74,27 @@ test("snapshotBefore keeps the original baseline for repeated edits", () => {
   expect(d.lines.filter(l => l.kind === "del").map(l => l.text)).toEqual(["two", "three"]);
   expect(d.lines.filter(l => l.kind === "add").map(l => l.text)).toEqual(["TWO", "THREE"]);
 });
+
+test("isReadOnlyBash: skips snapshots for inspection commands but not writes", () => {
+  const { isReadOnlyBash } = require("./file-diffs.js");
+  for (const cmd of [
+    "git status --short",
+    "git diff --stat",
+    "rg -n foo src",
+    "ls -la",
+    "Get-ChildItem -Force",
+    "npm view react version",
+    "node --version",
+  ]) expect(isReadOnlyBash(cmd)).toBe(true);
+  for (const cmd of [
+    "rm -rf src",
+    "git apply patch.diff",
+    "git checkout -- .",
+    "git status > log.txt",
+    "git diff --output=patch.diff",
+    "ls && rm x",
+    "echo hi | tee out.txt",
+    "npm install",
+    "bun test",
+  ]) expect(isReadOnlyBash(cmd)).toBe(false);
+});

@@ -117,6 +117,10 @@ function getApiKey(provider) {
   const config = loadConfig();
   const saved = config.apiKeys?.[provider];
   if (saved) return saved;
+  try {
+    const stored = require('../auth').getApiKey(provider);
+    if (stored) return stored;
+  } catch {}
   const { envNamesFor } = require('../providers/registry');
   for (const key of (envNamesFor(provider) || [])) {
     if (process.env[key]) return process.env[key];
@@ -185,6 +189,9 @@ function hasApiKey(provider) {
   const { envNamesFor } = require('../providers/registry');
   const cfg = loadConfig();
   if (cfg.apiKeys?.[provider]) return true;
+  try {
+    if (require('../auth').hasAuth(provider)) return true;
+  } catch {}
   return (envNamesFor(provider) || []).some(n => !!process.env[n]);
 }
 

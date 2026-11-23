@@ -107,6 +107,10 @@ npm only checks install-time metadata against the Node you ran npm with.
    # b) Interactive setup in the TUI
    loom
    > /connect nvidia
+
+   # c) Encrypted vault + provider sign-in
+   loom auth login anthropic
+   loom auth list
    ```
 
 3. **Initialize project memory** (optional):
@@ -129,7 +133,37 @@ loom --version
 loom --help
 loom --basic                      # skip TUI, use line-mode REPL
 loom acp                          # ACP subprocess mode for editor integrations
+loom auth login [provider]        # sign in with an API key or provider OAuth
+loom auth list                    # list saved credentials (secrets redacted)
+loom auth status                  # credential + token expiry status
+loom auth logout <provider>       # remove one credential
+loom auth logout --all            # wipe the vault
 ```
+
+## Provider accounts (`loom auth`)
+
+`loom auth` stores credentials in an encrypted vault at `~/.loom/auth.json`
+(AES-256-GCM). The vault key lives in `~/.loom/auth.key`; on Windows it is
+protected with DPAPI for the current user, and scrypt is used when
+`LOOM_AUTH_KEY` is set. Saved keys are never written to `config.json` and
+`loom auth list` redacts secrets.
+
+- **API key accounts** work for every provider: `loom auth login openai`.
+- **OAuth accounts** are available where supported: OpenRouter, Anthropic
+  Claude, ChatGPT/Codex, Google Gemini, and GitHub Copilot (device flow).
+  `loom auth login openai` offers ChatGPT or an API key; `anthropic` offers a
+  browser sign-in or an API key. Google browser sign-in requires your own OAuth
+  client via `LOOM_GOOGLE_OAUTH_CLIENT_ID` and
+  `LOOM_GOOGLE_OAUTH_CLIENT_SECRET`; otherwise `loom auth login google` uses an
+  API key.
+- OAuth access tokens refresh automatically before a request. A failed refresh
+  asks you to run `loom auth login <provider>` again.
+- `LOOM_AUTH_KEY` protects the vault with a passphrase (scrypt) instead of the
+  local key file. `LOOM_AUTH_NO_DPAPI=1` disables the Windows DPAPI wrapper;
+  it does not disable encryption.
+
+Environment keys still work, but saved config/vault credentials take
+precedence. See `.env.example` for names.
 
 ## Editor integration (ACP)
 
@@ -399,6 +433,11 @@ Config is stored at `~/.loom/config.json` (permissions: 0600). Includes:
 - `permissionRules` — rules saved from the permission popup ("Always allow"/"Never")
 
 API keys can also be set via environment variables: `.env` or `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `NVIDIA_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY` etc.
+
+`websearch` needs no key: it tries Brave (`BRAVE_API_KEY`) or Tavily
+(`TAVILY_API_KEY`) when configured, then open-source SearXNG, DuckDuckGo, and
+Wikipedia. Point `SEARXNG_URL` at a self-hosted instance (or set
+`SEARXNG_INSTANCES` to a comma-separated list) for keyless, private search.
 
 ## Permissions
 

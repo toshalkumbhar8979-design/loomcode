@@ -733,6 +733,8 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
     const provider = this.provider.active && this.provider.providers[this.provider.active.name];
     if (provider) {
       try {
+        const providerName = this.provider.active?.name;
+        if (providerName) await require('../auth').ensureFreshAuth(providerName);
         const model = this.config.model?.[this.provider.active?.name];
         const resp = await provider.chat(
           head.concat([{
@@ -1349,6 +1351,11 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
       }
     }
     wire = this.ageHistory(wire);
+
+    // OAuth access tokens are short-lived. Refresh before the request so a
+    // long-running session never fails mid-turn with a stale credential.
+    const activeProvider = this.provider.active?.name;
+    if (activeProvider) await require('../auth').ensureFreshAuth(activeProvider);
 
     // Provider-specific first-token and idle watchdogs give precise errors.
     // This outer deadline is the production safety net for every provider.

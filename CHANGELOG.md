@@ -4,7 +4,41 @@ All notable changes to **Loom Code** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.7.0] - 2026-11-21
+## [1.7.4] - 2026-11-24
+
+### Added
+- **`loom auth` encrypted credential vault.** API keys and provider OAuth
+  sessions (OpenRouter, Anthropic, ChatGPT/Codex, Google, GitHub Copilot) are
+  stored in `~/.loom/auth.json` with AES-256-GCM, an OS-protected key file
+  (DPAPI on Windows) or `LOOM_AUTH_KEY`/scrypt, redacted `loom auth list`, and
+  automatic token refresh. `/connect` and the TUI key editor now save to the
+  vault instead of plaintext config.
+- **Keyless web search fallback chain.** `websearch` tries Brave/Tavily when
+  configured, then SearXNG (`SEARXNG_URL`/`SEARXNG_INSTANCES` or public
+  instances), DuckDuckGo, and Wikipedia.
+- **Markdown tables in the TUI.** Pipe tables with GFM alignment render as
+  boxed, width-fitted tables with bold headers, inline styles, and truncated
+  cells instead of raw `|` rows.
+
+### Fixed
+- **Task-time TUI freezes.** Vault reads no longer spawn PowerShell/DPAPI (and
+  re-run scrypt) on every provider check; the decrypted vault/key are cached
+  per process and invalidated by file/env changes. `/connect` audits also stop
+  re-running `icacls` for paths already secured.
+- **Restore-point writes no longer block the UI.** The TUI uses an async
+  snapshot with smaller caps, skips OS/user-data trees, and writes compact JSON;
+  home-directory snapshots no longer produce multi-MB freezes.
+- **Long-session saves no longer re-read `messages.jsonl`.** Saving reads only
+  session metadata, so session persistence stays O(metadata), not O(transcript).
+- **Live session saves no longer block the TUI.** Turn-end saves are debounced,
+  run off the UI thread, and append only new JSONL messages; undo/redo,
+  compaction, and quit still perform a full rewrite through the same atomic
+  path. Quit waits for in-flight writes before exiting.
+- **`loom auth login` opens immediately.** It no longer waits on the models.dev
+  catalog before showing the provider menu; registry-only providers get a
+  short, after-sign-in fetch to pick a default model.
+- **Bash diff capture skips read-only commands** and diffs are capped at 512KB,
+  avoiding multi-second `git diff`/file reads during inspection commands.
 
 ### Changed
 - **Sessions now resume like opencode.** Sessions are stored in the global

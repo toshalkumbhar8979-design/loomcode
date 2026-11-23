@@ -267,24 +267,46 @@ function readFlatSession(root, id) {
   }
 }
 
-function saveSession(session) {
-  const now = new Date().toISOString();
-  const id = isValidSessionId(session.conversationId) ? session.conversationId : convId();
-  const messages = Array.isArray(session.messages) ? session.messages : [];
-  const prev = loadSession(id);
-
-  // Do not create a session just because the TUI opened and closed. Empty
-  // sessions used to fill /sessions with rows that could never be resumed.
-  if (!hasConversation(messages)) {
-    return { id, file: prev ? prev.file || null : null, dir: prev ? prev.dir || null : null, skipped: true };
+function loadSessionMeta(id) {
+  if (!isValidSessionId(id)) return null;
+  let meta = readFolderMeta(id, baseDir());
+  if (!meta) {
+    const local = projectLocalDir();
+    if (local) meta = readFolderMeta(id, local);
   }
+  if (!meta) meta = readFlatSession(baseDir(), id);
+  if (!meta) {
+    const local = projectLocalDir();
+    if (local) meta = readFlatSession(local, id);
+  }
+  return meta;
+}
 
-  ensureDir();
+/**
+ * @typedef {Object} SaveSessionResult
+ * @property {string} id
+ * @property {string|null} file
+ * @property {string|null} dir
+ * @property {boolean} skipped
+ */
+
+/**
+ * @typedef {Object} SaveSessionOptions
+ * @property {boolean} [append] Append only new messages to the existing JSONL
+ *   file instead of rewriting the whole transcript. Ignored when the prior
+ *   save is not in the global store or the message list shrank.
+ */
+
+function messageJsonl(messages) {
+  return messages.map((m) => JSON.stringify(m)).join('\n') + (messages.length ? '\n' : '');
+}
+
+function buildSaveData(session, id, prev, now, messages) {
   const createdAt = prev && typeof prev.createdAt === 'string' ? prev.createdAt : now;
   const title = prev && typeof prev.title === 'string' && prev.title !== 'Untitled session'
     ? prev.title
     : sessionTitle(messages);
-  const data = {
+  return {
     id,
     schemaVersion: SESSION_SCHEMA_VERSION,
     title,
@@ -295,18 +317,91 @@ function saveSession(session) {
     model: session.config && session.config.model ? session.config.model[session.config.provider] : null,
     messageCount: messages.length,
   };
-  const dir = path.join(baseDir(), id);
+}
+
+function prepareSave(session) {
+  const now = new Date().toISOString();
+  const id = isValidSessionId(session.conversationId) ? session.conversationId : convId();
+  const messages = Array.isArray(session.messages) ? session.messages : [];
+  // Metadata only: reading the entire messages.jsonl here made every save
+  // O(transcript) and froze the TUI on long sessions.
+  const prev = loadSessionMeta(id);
+  if (!hasConversation(messages)) {
+    return { id, prev, messages, skipped: true, data: null, dir: null, now };
+  }
+  return {
+    id,
+    prev,
+    messages,
+    skipped: false,
+    data: buildSaveData(session, id, prev, now, messages),
+    dir: path.join(baseDir(), id),
+    now,
+  };
+}
+
+function saveSession(session) {
+  const prepared = prepareSave(session);
+  const { id, prev, messages } = prepared;
+  // Do not create a session just because the TUI opened and closed. Empty
+  // sessions used to fill /sessions with rows that could never be resumed.
+  if (prepared.skipped) {
+    return { id, file: prev ? prev.file || null : null, dir: prev ? prev.dir || null : null, skipped: true };
+  }
+  ensureDir();
+  const dir = /** @type {string} */ (prepared.dir);
   fs.mkdirSync(dir, { recursive: true });
   const metaFile = path.join(dir, 'session.json');
   // Write messages first, metadata last: a crash mid-save leaves the old
   // session.json pointing at a complete messages file, never the reverse.
   const msgFile = path.join(dir, 'messages.jsonl');
   const msgTmp = msgFile + '.tmp';
-  fs.writeFileSync(msgTmp, messages.map((m) => JSON.stringify(m)).join('\n') + (messages.length ? '\n' : ''));
+  fs.writeFileSync(msgTmp, messageJsonl(messages));
   fs.renameSync(msgTmp, msgFile);
   const metaTmp = metaFile + '.tmp';
-  fs.writeFileSync(metaTmp, JSON.stringify(data, null, 2));
+  fs.writeFileSync(metaTmp, JSON.stringify(prepared.data, null, 2));
   fs.renameSync(metaTmp, metaFile);
+  return { id, file: metaFile, dir, skipped: false };
+}
+
+/**
+ * Save without blocking the UI thread. Live turn saves append only the new
+ * messages; structural changes (undo/redo, compaction, quit) pass
+ * `{ append: false }` and rewrite the transcript from scratch.
+ * @param {any} session
+ * @param {SaveSessionOptions=} options
+ * @returns {Promise<SaveSessionResult>}
+ */
+async function saveSessionAsync(session, options) {
+  const opts = options || {};
+  const prepared = prepareSave(session);
+  const { id, prev, messages } = prepared;
+  if (prepared.skipped) {
+    return { id, file: prev ? prev.file || null : null, dir: prev ? prev.dir || null : null, skipped: true };
+  }
+  const dir = /** @type {string} */ (prepared.dir);
+  const metaFile = path.join(dir, 'session.json');
+  const msgFile = path.join(dir, 'messages.jsonl');
+  await fs.promises.mkdir(dir, { recursive: true });
+  let appended = false;
+  // Only append when the previous save lives in this exact directory and the
+  // transcript only grew. Legacy/local files and shrinks get a clean rewrite.
+  if (opts.append !== false && prev && prev.dir && sameDir(prev.dir, dir) &&
+      typeof prev.messageCount === 'number' && prev.messageCount > 0 &&
+      messages.length > prev.messageCount && fs.existsSync(msgFile)) {
+    try {
+      await fs.promises.appendFile(msgFile, messageJsonl(messages.slice(prev.messageCount)));
+      appended = true;
+    } catch {}
+  }
+  if (!appended) {
+    const msgTmp = msgFile + '.tmp';
+    await fs.promises.writeFile(msgTmp, messageJsonl(messages));
+    await fs.promises.rename(msgTmp, msgFile);
+  }
+  const metaTmp = metaFile + '.tmp';
+  await fs.promises.writeFile(metaTmp, JSON.stringify(prepared.data, null, 2));
+  await fs.promises.rename(metaTmp, metaFile);
   return { id, file: metaFile, dir, skipped: false };
 }
 
@@ -449,6 +544,7 @@ function exportChat(session, format) {
 
 module.exports = {
   saveSession,
+  saveSessionAsync,
   listSessions,
   latestSession,
   loadSession,

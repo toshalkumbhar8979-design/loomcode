@@ -8,6 +8,7 @@ const { loadConfig, saveConfig, LOOM_DIR } = require('../config/settings');
 const { ProviderRouter, PROVIDERS } = require('../providers');
 const { saveSession, loadSession, latestSession } = require('./session-store');
 const { defaultMcpInstall } = require('./plugin-cmd');
+const { authCmd } = require('./auth-cmd');
 
 // Single source of truth for every version string the CLI prints (banner,
 // --version). package.json is the only place to bump.
@@ -157,6 +158,8 @@ class LoomCLI {
         return this.cmdMemory();
       case 'connect':
         return this.cmdConnect(args);
+      case 'auth':
+        return this.cmdAuth(args);
       case 'model':
         return this.cmdModel(args);
       case 'models':
@@ -202,6 +205,7 @@ class LoomCLI {
   │ /init        (Re)create LOOM.md memory file     │
   │ /memory      View/edit LOOM.md memory file     │
   │ /connect     Connect to an AI provider         │
+  │ /auth        Manage OAuth/API credentials      │
   │ /model       Set the active model              │
   │ /models      List available models             │
   │ /status      Show connection status            │
@@ -272,6 +276,15 @@ class LoomCLI {
       const envHint = (envNamesFor(provider) || [])[0] || provider.toUpperCase() + '_API_KEY';
       console.log(`Set API key with environment variable: ${envHint}`);
     }
+  }
+
+  async cmdAuth(args) {
+    if (!args.length || args[0] === 'login' || args[0] === 'add') {
+      console.log('Run "loom auth" or "loom auth login" from your shell to use the interactive sign-in menu.');
+      console.log('Inside this session, "loom auth list" and "loom auth status" work as read-only commands.');
+      return;
+    }
+    await authCmd(args);
   }
 
   async cmdModel(args) {
@@ -472,7 +485,7 @@ class LoomCLI {
 
   completer(line) {
     const commands = [
-      '/help', '/init', '/memory', '/connect', '/model', '/models',
+      '/help', '/init', '/memory', '/connect', '/auth', '/model', '/models',
       '/status', '/clear', '/compact', '/undo', '/reset', '/doctor',
       '/providers', '/skills', '/mcp', '/format', '/lsp', '/exit'
     ];
@@ -538,11 +551,21 @@ async function main() {
   const autoMode = args.includes('--auto') || args.includes('-a');
   if (autoMode) cli.session.permissions.setAuto(true);
 
+  if (args[0] === 'auth') {
+    try {
+      await authCmd(args.slice(1));
+      process.exit(0);
+    } catch (err) {
+      console.error('Error: ' + (err && err.message ? err.message : String(err)));
+      process.exit(1);
+    }
+  }
+
   if (args.includes('--version') || args.includes('-v')) {
     console.log(`loom-code v${VERSION}`);
     process.exit(0);
   }
-if (args.includes('--help') || args.includes('-h')) {
+  if (args.includes('--help') || args.includes('-h')) {
     console.log('loom - AI coding agent for the terminal');
     console.log('Usage: loom [options] [prompt...]');
     console.log('  loom                    Start interactive TUI session');
@@ -551,6 +574,8 @@ if (args.includes('--help') || args.includes('-h')) {
     console.log('  loom --basic            Use basic line-mode REPL (no TUI)');
     console.log('  loom --auto             Auto-approve permission prompts');
     console.log('  loom acp                ACP server (JSON-RPC over stdio, for editor plugins)');
+    console.log('  loom auth               Sign in to a provider (OAuth or API key)');
+    console.log('  loom auth list          List stored credentials');
     console.log('  loom add mcp <spec>     Add an MCP server (same syntax as /mcp add)');
     console.log('  loom add connector <spec>  Add a connector (preset like supabase, or one-liner)');
     console.log('  loom -s, --session <id> Resume a saved session');

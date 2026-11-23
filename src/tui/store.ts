@@ -303,9 +303,8 @@ export function refreshProviderState() {
   setModelName(model);
   setSessionId(s.conversationId || "");
   setBudgetLevel(cfg.budgetLevel || "auto");
-  const { envNamesFor } = require("../providers/index.js");
-  const hasKey = !!(cfg.apiKeys?.[prov]) || (envNamesFor(prov) || []).some(n => !!process.env[n]);
-  setProviderKeyOk(!!hasKey);
+  const { hasApiKey } = require("../config/settings.js");
+  setProviderKeyOk(!!hasApiKey(prov));
 }
 
 // Refresh the session + lifetime usage/billing signals from the session counters and ~/.loom/usage.json.

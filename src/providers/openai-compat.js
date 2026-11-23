@@ -287,15 +287,15 @@ function isAbortError(err) {
 /**
  * @typedef {Object} Provider
  * @property {(messages: Array<Object>, options: Object) => Promise<Object>} chat
- * @property {(messages: Array<Object>, options: Object, onDelta?: (text: string) => void) => Promise<Object>} stream
+ * @property {(messages: Array<Object>, options: Object, onDelta?: (text: string) => void, onReasoning?: (text: string) => void) => Promise<Object>} stream
  * @property {Array<ProviderModel>} models
  */
 
 /**
- * @param {{ getKey: () => string|undefined, providerId: string, envKeyHint: string, clientFactory?: () => any, defaultBaseUrl?: string }} config
+ * @param {{ getKey: () => string|undefined, providerId: string, envKeyHint: string, clientFactory?: () => any, defaultBaseUrl?: string, getHeaders?: () => Object<string, string> }} config
  * @returns {Provider}
  */
-function createOpenAICompatProvider({ getKey, providerId, envKeyHint, clientFactory, defaultBaseUrl }) {
+function createOpenAICompatProvider({ getKey, providerId, envKeyHint, clientFactory, defaultBaseUrl, getHeaders }) {
   function getClient() {
     if (clientFactory) return clientFactory();
     const key = getKey();
@@ -304,7 +304,8 @@ function createOpenAICompatProvider({ getKey, providerId, envKeyHint, clientFact
     // maxRetries:0 — the SDK's default 2 retries stack on top of our
     // retryWithBackoff, multiplying a dead endpoint's hang time. The SDK
     // timeout is a generous last-resort cap; per-request values below win.
-    return new OpenAI({ apiKey: key, baseURL, maxRetries: 0, timeout: 1800000 });
+    const defaultHeaders = getHeaders ? getHeaders() : undefined;
+    return new OpenAI({ apiKey: key, baseURL, maxRetries: 0, timeout: 1800000, ...(defaultHeaders ? { defaultHeaders } : {}) });
   }
 
   async function chat(messages, options = {}) {
@@ -434,4 +435,4 @@ function getDefaultBaseUrl(providerId) {
   return defaults[providerId] || undefined;
 }
 
-module.exports = { createOpenAICompatProvider, wrapErr, buildRequest, formatMessages, formatTools, parseToolCalls, normalize, retryWithBackoff, sanitizeErrBody, isTransportTimeout };
+module.exports = { createOpenAICompatProvider, wrapErr, buildRequest, formatMessages, formatTools, parseToolCalls, normalize, retryWithBackoff, withTimeout, sanitizeErrBody, isTransportTimeout, isAbortError };

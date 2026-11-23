@@ -8,6 +8,7 @@ const LocalProvider = require('./local');
 const { createOpenAICompatProvider } = require('./openai-compat');
 const { loadRegistry, fetchRegistry, isRegistryFresh, envNamesFor, SDK_BASE_URLS } = require('./registry');
 const { loadConfig, getApiKey } = require('../config/settings');
+const { ensureFreshAuth, credentialFor, headersFor } = require('../auth');
 
 const PROVIDERS = {
   anthropic: AnthropicProvider,
@@ -45,12 +46,34 @@ const PROVIDER_LABELS = {
  * @returns {import('./openai-compat').Provider}
  */
 function makeDynamicProvider(rp) {
+  const isCopilot = rp.id === 'github-copilot';
   const provider = createOpenAICompatProvider({
-    getKey: () => getApiKey(rp.id),
+    getKey: () => {
+      if (isCopilot) {
+        const cred = credentialFor(rp.id);
+        if (cred && cred.type === 'oauth' && cred.accessToken) return cred.accessToken;
+      }
+      return getApiKey(rp.id);
+    },
     providerId: rp.id,
     envKeyHint: rp.name,
     defaultBaseUrl: rp.baseURL || SDK_BASE_URLS[rp.npm] || undefined,
+    getHeaders: isCopilot ? () => {
+      const headers = headersFor(rp.id);
+      delete headers.Authorization;
+      return headers;
+    } : undefined,
   });
+  const chat = provider.chat;
+  const stream = provider.stream;
+  provider.chat = async (messages, options) => {
+    await ensureFreshAuth(rp.id);
+    return chat(messages, options);
+  };
+  provider.stream = async (messages, options, onDelta, onReasoning) => {
+    await ensureFreshAuth(rp.id);
+    return stream(messages, options, onDelta, onReasoning);
+  };
   provider.models = rp.models.map((m) => ({
     id: m.id,
     name: m.name,
@@ -99,12 +122,13 @@ let registryPromise = null;
  * fetch once (background-friendly, never throws). Returns the number of
  * providers currently merged.
  * @param {boolean=} force  bypass the freshness check
+ * @param {number=} timeoutMs  abort the network fetch after this long
  * @returns {Promise<number>}
  */
-function ensureRegistry(force = false) {
+function ensureRegistry(force = false, timeoutMs = 30000) {
   if (!force && isRegistryFresh()) return Promise.resolve(mergeRegistry());
   if (!registryPromise) {
-    registryPromise = fetchRegistry().then((count) => {
+    registryPromise = fetchRegistry(timeoutMs).then((count) => {
       registryPromise = null;
       if (count) mergeRegistry();
       return count;

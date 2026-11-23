@@ -13,7 +13,7 @@ function parseInline(line: string): Inline[] {
   let buf = "";
   const flush = () => { if (buf) { tokens.push({ text: buf }); buf = ""; } };
   while (i < line.length) {
-    if (line[i] === "\\" && i + 1 < line.length && /[\\*_`\[\]()#~-]/.test(line[i + 1])) {
+    if (line[i] === "\\" && i + 1 < line.length && /[\\*_`\[\]()#~|:-]/.test(line[i + 1])) {
       buf += line[i + 1];
       i += 2;
       continue;
@@ -79,21 +79,63 @@ function parseInline(line: string): Inline[] {
   return tokens;
 }
 
+export type TableAlign = "left" | "center" | "right";
+
 export type MdLine =
   | { kind: "heading"; level: 1 | 2 | 3; spans: Inline[] }
   | { kind: "bullet"; indent: number; spans: Inline[] }
   | { kind: "quote"; spans: Inline[] }
   | { kind: "rule" }
+  | { kind: "table"; headers: Inline[][]; aligns: TableAlign[]; rows: Inline[][][] }
   | { kind: "text"; spans: Inline[] }
   | { kind: "code"; code: string; lang: string };
 
+function splitTableRow(line: string): string[] {
+  let raw = String(line || "").trim();
+  if (raw.startsWith("|")) raw = raw.slice(1);
+  if (raw.endsWith("|") && !raw.endsWith("\\|")) raw = raw.slice(0, -1);
+  const cells: string[] = [];
+  let buf = "";
+  let escaped = false;
+  for (const ch of raw) {
+    if (escaped) { buf += ch; escaped = false; continue; }
+    if (ch === "\\") { buf += ch; escaped = true; continue; }
+    if (ch === "|") { cells.push(buf.trim()); buf = ""; continue; }
+    buf += ch;
+  }
+  cells.push(buf.trim());
+  return cells;
+}
+
+function tableAlign(line: string): TableAlign[] | null {
+  if (!String(line || "").includes("-")) return null;
+  const cells = splitTableRow(line);
+  if (!cells.length) return null;
+  const aligns: TableAlign[] = [];
+  for (const cell of cells) {
+    const value = cell.replace(/\s+/g, "");
+    if (!/^:?-{3,}:?$/.test(value)) return null;
+    const left = value.startsWith(":");
+    const right = value.endsWith(":");
+    aligns.push(left && right ? "center" : right ? "right" : "left");
+  }
+  return aligns;
+}
+
+const MD_CACHE = new Map<string, MdLine[]>();
+const MD_CACHE_MAX = 40;
+
 export function parseMarkdown(md: string): MdLine[] {
+  const source = String(md);
+  const cached = MD_CACHE.get(source);
+  if (cached) return cached;
   const out: MdLine[] = [];
-  const lines = String(md).split("\n");
+  const lines = source.split("\n");
   let fence = false;
   let fenceLang = "";
   let codeBuf: string[] = [];
-  for (const raw of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
     const fenceM = raw.match(/^\s*```\s*([a-zA-Z0-9+-]*)?\s*$/);
     if (fenceM) {
       if (fence) {
@@ -109,6 +151,29 @@ export function parseMarkdown(md: string): MdLine[] {
     }
     if (fence) { codeBuf.push(raw); continue; }
     if (/^\s*$/.test(raw)) { out.push({ kind: "text", spans: [] }); continue; }
+
+    // Pipe table: header row immediately followed by a |---|---| divider.
+    if (raw.includes("|") && i + 1 < lines.length) {
+      const aligns = tableAlign(lines[i + 1]);
+      if (aligns) {
+        const headers = splitTableRow(raw).map(parseInline);
+        const rows: Inline[][][] = [];
+        let j = i + 2;
+        while (j < lines.length) {
+          const row = lines[j];
+          if (!row.trim() || !row.includes("|")) break;
+          const cells = splitTableRow(row).map(parseInline);
+          while (cells.length < headers.length) cells.push([]);
+          rows.push(cells.slice(0, headers.length));
+          j++;
+        }
+        while (aligns.length < headers.length) aligns.push("left");
+        out.push({ kind: "table", headers, aligns: aligns.slice(0, headers.length), rows });
+        i = j - 1;
+        continue;
+      }
+    }
+
     if (/^\s*(-{3,}|_{3,}|\*{3,})\s*$/.test(raw)) { out.push({ kind: "rule" }); continue; }
     const hm = raw.match(/^(#{1,3})\s+(.*)$/);
     if (hm) {
@@ -125,6 +190,8 @@ export function parseMarkdown(md: string): MdLine[] {
     out.push({ kind: "text", spans: parseInline(raw) });
   }
   if (fence && codeBuf.length) out.push({ kind: "code", code: codeBuf.join("\n"), lang: fenceLang });
+  if (MD_CACHE.size >= MD_CACHE_MAX) MD_CACHE.delete(MD_CACHE.keys().next().value as string);
+  MD_CACHE.set(source, out);
   return out;
 }
 
@@ -179,9 +246,19 @@ function highlightLine(line: string, kws: string[]): CodeTok[] {
   return out;
 }
 
+const CODE_CACHE = new Map<string, CodeTok[][]>();
+const CODE_CACHE_MAX = 40;
+
 export function highlightCode(code: string, lang: string): CodeTok[][] {
+  const source = String(code);
+  const key = (lang || "") + "\u0000" + source;
+  const cached = CODE_CACHE.get(key);
+  if (cached) return cached;
   const kws = kwSetFor(lang);
-  return String(code).split("\n").map(l => highlightLine(l, kws));
+  const lines = source.split("\n").map(l => highlightLine(l, kws));
+  if (CODE_CACHE.size >= CODE_CACHE_MAX) CODE_CACHE.delete(CODE_CACHE.keys().next().value as string);
+  CODE_CACHE.set(key, lines);
+  return lines;
 }
 
 const CODE_COLORS: Record<CodeTok["style"], () => string> = {
@@ -220,6 +297,89 @@ function renderSpans(spans: Inline[]): any[] {
   return out;
 }
 
+function spansText(spans: Inline[]): string {
+  return spans.map((s) => s.text).join("");
+}
+
+function clipSpans(spans: Inline[], width: number): Inline[] {
+  if (width <= 0) return [];
+  const total = spansText(spans).length;
+  if (total <= width) return spans;
+  if (width === 1) return [{ text: "…" }];
+  const out: Inline[] = [];
+  let left = width - 1;
+  for (const s of spans) {
+    if (left <= 0) break;
+    if (s.text.length <= left) { out.push(s); left -= s.text.length; continue; }
+    out.push({ ...s, text: s.text.slice(0, left) });
+    left = 0;
+  }
+  out.push({ text: "…" });
+  return out;
+}
+
+function tableWidths(headers: Inline[][], rows: Inline[][][], maxTotal: number): number[] {
+  const widths = headers.map((h) => Math.max(3, Math.min(28, spansText(h).length)));
+  for (const row of rows) {
+    row.forEach((cell, i) => {
+      const len = spansText(cell).length;
+      if (len > (widths[i] || 0)) widths[i] = Math.max(3, Math.min(28, len));
+    });
+  }
+  let total = widths.reduce((n, w) => n + w + 3, 0) + 1;
+  while (total > maxTotal) {
+    let idx = 0;
+    for (let i = 1; i < widths.length; i++) if (widths[i] > widths[idx]) idx = i;
+    if (!widths.length || widths[idx] <= 3) break;
+    widths[idx]--;
+    total--;
+  }
+  return widths;
+}
+
+function TableRow(props: { cells: Inline[][]; widths: number[]; aligns: TableAlign[]; header?: boolean }) {
+  const children: any[] = [];
+  props.cells.forEach((cell, i) => {
+    const width = props.widths[i] || 3;
+    const shown = clipSpans(cell, width);
+    const used = spansText(shown).length;
+    const pad = Math.max(0, width - used);
+    const align = props.aligns[i] || "left";
+    const lead = align === "right" ? pad : align === "center" ? Math.floor(pad / 2) : 0;
+    const trail = pad - lead;
+    children.push(<span style={{ fg: ui.border }}>{"│ "}</span>);
+    if (lead) children.push(" ".repeat(lead));
+    if (props.header) {
+      children.push(<span style={{ fg: ui.primary }}><b>{renderSpans(shown)}</b></span>);
+    } else {
+      children.push(renderSpans(shown));
+    }
+    if (trail) children.push(" ".repeat(trail));
+    children.push(" ");
+  });
+  children.push(<span style={{ fg: ui.border }}>{"│"}</span>);
+  return <text>{children}</text>;
+}
+
+function TableBlock(props: { ln: any }) {
+  const headers = (props.ln.headers || []) as Inline[][];
+  const rows = (props.ln.rows || []) as Inline[][][];
+  const aligns = (props.ln.aligns || []) as TableAlign[];
+  const maxTotal = Math.max(40, (process.stdout?.columns || 96) - 10);
+  const widths = tableWidths(headers, rows, maxTotal);
+  const rule = (left: string, mid: string, right: string) =>
+    left + widths.map((w) => "─".repeat(w + 2)).join(mid) + right;
+  return (
+    <box flexDirection="column" marginTop={1} marginBottom={1}>
+      <text fg={ui.border}>{rule("┌", "┬", "┐")}</text>
+      <TableRow cells={headers} widths={widths} aligns={aligns} header />
+      <text fg={ui.border}>{rule("├", "┼", "┤")}</text>
+      {rows.map((row) => <TableRow cells={row} widths={widths} aligns={aligns} />)}
+      <text fg={ui.border}>{rule("└", "┴", "┘")}</text>
+    </box>
+  );
+}
+
 export function Md(props: { md: string }) {
   const lines = parseMarkdown(props.md);
   return (
@@ -241,6 +401,8 @@ export function Md(props: { md: string }) {
             return <text fg={ui.fgDim} paddingLeft={1}>{"│ "}{renderSpans(ln.spans)}</text>;
           case "rule":
             return <text fg={ui.border}>{"─".repeat(40)}</text>;
+          case "table":
+            return <TableBlock ln={ln} />;
           case "code": {
             const rows = highlightCode(ln.code, ln.lang);
             return (

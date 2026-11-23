@@ -1,16 +1,48 @@
 const { createOpenAICompatProvider } = require('./openai-compat');
 const { getApiKey } = require('../config/settings');
+const { ensureFreshAuth, credentialFor } = require('../auth');
 
 function getKey() {
+  const cred = credentialFor('google');
+  if (cred && cred.type === 'oauth' && cred.accessToken) return cred.accessToken;
   return getApiKey('google') || process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
 }
 
+/**
+ * @returns {Object<string, string>}
+ */
+function getHeaders() {
+  const cred = credentialFor('google');
+  const project = (cred && cred.projectId) ||
+    process.env.LOOM_GOOGLE_PROJECT_ID ||
+    process.env.GOOGLE_CLOUD_PROJECT ||
+    process.env.GOOGLE_CLOUD_PROJECT_ID;
+  /** @type {Object<string, string>} */
+  const headers = {};
+  if (project) headers['x-goog-user-project'] = project;
+  return headers;
+}
+
+const compat = createOpenAICompatProvider({
+  getKey,
+  providerId: 'google',
+  envKeyHint: 'GOOGLE',
+  getHeaders,
+});
+
+async function chat(messages, options = {}) {
+  await ensureFreshAuth('google');
+  return compat.chat(messages, options);
+}
+
+async function stream(messages, options = {}, onDelta, onReasoning) {
+  await ensureFreshAuth('google');
+  return compat.stream(messages, options, onDelta, onReasoning);
+}
+
 const provider = {
-  ...createOpenAICompatProvider({
-    getKey,
-    providerId: 'google',
-    envKeyHint: 'GOOGLE',
-  }),
+  chat,
+  stream,
   models: [
   // ── Gemini 4 / 3.x (current) ──
   { id: 'gemini-4-argon', name: 'Gemini 4 Argon', provider: 'google', tags: ['frontier', 'reasoning'], context: 1048576, priceIn: 2, priceOut: 10 },

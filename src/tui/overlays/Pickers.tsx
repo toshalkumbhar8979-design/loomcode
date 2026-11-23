@@ -11,6 +11,8 @@ import {
   vimMode, toggleVim,
 } from "../store.ts";
 import { loadConfig, saveConfig, getBaseUrl, setBaseUrl } from "../../config/settings.js";
+import { saveCredential } from "../../auth/store.js";
+import { hasAuth } from "../../auth/index.js";
 import * as kbs from "../keybinds.ts";
 
 const ui = palette();
@@ -52,14 +54,25 @@ export function openModelPicker() {
 
 export function openKeyModal(provider: string) {
   const cur = (loadConfig().apiKeys || {})[provider] || "";
+  const exists = !!cur || hasAuth(provider);
   openModal({
     type: "input", title: "API key for " + (PROVIDER_LABELS[provider] || provider),
-    placeholder: cur ? "(already set — leave blank to keep)" : "Paste your key",
+    placeholder: exists ? "(already set — leave blank to keep)" : "Paste your key",
     isKey: true,
     onPick(val: string) {
-      const c = loadConfig(); c.apiKeys = c.apiKeys || {};
-      if (val.trim()) { c.apiKeys[provider] = val.trim(); saveConfig(c); showToast("Key saved for " + provider, "ok"); }
-      else showToast("Using env var " + provider.toUpperCase() + "_API_KEY");
+      if (val.trim()) {
+        try {
+          saveCredential(provider, {
+            type: "api", method: "api", apiKey: val.trim(),
+            label: (PROVIDER_LABELS[provider] || provider) + " API key",
+          });
+          const c = loadConfig();
+          if (c.apiKeys && c.apiKeys[provider]) { delete c.apiKeys[provider]; saveConfig(c); }
+          showToast("Key saved for " + provider, "ok");
+        } catch (err: any) {
+          showToast("Could not save key: " + (err?.message || String(err)), "error");
+        }
+      } else showToast("Using env var " + provider.toUpperCase() + "_API_KEY");
       refreshProviderState(); closeModal();
     },
   });
