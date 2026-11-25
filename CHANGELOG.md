@@ -4,6 +4,37 @@ All notable changes to **Loom Code** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.6] - 2026-11-25
+
+### Added
+- **OpenCode-style `loom auth login` flow.** The CLI now uses Clack prompts
+  with an `Add credential` intro, hinted provider and login-method pickers, an
+  `Other` provider entry, browser/device authorization progress spinners, and a
+  clean post-login summary. `-p/--provider` and `-m/--method` skip the pickers.
+- **One-time Google browser sign-in setup.** Selecting Google's account method
+  asks for a Desktop-app OAuth client, stores the client ID and secret in the
+  encrypted vault, and opens Google's consent page. Environment variables and
+  the API-key method still work.
+
+### Changed
+- **Successful sign-in now activates the provider and a usable model.** The
+  vault credential is saved, the active provider/model is written to config,
+  and the CLI prints how to start using it immediately.
+
+### Fixed
+- **`loom auth login` from the npm launcher now opens the sign-in list.** The
+  Bun entry point only routed `acp`/`graph` to the CLI, so `loom auth ...` fell
+  through to the fullscreen TUI and never showed the provider list. `auth` and
+  `add` now run through the CLI; the provider/method pickers also accept 1-9
+  and fall back to a numbered list when raw-terminal keys are unavailable.
+- **Piped API keys are masked.** Non-interactive `loom auth login` input no
+  longer echoes the key to the terminal or CI logs.
+
+## [1.7.5] - 2026-11-24
+
+### Changed
+- Version bump for the npm release.
+
 ## [1.7.4] - 2026-11-24
 
 ### Added

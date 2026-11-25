@@ -10,8 +10,7 @@ const ANTHROPIC_TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token';
 const ANTHROPIC_REDIRECT_URI = 'https://console.anthropic.com/oauth/code/callback';
 const OPENROUTER_AUTHORIZE_URL = 'https://openrouter.ai/auth';
 const OPENROUTER_TOKEN_URL = 'https://openrouter.ai/api/v1/auth/keys';
-const GOOGLE_CLIENT_ID = process.env.LOOM_GOOGLE_OAUTH_CLIENT_ID || '';
-const GOOGLE_CLIENT_SECRET = process.env.LOOM_GOOGLE_OAUTH_CLIENT_SECRET || '';
+const GOOGLE_CLIENT_PROVIDER = '__loom_google_oauth_client';
 const GOOGLE_AUTHORIZE_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GOOGLE_SCOPES = [
@@ -237,14 +236,44 @@ function expiresAtFrom(tokens) {
   return Number.isFinite(seconds) && seconds > 0 ? Date.now() + seconds * 1000 : undefined;
 }
 
+function getGoogleClient() {
+  const envId = process.env.LOOM_GOOGLE_OAUTH_CLIENT_ID || '';
+  const envSecret = process.env.LOOM_GOOGLE_OAUTH_CLIENT_SECRET || '';
+  if (envId && envSecret) return { clientId: envId, clientSecret: envSecret };
+  try {
+    const store = require('./store');
+    const cred = store.getCredential(GOOGLE_CLIENT_PROVIDER);
+    if (!cred || !cred.apiKey) return null;
+    const parsed = JSON.parse(cred.apiKey);
+    if (!parsed || !parsed.clientId || !parsed.clientSecret) return null;
+    return { clientId: String(parsed.clientId), clientSecret: String(parsed.clientSecret) };
+  } catch {
+    return null;
+  }
+}
+
+function saveGoogleClient(clientId, clientSecret) {
+  const cleanId = String(clientId || '').trim();
+  const cleanSecret = String(clientSecret || '').trim();
+  if (!cleanId || !cleanSecret) throw new Error('A Google OAuth client ID and secret are required.');
+  const store = require('./store');
+  store.saveCredential(GOOGLE_CLIENT_PROVIDER, {
+    type: 'api',
+    method: 'oauth-client',
+    apiKey: JSON.stringify({ clientId: cleanId, clientSecret: cleanSecret }),
+    label: 'Google OAuth client',
+  });
+  return { clientId: cleanId, clientSecret: cleanSecret };
+}
+
 function googleOAuthConfigured() {
-  return !!(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET);
+  return !!getGoogleClient();
 }
 
 function googleOAuthMissingError() {
   return new Error(
-    'Google account sign-in needs an OAuth client. Set LOOM_GOOGLE_OAUTH_CLIENT_ID and ' +
-    'LOOM_GOOGLE_OAUTH_CLIENT_SECRET, or use "loom auth login google --method api".'
+    'Google account sign-in needs an OAuth client. Run "loom auth login google" to add one, ' +
+    'or set LOOM_GOOGLE_OAUTH_CLIENT_ID and LOOM_GOOGLE_OAUTH_CLIENT_SECRET.'
   );
 }
 
@@ -309,12 +338,13 @@ async function exchangeAnthropic(code, verifier) {
  * @returns {Promise<Partial<import('./store').StoredCredential>>}
  */
 async function exchangeGoogle(code, verifier, redirectUri) {
-  if (!googleOAuthConfigured()) throw googleOAuthMissingError();
+  const client = getGoogleClient();
+  if (!client) throw googleOAuthMissingError();
   const body = await postForm(GOOGLE_TOKEN_URL, {
     grant_type: 'authorization_code',
     code,
-    client_id: GOOGLE_CLIENT_ID,
-    client_secret: GOOGLE_CLIENT_SECRET,
+    client_id: client.clientId,
+    client_secret: client.clientSecret,
     redirect_uri: redirectUri,
     code_verifier: verifier,
   });
@@ -330,6 +360,7 @@ async function exchangeGoogle(code, verifier, redirectUri) {
     scopes: typeof body.scope === 'string' ? body.scope.split(/\s+/).filter(Boolean) : undefined,
     email: typeof claims.email === 'string' ? claims.email : undefined,
     label: typeof claims.email === 'string' ? claims.email : 'Google account',
+    clientId: client.clientId,
   };
 }
 
@@ -470,11 +501,12 @@ async function refreshCredential(provider, cred) {
     };
   }
   if (provider === 'google') {
-    if (!googleOAuthConfigured()) throw googleOAuthMissingError();
+    const client = getGoogleClient();
+    if (!client) throw googleOAuthMissingError();
     const body = await postForm(GOOGLE_TOKEN_URL, {
       grant_type: 'refresh_token',
-      client_id: cred.clientId || GOOGLE_CLIENT_ID,
-      client_secret: GOOGLE_CLIENT_SECRET,
+      client_id: cred.clientId || client.clientId,
+      client_secret: client.clientSecret,
       refresh_token: cred.refreshToken,
     });
     if (!body.access_token) throw new Error('Google token refresh did not return an access token.');
@@ -501,11 +533,11 @@ module.exports = {
   ANTHROPIC_REDIRECT_URI,
   OPENROUTER_AUTHORIZE_URL,
   OPENROUTER_TOKEN_URL,
-  GOOGLE_CLIENT_ID,
-  GOOGLE_CLIENT_SECRET,
   GOOGLE_AUTHORIZE_URL,
   GOOGLE_TOKEN_URL,
   GOOGLE_SCOPES,
+  getGoogleClient,
+  saveGoogleClient,
   googleOAuthConfigured,
   COPILOT_CLIENT_ID,
   COPILOT_DEVICE_URL,

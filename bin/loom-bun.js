@@ -74,7 +74,7 @@ process.title = "loom-code";
     const args = process.argv.slice(2);
     const coreMode = args.includes("--basic") || args.includes("-p") || args.includes("--print")
       || args.includes("--help") || args.includes("-h") || args.includes("--version") || args.includes("-v")
-      || ["acp", "graph"].includes(args[0]);
+      || ["acp", "auth", "add", "graph"].includes(args[0]);
     if (!coreMode) {
       await import("@opentui/solid/preload");
       await import("../src/tui-open.tsx");

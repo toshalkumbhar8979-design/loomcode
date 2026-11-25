@@ -149,13 +149,15 @@ protected with DPAPI for the current user, and scrypt is used when
 `loom auth list` redacts secrets.
 
 - **API key accounts** work for every provider: `loom auth login openai`.
+  Run `loom auth login` for the interactive provider menu; `-p/--provider` and
+  `-m/--method` skip the pickers for scripts.
 - **OAuth accounts** are available where supported: OpenRouter, Anthropic
   Claude, ChatGPT/Codex, Google Gemini, and GitHub Copilot (device flow).
   `loom auth login openai` offers ChatGPT or an API key; `anthropic` offers a
-  browser sign-in or an API key. Google browser sign-in requires your own OAuth
-  client via `LOOM_GOOGLE_OAUTH_CLIENT_ID` and
-  `LOOM_GOOGLE_OAUTH_CLIENT_SECRET`; otherwise `loom auth login google` uses an
-  API key.
+  browser sign-in or an API key. Google browser sign-in asks for a Desktop-app
+  OAuth client once and stores it in the encrypted vault, or reads
+  `LOOM_GOOGLE_OAUTH_CLIENT_ID` and `LOOM_GOOGLE_OAUTH_CLIENT_SECRET`; the API key
+  method remains available.
 - OAuth access tokens refresh automatically before a request. A failed refresh
   asks you to run `loom auth login <provider>` again.
 - `LOOM_AUTH_KEY` protects the vault with a passphrase (scrypt) instead of the

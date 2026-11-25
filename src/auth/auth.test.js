@@ -12,6 +12,7 @@ import path from "node:path";
 const dirs = [];
 let store;
 let auth;
+let oauth;
 let providers;
 let settings;
 let codex;
@@ -29,8 +30,11 @@ function freshDir() {
 beforeEach(() => {
   freshDir();
   delete process.env.LOOM_AUTH_KEY;
+  delete process.env.LOOM_GOOGLE_OAUTH_CLIENT_ID;
+  delete process.env.LOOM_GOOGLE_OAUTH_CLIENT_SECRET;
   store = require("./store");
   auth = require("./index");
+  oauth = require("./oauth");
   providers = require("./providers");
   settings = require("../config/settings");
   codex = require("../providers/codex");
@@ -75,6 +79,19 @@ test("saves and reads an API credential through the encrypted vault", () => {
   expect(listed[0].provider).toBe("opencode");
   expect(listed[0].hasApiKey).toBe(true);
   expect(listed[0].apiKey).toBeUndefined();
+});
+
+test("stores a Google OAuth client encrypted and keeps it out of auth list", () => {
+  const clientId = "1234567890-abcdef.apps.googleusercontent.com";
+  const secret = "google-oauth-client-secret";
+  oauth.saveGoogleClient(clientId, secret);
+
+  expect(oauth.googleOAuthConfigured()).toBe(true);
+  expect(oauth.getGoogleClient()).toEqual({ clientId, clientSecret: secret });
+  expect(store.listCredentials()).toHaveLength(0);
+
+  const raw = fs.readFileSync(path.join(process.env.LOOM_CONFIG_DIR, "auth.json"), "utf8");
+  expect(raw).not.toContain(secret);
 });
 
 test("replaces stale OAuth secrets when switching to an API key", () => {
@@ -138,6 +155,18 @@ test("provider menu is stable and aliases normalize", () => {
   expect(providers.normalizeProviderId("claude")).toBe("anthropic");
   expect(providers.normalizeProviderId("gemini")).toBe("google");
   expect(providers.normalizeProviderId("copilot")).toBe("github-copilot");
+});
+
+test("npm Bun entry point routes auth to the CLI, not the TUI", () => {
+  const root = path.join(__dirname, "..", "..");
+  const result = Bun.spawnSync(
+    [process.execPath, path.join(root, "bin", "loom-bun.js"), "auth", "providers"],
+    { cwd: root, env: { ...process.env }, stdout: "pipe", stderr: "pipe" }
+  );
+  const out = result.stdout.toString();
+  expect(result.exitCode).toBe(0);
+  expect(out).toContain("OpenCode (opencode)");
+  expect(out).not.toContain("Loom Code");
 });
 
 test("OAuth refresh timing and provider headers", () => {

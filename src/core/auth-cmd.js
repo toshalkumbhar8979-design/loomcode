@@ -1,4 +1,4 @@
-const { login } = require('../auth/login');
+const { login, canUseUI, uiPrompts } = require('../auth/login');
 const store = require('../auth/store');
 const { normalizeProviderId, getAuthProvider } = require('../auth/providers');
 const { loadConfig, saveConfig } = require('../config/settings');
@@ -16,7 +16,8 @@ function usage() {
     '  loom auth logout --all       Remove every stored credential',
     '',
     'Login options:',
-    '  --method <id>                Force a method (api, chatgpt, oauth, device)',
+    '  -p, --provider <id>          Provider to sign in to (skips selection)',
+    '  -m, --method <id>            Force a method (api, chatgpt, oauth, device)',
     '  --no-browser                 Print the URL instead of opening a browser',
     '  --key-stdin                  Read an API key from stdin',
   ].join('\n');
@@ -78,9 +79,19 @@ async function activate(result) {
     if (next) config.model[provider] = next;
   }
   saveConfig(config);
-  const label = result.credential && (result.credential.email || result.credential.label);
-  console.log('Signed in to ' + result.label + (label ? ' (' + label + ')' : '') + '.');
-  console.log('Active provider: ' + provider + (config.model[provider] ? ' - model ' + config.model[provider] : ''));
+  const account = result.credential && (result.credential.email || result.credential.label);
+  const label = result.label + (account ? ' (' + account + ')' : '');
+  const model = config.model[provider];
+  if (canUseUI()) {
+    const ui = await uiPrompts();
+    ui.log.success('Signed in to ' + label);
+    ui.log.info('Active provider: ' + provider + (model ? ' - model ' + model : ''));
+    ui.log.info('Try: loom "hello"');
+    ui.outro('Done.');
+    return;
+  }
+  console.log('Signed in to ' + label + '.');
+  console.log('Active provider: ' + provider + (model ? ' - model ' + model : ''));
   console.log('Try: loom "hello"');
 }
 
@@ -90,7 +101,9 @@ function parseLoginArgs(args) {
     const arg = args[i];
     if (arg === '--no-browser' || arg === '--headless') out.noBrowser = true;
     else if (arg === '--key-stdin') out.keyStdin = true;
-    else if (arg === '--method') out.method = args[++i] || null;
+    else if (arg === '--provider' || arg === '-p') out.provider = args[++i] || null;
+    else if (arg.startsWith('--provider=')) out.provider = arg.slice('--provider='.length);
+    else if (arg === '--method' || arg === '-m') out.method = args[++i] || null;
     else if (arg.startsWith('--method=')) out.method = arg.slice('--method='.length);
     else if (!out.provider && !arg.startsWith('-')) out.provider = arg;
   }
@@ -99,7 +112,7 @@ function parseLoginArgs(args) {
 
 async function loginCmd(args) {
   const opts = parseLoginArgs(args);
-  if (!opts.provider && !process.stdin.isTTY) {
+  if (!opts.provider && !canUseUI()) {
     throw new Error('No provider supplied. Use "loom auth login <provider>".');
   }
   let apiKey = null;
@@ -115,7 +128,7 @@ async function loginCmd(args) {
     apiKey: apiKey || undefined,
   });
   if (!result) {
-    console.log('Sign-in cancelled.');
+    if (!canUseUI()) console.log('Sign-in cancelled.');
     return;
   }
   await activate(result);

@@ -421,6 +421,7 @@ function getApiKeyCredential(provider) {
 function listCredentials() {
   const vault = readVault();
   return Object.values(vault.credentials)
+    .filter((c) => !String(c.provider).startsWith('__loom_'))
     .sort((a, b) => String(a.provider).localeCompare(String(b.provider)))
     .map((c) => {
       const { apiKey, accessToken, refreshToken, ...rest } = c;

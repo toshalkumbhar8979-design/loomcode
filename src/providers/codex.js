@@ -131,7 +131,7 @@ async function authHeaders() {
     'OpenAI-Beta': 'responses=experimental',
     originator: 'codex_cli_rs',
     'session_id': SESSION_ID,
-    'User-Agent': 'loom-code/1.7.4',
+    'User-Agent': 'loom-code/1.7.6',
     'x-codex-exclude': 'tools',
   };
   const accountId = accountIdFor(cred);

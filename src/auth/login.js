@@ -1,19 +1,57 @@
+const fs = require('fs');
 const readline = require('readline');
 const oauth = require('./oauth');
 const store = require('./store');
 const { getAuthProvider, getMethod } = require('./providers');
 
-const GREEN = '\x1b[32m';
-const DIM = '\x1b[2m';
 const BOLD = '\x1b[1m';
-const CYAN = '\x1b[36m';
 const RESET = '\x1b[0m';
 
 function plainLine(text) {
   process.stdout.write(text + '\n');
 }
 
-async function promptLine(question) {
+function canUseUI() {
+  return Boolean(
+    process.stdin.isTTY &&
+    process.stdout.isTTY &&
+    typeof process.stdin.setRawMode === 'function'
+  );
+}
+
+let promptsPromise = null;
+
+function uiPrompts() {
+  if (!promptsPromise) promptsPromise = import('@clack/prompts');
+  return promptsPromise;
+}
+
+function abortError(message) {
+  const err = new Error(message || 'Sign-in cancelled.');
+  err.name = 'AbortError';
+  return err;
+}
+
+// Piped auth input (tests, scripts, `printf '1\nkey\n' | loom auth login`)
+// must survive multiple prompts. A fresh readline per prompt discards the
+// already-buffered remaining lines, so non-TTY input is read once and split.
+let pipedLines = null;
+let pipedLineIndex = 0;
+
+function nextPipedLine() {
+  if (pipedLines === null) {
+    try { pipedLines = fs.readFileSync(0, 'utf8').split(/\r?\n/); } catch { pipedLines = []; }
+  }
+  return pipedLines[pipedLineIndex++] ?? '';
+}
+
+async function promptLine(question, opts) {
+  if (!process.stdin.isTTY) {
+    process.stdout.write(question);
+    const answer = nextPipedLine().trim();
+    process.stdout.write((opts && opts.secret ? '********' : answer) + '\n');
+    return answer;
+  }
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
   try {
     return await new Promise((resolve) => rl.question(question, (answer) => resolve(answer.trim())));
@@ -22,178 +60,88 @@ async function promptLine(question) {
   }
 }
 
+async function promptText(question, opts) {
+  if (!canUseUI()) return promptLine(question);
+  const p = await uiPrompts();
+  const options = {
+    message: String(question).replace(/:\s*$/, ''),
+    placeholder: opts && opts.placeholder,
+  };
+  if (opts && opts.validate) options.validate = opts.validate;
+  const answer = await p.text(options);
+  if (p.isCancel(answer)) throw abortError();
+  return String(answer).trim();
+}
+
 async function promptSecret(question) {
-  if (!process.stdin.isTTY || typeof process.stdin.setRawMode !== 'function') {
-    return promptLine(question);
-  }
-  process.stdout.write(question);
-  const stdin = process.stdin;
-  const previousRaw = stdin.isRaw;
-  stdin.setRawMode(true);
-  stdin.resume();
-  return new Promise((resolve, reject) => {
-    let value = '';
-    function cleanup() {
-      stdin.removeListener('data', onData);
-      process.stdout.write('\n');
-      try { stdin.setRawMode(previousRaw || false); } catch {}
-      stdin.pause();
-    }
-    function onData(buf) {
-      const text = buf.toString('utf8');
-      for (const ch of text) {
-        if (ch === '\u0003') {
-          cleanup();
-          const err = new Error('Cancelled.');
-          err.name = 'AbortError';
-          reject(err);
-          return;
-        }
-        if (ch === '\r' || ch === '\n') {
-          cleanup();
-          resolve(value.trim());
-          return;
-        }
-        if (ch === '\u007f' || ch === '\b') {
-          if (value.length) {
-            value = value.slice(0, -1);
-            process.stdout.write('\b \b');
-          }
-          continue;
-        }
-        if (ch >= ' ') {
-          value += ch;
-          process.stdout.write('*');
-        }
-      }
-    }
-    stdin.on('data', onData);
+  if (!canUseUI()) return promptLine(question, { secret: true });
+  const p = await uiPrompts();
+  const answer = await p.password({
+    message: String(question).replace(/:\s*$/, ''),
+    mask: '*',
+    validate: (value) => (value && String(value).trim() ? undefined : 'Enter a value'),
   });
+  if (p.isCancel(answer)) throw abortError();
+  return String(answer).trim();
+}
+
+async function numberedSelect(items, opts) {
+  plainLine('');
+  plainLine(BOLD + opts.title + RESET);
+  plainLine('');
+  items.forEach((item, i) => {
+    const rec = item.recommended ? ' (recommended)' : '';
+    const desc = item.description ? ' - ' + item.description : '';
+    plainLine('  ' + String(i + 1).padStart(2) + ') ' + item.label + rec + desc);
+  });
+  plainLine('');
+  const answer = await promptLine('Select 1-' + items.length + ' (Enter for 1): ');
+  if (answer === '') return items[0];
+  const n = Number(answer);
+  return Number.isInteger(n) && n >= 1 && n <= items.length ? items[n - 1] : null;
 }
 
 /**
  * @param {Array<{ id: string, label: string, description?: string, connected?: boolean, recommended?: boolean }>} items
- * @param {{ title: string, searchable?: boolean, footer?: string }} opts
+ * @param {{ title: string, maxItems?: number, initialValue?: string }} opts
  * @returns {Promise<{ id: string, label: string } | null>}
  */
-function selectItem(items, opts) {
-  if (!items.length) return Promise.resolve(null);
-  if (!process.stdin.isTTY || !process.stdout.isTTY || typeof process.stdin.setRawMode !== 'function') {
-    return Promise.resolve(items[0]);
-  }
-  return new Promise((resolve) => {
-    const stdin = process.stdin;
-    const stdout = process.stdout;
-    const previousRaw = stdin.isRaw;
-    let query = '';
-    let selected = 0;
-    let rendered = 0;
-    let done = false;
-    const searchable = opts.searchable !== false;
-    readline.emitKeypressEvents(stdin);
-    stdin.setRawMode(true);
-    stdin.resume();
-    stdout.write('\x1b[?25l');
-
-    function filtered() {
-      if (!searchable || !query) return items;
-      const q = query.toLowerCase();
-      return items.filter((item) =>
-        (item.label + ' ' + item.id + ' ' + (item.description || '')).toLowerCase().includes(q)
-      );
-    }
-
-    function frame() {
-      const list = filtered();
-      if (selected >= list.length) selected = Math.max(0, list.length - 1);
-      const width = Math.max(40, Math.min(100, (stdout.columns || 80) - 2));
-      const lines = [];
-      lines.push(BOLD + opts.title + RESET);
-      if (searchable) lines.push(CYAN + '> ' + RESET + (query || DIM + 'type to search' + RESET));
-      if (!list.length) {
-        lines.push(DIM + '  No matching providers.' + RESET);
-      } else {
-        const maxRows = 12;
-        let start = Math.max(0, Math.min(selected - Math.floor(maxRows / 2), list.length - maxRows));
-        const end = Math.min(list.length, start + maxRows);
-        for (let i = start; i < end; i++) {
-          const item = list[i];
-          const marker = i === selected ? CYAN + '>' + RESET : ' ';
-          const dot = item.connected ? GREEN + '●' + RESET : DIM + '○' + RESET;
-          const rec = item.recommended ? '  ' + GREEN + 'recommended' + RESET : '';
-          const desc = item.description ? '  ' + DIM + '- ' + item.description + RESET : '';
-          const line = marker + ' ' + dot + ' ' + item.label + rec + desc;
-          lines.push(line.length > width + 80 ? line.slice(0, width + 80) : line);
-        }
-      }
-      const footer = opts.footer || '↑/↓ to select · Enter: confirm · Type to search · Esc: cancel';
-      lines.push(DIM + footer + RESET);
-      if (rendered > 0) {
-        stdout.write('\r\x1b[' + rendered + 'A\x1b[0J');
-      }
-      stdout.write(lines.join('\n') + '\n');
-      rendered = lines.length;
-    }
-
-    function cleanup() {
-      if (done) return;
-      done = true;
-      stdin.removeListener('keypress', onKey);
-      try { stdin.setRawMode(previousRaw || false); } catch {}
-      if (rendered > 0) {
-        stdout.write('\r\x1b[' + rendered + 'A\x1b[0J');
-      }
-      stdout.write('\x1b[?25h');
-      stdin.pause();
-    }
-
-    function finish(value) {
-      cleanup();
-      resolve(value);
-    }
-
-    function onKey(str, key) {
-      if (!key) return;
-      if (key.ctrl && key.name === 'c') return finish(null);
-      if (key.name === 'escape') return finish(null);
-      if (key.name === 'up') {
-        const list = filtered();
-        if (list.length) selected = (selected - 1 + list.length) % list.length;
-        frame();
-        return;
-      }
-      if (key.name === 'down') {
-        const list = filtered();
-        if (list.length) selected = (selected + 1) % list.length;
-        frame();
-        return;
-      }
-      if (key.name === 'return' || key.name === 'enter') {
-        const list = filtered();
-        return finish(list[selected] || null);
-      }
-      if (searchable && (key.name === 'backspace' || key.name === 'delete')) {
-        query = query.slice(0, -1);
-        selected = 0;
-        frame();
-        return;
-      }
-      if (searchable && !key.ctrl && !key.meta && str && str >= ' ' && str.length === 1) {
-        query += str;
-        selected = 0;
-        frame();
-      }
-    }
-
-    stdin.on('keypress', onKey);
-    frame();
+async function selectItem(items, opts) {
+  if (!items.length) return null;
+  if (!canUseUI()) return numberedSelect(items, opts);
+  const p = await uiPrompts();
+  const options = items.map((item) => {
+    const hints = [];
+    if (item.connected) hints.push('connected');
+    if (item.recommended) hints.push('recommended');
+    else if (item.description) hints.push(item.description);
+    return {
+      value: item.id,
+      label: item.label,
+      hint: hints.length ? hints.join(' - ') : undefined,
+    };
   });
+  const answer = await p.select({
+    message: opts.title,
+    options,
+    maxItems: opts.maxItems || 8,
+    initialValue: opts.initialValue || items[0].id,
+  });
+  if (p.isCancel(answer)) {
+    p.cancel('Sign-in cancelled.');
+    return null;
+  }
+  return items.find((item) => item.id === answer) || null;
 }
 
 async function chooseProvider() {
   const { getMenuProviders } = require('./providers');
   const providers = getMenuProviders();
-  const connected = new Set(store.listCredentials().map((c) => c.provider));
+  // An unreadable/corrupt vault must not hide the provider list. Connected
+  // markers are a nicety; sign-in can still repair the vault afterwards.
+  let credentials = [];
+  try { credentials = store.listCredentials(); } catch {}
+  const connected = new Set(credentials.map((c) => c.provider));
   const items = providers.map((p) => ({
     id: p.id,
     label: p.label,
@@ -201,9 +149,27 @@ async function chooseProvider() {
     connected: connected.has(p.provider),
     recommended: !!p.recommended,
   }));
-  const picked = await selectItem(items, { title: 'Add credential · Select a provider' });
+  items.push({
+    id: 'other',
+    label: 'Other',
+    description: 'Enter a custom provider id',
+    connected: false,
+    recommended: false,
+  });
+  const picked = await selectItem(items, { title: 'Select provider' });
   if (!picked) return null;
-  return getAuthProvider(picked.id);
+  if (picked.id !== 'other') return getAuthProvider(picked.id);
+  const id = await promptText('Provider id: ', {
+    placeholder: 'provider-id',
+    validate: (value) => {
+      if (!value) return 'Enter a provider id';
+      if (!/^[a-z0-9][a-z0-9-]*$/.test(String(value))) return 'Use lowercase letters, numbers, and hyphens';
+      return undefined;
+    },
+  });
+  const normalized = String(id || '').replace(/^@ai-sdk\//, '');
+  if (!normalized) return null;
+  return getAuthProvider(normalized);
 }
 
 async function chooseMethod(provider) {
@@ -213,11 +179,7 @@ async function chooseMethod(provider) {
     label: m.label,
     description: m.description,
   }));
-  const picked = await selectItem(items, {
-    title: 'Add credential · ' + provider.label,
-    searchable: false,
-    footer: '↑/↓ to select · Enter: confirm · Esc: cancel',
-  });
+  const picked = await selectItem(items, { title: 'Login method' });
   if (!picked) return null;
   return getMethod(provider, picked.id);
 }
@@ -229,22 +191,94 @@ function printUrl(url) {
   plainLine('');
 }
 
+async function showUrl(url, opts) {
+  if (!canUseUI()) {
+    printUrl(url);
+    return;
+  }
+  const p = await uiPrompts();
+  const label = opts && opts.noBrowser ? 'Open this URL in your browser' : 'If the browser did not open';
+  p.log.info(label + ':\n' + url);
+}
+
+async function openAuthUrl(url, opts) {
+  await showUrl(url, opts);
+  if (opts && opts.noBrowser) return;
+  if (oauth.openBrowser(url)) return;
+  if (canUseUI()) {
+    const p = await uiPrompts();
+    p.log.warn('Could not open the browser automatically. Open the URL above.');
+  } else {
+    plainLine('Could not open the browser automatically. Open the URL above.');
+  }
+}
+
+async function ensureGoogleClient() {
+  const existing = oauth.getGoogleClient();
+  if (existing) return existing;
+  if (canUseUI()) {
+    const p = await uiPrompts();
+    p.note(
+      'Create a Desktop app OAuth client in Google Cloud Console:\n' +
+      'https://console.cloud.google.com/apis/credentials\n\n' +
+      'Enable the Generative Language API for the same project.\n' +
+      'If the consent screen is in Testing, add your account as a test user.\n' +
+      'Loom stores the client ID and secret in the encrypted auth vault.',
+      'Google sign-in setup'
+    );
+  } else {
+    plainLine('');
+    plainLine('Google sign-in needs a Desktop app OAuth client.');
+    plainLine('Create one at https://console.cloud.google.com/apis/credentials');
+    plainLine('');
+  }
+  const clientId = await promptText('Client ID: ', {
+    placeholder: '...apps.googleusercontent.com',
+    validate: (value) => {
+      if (!value) return 'Enter the OAuth client ID';
+      if (!/\.apps\.googleusercontent\.com$/i.test(String(value).trim())) {
+        return 'Expected a client ID ending in .apps.googleusercontent.com';
+      }
+      return undefined;
+    },
+  });
+  const clientSecret = await promptSecret('Client secret: ');
+  if (!clientId || !clientSecret) throw new Error('Google OAuth client details are required.');
+  if (!/\.apps\.googleusercontent\.com$/i.test(clientId)) {
+    throw new Error('Google OAuth client IDs end in .apps.googleusercontent.com.');
+  }
+  const client = oauth.saveGoogleClient(clientId, clientSecret);
+  if (!client) throw new Error('Could not save the Google OAuth client.');
+  if (canUseUI()) {
+    const p = await uiPrompts();
+    p.log.success('Google OAuth client saved.');
+  }
+  return client;
+}
+
 async function waitForOpenRouter(method, opts) {
   const pkce = oauth.createPkce();
   const state = oauth.randomState();
   const server = await oauth.startLoopbackServer({ state, requireState: false });
+  const ui = canUseUI() ? await uiPrompts() : null;
   try {
     const authUrl = oauth.buildUrl(oauth.OPENROUTER_AUTHORIZE_URL, {
       callback_url: server.redirectUri,
       code_challenge: pkce.challenge,
       code_challenge_method: 'S256',
     });
-    printUrl(authUrl);
-    if (!opts.noBrowser && !oauth.openBrowser(authUrl)) {
-      plainLine('Could not open the browser automatically. Open the URL above.');
+    await openAuthUrl(authUrl, opts);
+    const spin = ui ? ui.spinner() : null;
+    if (spin) spin.start('Waiting for OpenRouter authorization...');
+    try {
+      const { code } = await server.wait;
+      const credential = await oauth.exchangeOpenRouter(code, pkce.verifier, server.redirectUri);
+      if (spin) spin.stop('OpenRouter authorized.');
+      return credential;
+    } catch (err) {
+      if (spin) spin.error('OpenRouter authorization failed.');
+      throw err;
     }
-    const { code } = await server.wait;
-    return oauth.exchangeOpenRouter(code, pkce.verifier, server.redirectUri);
   } finally {
     server.close();
   }
@@ -261,27 +295,22 @@ async function waitForAnthropic(method, opts) {
     code_challenge_method: 'S256',
     state: pkce.verifier,
   });
-  printUrl(authUrl);
-  if (!opts.noBrowser && !oauth.openBrowser(authUrl)) {
-    plainLine('Could not open the browser automatically. Open the URL above.');
-  }
-  plainLine('After approving access, copy the code shown by Anthropic.');
-  const code = await promptLine('Authorization code: ');
+  await openAuthUrl(authUrl, opts);
+  const code = await promptText('Authorization code: ');
   if (!code) throw new Error('No authorization code was entered.');
   return oauth.exchangeAnthropic(code, pkce.verifier);
 }
 
 async function waitForGoogle(method, opts) {
-  if (!oauth.googleOAuthConfigured()) {
-    throw new Error('Google OAuth is not configured. Use "loom auth login google --method api" or set LOOM_GOOGLE_OAUTH_CLIENT_ID and LOOM_GOOGLE_OAUTH_CLIENT_SECRET.');
-  }
+  const client = await ensureGoogleClient();
   const pkce = oauth.createPkce();
   const state = oauth.randomState();
   const server = await oauth.startLoopbackServer({ state, path: '/oauth2callback' });
+  const ui = canUseUI() ? await uiPrompts() : null;
   try {
     const authUrl = oauth.buildUrl(oauth.GOOGLE_AUTHORIZE_URL, {
       response_type: 'code',
-      client_id: oauth.GOOGLE_CLIENT_ID,
+      client_id: client.clientId,
       redirect_uri: server.redirectUri,
       scope: oauth.GOOGLE_SCOPES.join(' '),
       access_type: 'offline',
@@ -291,15 +320,20 @@ async function waitForGoogle(method, opts) {
       code_challenge_method: 'S256',
       state,
     });
-    printUrl(authUrl);
-    if (!opts.noBrowser && !oauth.openBrowser(authUrl)) {
-      plainLine('Could not open the browser automatically. Open the URL above.');
+    await openAuthUrl(authUrl, opts);
+    const spin = ui ? ui.spinner() : null;
+    if (spin) spin.start('Waiting for Google authorization...');
+    try {
+      const { code } = await server.wait;
+      const credential = await oauth.exchangeGoogle(code, pkce.verifier, server.redirectUri);
+      if (spin) spin.stop('Google authorized.');
+      const project = process.env.LOOM_GOOGLE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT_ID;
+      if (project) credential.projectId = project;
+      return credential;
+    } catch (err) {
+      if (spin) spin.error('Google authorization failed.');
+      throw err;
     }
-    const { code } = await server.wait;
-    const credential = await oauth.exchangeGoogle(code, pkce.verifier, server.redirectUri);
-    const project = process.env.LOOM_GOOGLE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT_ID;
-    if (project) credential.projectId = project;
-    return credential;
   } finally {
     server.close();
   }
@@ -322,6 +356,7 @@ async function waitForChatGPT(method, opts) {
     }
     throw err;
   }
+  const ui = canUseUI() ? await uiPrompts() : null;
   try {
     const authUrl = oauth.buildUrl(oauth.OPENAI_ISSUER + '/oauth/authorize', {
       response_type: 'code',
@@ -335,12 +370,18 @@ async function waitForChatGPT(method, opts) {
       codex_cli_simplified_flow: 'true',
       originator: 'codex_cli_rs',
     });
-    printUrl(authUrl);
-    if (!opts.noBrowser && !oauth.openBrowser(authUrl)) {
-      plainLine('Could not open the browser automatically. Open the URL above.');
+    await openAuthUrl(authUrl, opts);
+    const spin = ui ? ui.spinner() : null;
+    if (spin) spin.start('Waiting for ChatGPT authorization...');
+    try {
+      const { code } = await server.wait;
+      const credential = await oauth.exchangeChatGPT(code, pkce.verifier, server.redirectUri);
+      if (spin) spin.stop('ChatGPT authorized.');
+      return credential;
+    } catch (err) {
+      if (spin) spin.error('ChatGPT authorization failed.');
+      throw err;
     }
-    const { code } = await server.wait;
-    return oauth.exchangeChatGPT(code, pkce.verifier, server.redirectUri);
   } finally {
     server.close();
   }
@@ -348,20 +389,35 @@ async function waitForChatGPT(method, opts) {
 
 async function waitForCopilot(method, opts) {
   const device = await oauth.startCopilotDeviceFlow();
-  plainLine('');
-  plainLine('Open this URL in your browser:');
-  plainLine('  ' + (device.verification_uri || 'https://github.com/login/device'));
-  plainLine('');
-  plainLine('Enter this code: ' + BOLD + (device.user_code || '') + RESET);
-  plainLine('');
-  if (!opts.noBrowser) oauth.openBrowser(device.verification_uri || 'https://github.com/login/device');
-  plainLine('Waiting for GitHub authorization...');
-  const githubToken = await oauth.pollCopilotDeviceFlow(device, { signal: opts.signal });
-  return oauth.exchangeCopilot(githubToken);
+  const url = device.verification_uri || 'https://github.com/login/device';
+  const code = device.user_code || '';
+  if (canUseUI()) {
+    const p = await uiPrompts();
+    p.note(url + '\n\nCode: ' + code, 'Authorize GitHub Copilot');
+  } else {
+    plainLine('');
+    plainLine('Open this URL in your browser:');
+    plainLine('  ' + url);
+    plainLine('');
+    plainLine('Enter this code: ' + BOLD + code + RESET);
+    plainLine('');
+  }
+  if (!opts.noBrowser) oauth.openBrowser(url);
+  const ui = canUseUI() ? await uiPrompts() : null;
+  const spin = ui ? ui.spinner() : null;
+  if (spin) spin.start('Waiting for GitHub authorization...');
+  try {
+    const githubToken = await oauth.pollCopilotDeviceFlow(device, { signal: opts.signal });
+    const credential = await oauth.exchangeCopilot(githubToken);
+    if (spin) spin.stop('GitHub Copilot authorized.');
+    return credential;
+  } catch (err) {
+    if (spin) spin.error('GitHub authorization failed.');
+    throw err;
+  }
 }
 
-async function login(providerInput, opts) {
-  const options = opts || {};
+async function loginFlow(providerInput, options) {
   let provider;
   if (providerInput) {
     provider = getAuthProvider(providerInput);
@@ -369,17 +425,12 @@ async function login(providerInput, opts) {
     provider = await chooseProvider();
     if (!provider) return null;
   }
-  // Google OAuth only exists when the user supplies their own OAuth client;
-  // without it, offer the working API-key method instead of a dead end.
-  const methods = provider.methods.filter((m) => m.kind !== 'google' || oauth.googleOAuthConfigured());
+  const methods = provider.methods.slice();
   let method = options.method ? getMethod({ ...provider, methods }, options.method) : null;
   if (options.method && !method) {
-    const why = provider.methods.some((m) => m.id === options.method && m.kind === 'google')
-      ? ' Google OAuth needs LOOM_GOOGLE_OAUTH_CLIENT_ID and LOOM_GOOGLE_OAUTH_CLIENT_SECRET, or use --method api.'
-      : '';
-    throw new Error('Unknown method "' + options.method + '" for ' + provider.label + '.' + why);
+    throw new Error('Unknown method "' + options.method + '" for ' + provider.label + '.');
   }
-  if (!method && methods.length > 1 && !process.stdin.isTTY) {
+  if (!method && methods.length > 1 && !canUseUI()) {
     throw new Error('Choose a method for ' + provider.label + ': ' +
       methods.map((m) => m.id).join(', ') + '.');
   }
@@ -389,7 +440,7 @@ async function login(providerInput, opts) {
   /** @type {Partial<import('./store').StoredCredential>} */
   let credential;
   if (method.kind === 'api') {
-    const key = options.apiKey || await promptSecret('Paste the ' + provider.label + ' API key: ');
+    const key = options.apiKey || await promptSecret('Enter your ' + provider.label + ' API key: ');
     if (!key) throw new Error('No API key was entered.');
     credential = {
       type: 'api',
@@ -419,10 +470,27 @@ async function login(providerInput, opts) {
   return { provider: provider.provider, label: provider.label, method: method.id, credential: saved };
 }
 
+async function login(providerInput, opts) {
+  const options = opts || {};
+  const ui = canUseUI() ? await uiPrompts() : null;
+  if (ui) ui.intro('Add credential');
+  try {
+    return await loginFlow(providerInput, options);
+  } catch (err) {
+    if (err && err.name === 'AbortError') {
+      if (ui) ui.cancel('Sign-in cancelled.');
+      return null;
+    }
+    throw err;
+  }
+}
+
 module.exports = {
   login,
   chooseProvider,
   chooseMethod,
   promptSecret,
   selectItem,
+  canUseUI,
+  uiPrompts,
 };

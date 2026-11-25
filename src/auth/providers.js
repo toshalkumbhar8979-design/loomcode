@@ -45,7 +45,7 @@ const MENU_PROVIDERS = [
     id: 'openai',
     provider: 'openai',
     label: 'OpenAI',
-    description: 'ChatGPT account or OpenAI API key',
+    description: 'ChatGPT Plus/Pro or API key',
     methods: [
       { id: 'chatgpt', label: 'ChatGPT account', kind: 'chatgpt', description: 'Sign in with your ChatGPT account' },
       { id: 'api', label: 'API key', kind: 'api', description: 'Paste an OpenAI API key', envHint: 'OPENAI_API_KEY' },
