@@ -670,6 +670,14 @@ export function App(props: { initialPrompt?: string; resumeSession?: string; aut
     switch (cmd) {
       case "help": showHelpText(); return;
       case "agents": showAgentsText(); return;
+      case "review": {
+        if (thinking()) { showToast("Wait for the current turn to finish before starting a review", "error"); return; }
+        const { buildReviewPrompt } = require("../core/review-command.js");
+        const target = args.join(" ").trim();
+        appendMessage({ role: "user", content: raw });
+        runPrompt(buildReviewPrompt(target), true, "reviewer");
+        return;
+      }
       case "subagents": loadSubagentHistory({ limit: 200 }); openModal({ type: "subagents" }); return;
       case "editor": appendMessage({ role: "system", content: plugin.editorCmd() }); return;
       case "context": {

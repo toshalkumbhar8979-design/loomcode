@@ -285,7 +285,9 @@ test("registry: specialist subagents (research/coder/reviewer/tester/web) + buil
   expect(agents.agentToolAllowed(all.research, "websearch")).toBe(true);
   expect(agents.agentToolAllowed(all.research, "write")).toBe(false);
   expect(agents.agentToolAllowed(all.reviewer, "bash")).toBe(true);
+  expect(agents.agentToolAllowed(all.reviewer, "websearch")).toBe(true);
   expect(agents.agentToolAllowed(all.reviewer, "edit")).toBe(false);
+  expect(all.reviewer.prompt).toContain("Determine the review target");
   expect(agents.agentToolAllowed(all.tester, "bash")).toBe(true);
   expect(agents.agentToolAllowed(all.tester, "write")).toBe(true);
   expect(agents.agentToolAllowed(all.coder, "write")).toBe(true);

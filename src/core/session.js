@@ -1,3 +1,5 @@
+const crypto = require('crypto');
+const path = require('path');
 const { ProviderRouter } = require('../providers');
 const { getModelMeta } = require('../providers');
 const { getToolDefinitions, getAllToolDefinitions, executeTool } = require('../tools');
@@ -38,6 +40,10 @@ const MAX_TRUNCATION_CONTINUES = 5;
 // Transient provider failures (network blip, 5xx, stream reset) retry the
 // model call this many times before the turn surfaces an error.
 const PROVIDER_RETRIES = 2;
+const TOOL_AGE_HEAD = 2000;
+const TOOL_AGE_TAIL = 400;
+const TOOL_AGE_RECENT = 12;
+const TOOL_RESULT_CACHE_MAX = 200;
 
 // Run an async mapper over items with a bounded number of in-flight calls.
 // The model may emit dozens of independent tool calls in one step; an
@@ -139,6 +145,7 @@ class Session {
     this.provider = new ProviderRouter();
     this.provider.init();
     this.messages = [];
+    this._toolResultCache = new Map();
     this.conversationId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     this.turnCount = 0;
     // Stable per-turn id used by the TUI to attach rendered parts to the FINAL
@@ -450,18 +457,66 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
   // Keep the most recent TOOL_RESULT_RECENT messages untouched so the cache
   // prefix and the model's working set stay stable.
   ageHistory(messages) {
-    const AGE_HEAD = 2000, AGE_TAIL = 400, RECENT = 12;
-    if (!messages || messages.length <= RECENT) return messages;
-    const cutoff = messages.length - RECENT;
+    if (!messages || messages.length <= TOOL_AGE_RECENT) return messages;
+    const cutoff = messages.length - TOOL_AGE_RECENT;
     return messages.map((m, i) => {
       if (i >= cutoff || m.role !== 'tool') return m;
       const text = typeof m.content === 'string' ? m.content : (m.content == null ? '' : JSON.stringify(m.content));
-      if (text.length <= AGE_HEAD + AGE_TAIL + 60) return m;
+      if (text.length <= TOOL_AGE_HEAD + TOOL_AGE_TAIL + 60) return m;
       return Object.assign({}, m, {
-        content: text.slice(0, AGE_HEAD) + '\n[…older tool result elided — re-read the file if still needed…]\n' + text.slice(-AGE_TAIL),
+        content: text.slice(0, TOOL_AGE_HEAD) + '\n[…older tool result elided — re-read the file if still needed…]\n' + text.slice(-TOOL_AGE_TAIL),
         _aged: true,
       });
     });
+  }
+
+  _toolResultKey(tc) {
+    const input = tc && tc.input ? tc.input : {};
+    if (tc.name === 'read') {
+      const filePath = path.resolve(String(input.filePath || ''));
+      const keyPath = process.platform === 'win32' ? filePath.toLowerCase() : filePath;
+      return 'read:' + JSON.stringify([keyPath, Number(input.offset) || 0, Number(input.limit) || 0]);
+    }
+    if (tc.name === 'grep') {
+      const dir = path.resolve(String(input.path || process.cwd()));
+      const keyDir = process.platform === 'win32' ? dir.toLowerCase() : dir;
+      return 'grep:' + JSON.stringify([String(input.pattern || ''), keyDir, String(input.include || '**/*')]);
+    }
+    if (tc.name === 'glob') {
+      const dir = path.resolve(String(input.path || process.cwd()));
+      const keyDir = process.platform === 'win32' ? dir.toLowerCase() : dir;
+      return 'glob:' + JSON.stringify([String(input.pattern || ''), keyDir]);
+    }
+    return null;
+  }
+
+  _dedupeToolResult(tc, text) {
+    const key = this._toolResultKey(tc);
+    if (!key) return { text, deduped: false };
+    const hash = crypto.createHash('sha1').update(String(text)).digest('hex');
+    const cache = this._toolResultCache;
+    const prev = cache.get(key);
+    if (prev && prev.hash === hash) {
+      const prior = this.messages.find((m) => m && m.role === 'tool' && m.toolCallId === prev.id);
+      if (prior && !prior._aged) {
+        const idx = this.messages.indexOf(prior);
+        const willAge = idx < this.messages.length - TOOL_AGE_RECENT &&
+          String(prior.content || '').length > TOOL_AGE_HEAD + TOOL_AGE_TAIL + 60;
+        if (!willAge) {
+          const target = tc.name === 'read'
+            ? String((tc.input && tc.input.filePath) || 'file')
+            : tc.name + ' query';
+          return {
+            text: `[unchanged: identical ${tc.name} result for ${target} was already returned earlier in this conversation. Reuse that result; re-run only if the file or query changed.]`,
+            deduped: true,
+          };
+        }
+      }
+    }
+    cache.delete(key);
+    cache.set(key, { id: tc.id, hash });
+    while (cache.size > TOOL_RESULT_CACHE_MAX) cache.delete(cache.keys().next().value);
+    return { text, deduped: false };
   }
 
   interrupt() {
@@ -758,6 +813,7 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
         ...keep,
       ];
       this._normalizeHistory();
+      this._toolResultCache.clear();
       this.compactCount = (this.compactCount || 0) + 1;
       this.lastCompact = { at: Date.now(), method: 'summary', removed: head.length };
       const result = { compacted: true, method: 'summary', removed: head.length, summary, tokensBefore: before, tokensAfter: this.estimateTokens() };
@@ -771,6 +827,7 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
       ...keep,
     ];
     this._normalizeHistory();
+    this._toolResultCache.clear();
     this.compactCount = (this.compactCount || 0) + 1;
     this.lastCompact = { at: Date.now(), method: 'truncate', removed: head.length };
     const result = { compacted: true, method: 'truncate', removed: head.length, summary: null, tokensBefore: before, tokensAfter: this.estimateTokens() };
@@ -1230,7 +1287,12 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
       });
 
       for (const { tc, outcome } of outcomes) {
-        const text = outcome.error ? `Error: ${outcome.error}` : String(outcome.result ?? '');
+        let text = outcome.error ? `Error: ${outcome.error}` : String(outcome.result ?? '');
+        if (!outcome.error) {
+          const deduped = this._dedupeToolResult(tc, text);
+          text = deduped.text;
+          if (deduped.deduped) outcome.result = text;
+        }
         // isError marks failed tool calls so Anthropic tool_results carry
         // is_error:true (the model treats the text as an error report).
         this.addMessage({ role: 'tool', toolCallId: tc.id, content: text, isError: !!outcome.error });
@@ -1453,6 +1515,7 @@ ${this.mode === 'build' ? `- You have all tools available: read, write, edit, ba
 
   reset() {
     this.messages = [];
+    this._toolResultCache.clear();
     this.turnCount = 0;
     this._currentTurnId = null;
     this._forceToolChoice = null;

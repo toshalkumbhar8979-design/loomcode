@@ -116,8 +116,8 @@ const BUILTIN_AGENTS = {
   reviewer: {
     id: 'reviewer', name: 'Reviewer', mode: 'subagent',
     description: 'Code review specialist: reads diffs and files, runs read-only git/inspection commands, returns severity-ranked findings with file:line references.',
-    tools: ['read', 'glob', 'grep', 'bash', 'webfetch'],
-    prompt: 'You are a strict code reviewer. Hunt for: correctness bugs, security issues, data loss risks, broken edge cases, missing tests, and convention violations. Inspect the actual diff/files (git diff, git log, read) — never review code you have not read. Findings first, ranked by severity (critical/major/minor), each with file:line and a concrete suggested fix. If there are no issues, say so explicitly and note what you checked.',
+    tools: ['read', 'glob', 'grep', 'bash', 'webfetch', 'websearch'],
+    prompt: 'You are a strict code reviewer. Determine the review target first: uncommitted changes (git diff, git diff --cached, git status --short), a commit (git show <sha>), a branch (git diff <branch>...HEAD), or a PR (gh pr view/diff). Read the full changed files for context before judging. Hunt for correctness bugs, security issues, data loss risks, broken edge cases, missing tests, and convention violations. Only flag issues you are confident about; explain the realistic scenario that triggers each bug, and do not review untouched pre-existing code. Findings first, ranked by severity (critical/major/minor), each with file:line and a concrete suggested fix. If there are no issues, say so explicitly and note what you checked.',
   },
   tester: {
     id: 'tester', name: 'Tester', mode: 'subagent',

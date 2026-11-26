@@ -401,6 +401,9 @@ function lspHelp() {
     '  /lsp check <file>      Run diagnostics on a file',
     '  /lsp <id> on|off       Toggle one server (typescript, pyright, ...)',
     '',
+    'When enabled, write/edit append diagnostics to the tool result automatically,',
+    'so the agent can fix type/lint errors in the same turn.',
+    '',
     'Custom servers: config.json "lsp": { "<name>": { "command": [...],',
     '"extensions": [".ext"] } }. The agent can also call the "lsp" tool.',
   ].join('\n');
@@ -418,13 +421,14 @@ function lspCmd(args) {
     if (!file) return 'Usage: /lsp check <file>';
     return lsp.checkFile(file).then((res) => {
       if (!res.ok) return 'LSP check failed: ' + res.error;
-      if (!res.diagnostics.length) return 'LSP (' + res.id + '): no diagnostics for ' + file;
+      const stale = res.fresh === false ? ' [no fresh response; results may be stale]' : '';
+      if (!res.diagnostics.length) return 'LSP (' + res.id + '): no diagnostics for ' + file + stale;
       const errs = res.diagnostics.filter((d) => d.severity === 'error').length;
       const warns = res.diagnostics.filter((d) => d.severity === 'warning').length;
       const lines = res.diagnostics.map((d) =>
         (d.severity === 'error' ? 'E' : d.severity === 'warning' ? 'W' : 'I') +
         ' ' + (d.line + 1) + ':' + (d.character + 1) + ' [' + (d.source || res.id) + '] ' + d.message);
-      return 'LSP (' + res.id + ') - ' + errs + ' error(s), ' + warns + ' warning(s):\n' + lines.join('\n');
+      return 'LSP (' + res.id + ') - ' + errs + ' error(s), ' + warns + ' warning(s)' + stale + ':\n' + lines.join('\n');
     }).catch((e) => 'LSP check failed: ' + (e && e.message ? e.message : e));
   }
   if (args.length === 2 && /^(on|off)$/.test(args[1])) {

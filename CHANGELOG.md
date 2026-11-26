@@ -15,6 +15,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   asks for a Desktop-app OAuth client, stores the client ID and secret in the
   encrypted vault, and opens Google's consent page. Environment variables and
   the API-key method still work.
+- **Built-in `/review` command.** Runs the `reviewer` subagent on uncommitted
+  changes by default, or on a commit hash, branch, or PR URL/number. The review
+  prompt mirrors OpenCode's: read the full changed files for context, only flag
+  confident bugs, and return severity-ranked findings with `file:line` and a
+  concrete fix.
+- **Ripgrep-backed `grep`/`glob`.** Both tools now use `rg` when it is on PATH
+  (falling back to the JS implementation), so `grep` searches the whole scope
+  instead of stopping after 50 files. Existing `node_modules`/`.git` exclusions,
+  result caps, sandbox checks, and abort handling are preserved;
+  `LOOM_RG_PATH` overrides the binary.
+- **Tool-result cache and unchanged-file dedupe.** `read`/`grep`/`glob` results
+  are cached briefly, and identical results are replaced with an
+  `[unchanged: ...]` marker when the earlier result is still in context.
+  `write`/`edit`/`bash`/`task`/MCP mutations invalidate search caches; reads
+  are keyed by path, mtime, size, and range.
+- **Verify-after-edit LSP loop.** When `lsp` is enabled, `write`/`edit` push a
+  `didChange` update and append a compact diagnostics note (errors/warnings or
+  `[lsp <id>: clean]`) to the same tool result, so the model can fix type/lint
+  errors immediately. Diagnostics are version-aware, so stale publishes from
+  before the edit are ignored.
 
 ### Changed
 - **Successful sign-in now activates the provider and a usable model.** The

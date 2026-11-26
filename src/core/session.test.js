@@ -872,3 +872,55 @@ test("runTurn: isError is false for successful tool outcomes", async () => {
   const toolRow = s.messages.find((m) => m.role === "tool" && m.toolCallId === "t2");
   expect(toolRow.isError).toBe(false);
 });
+
+test("runTurn: identical read results are replaced with an unchanged marker", async () => {
+  const s = freshSession();
+  const target = __filename;
+  let calls = 0;
+  s.getResponse = async () => {
+    calls++;
+    if (calls === 1) {
+      return { type: "assistant", content: "", toolCalls: [{ id: "r1", name: "read", input: { filePath: target } }] };
+    }
+    if (calls === 2) {
+      return { type: "assistant", content: "", toolCalls: [{ id: "r2", name: "read", input: { filePath: target } }] };
+    }
+    return { type: "assistant", content: "done", toolCalls: [] };
+  };
+  await s.runTurn({});
+  const rows = s.messages.filter((m) => m.role === "tool");
+  expect(rows).toHaveLength(2);
+  expect(String(rows[0].content)).toContain("Unit tests for the Session");
+  expect(String(rows[1].content)).toContain("unchanged");
+  expect(String(rows[1].content)).not.toContain("Unit tests for the Session");
+});
+
+test("runTurn: changed files are not deduped", async () => {
+  const s = freshSession();
+  const dir = path.join(process.cwd(), "node_modules", ".loom-test");
+  fs.mkdirSync(dir, { recursive: true });
+  const target = path.join(dir, "dedupe-" + process.pid + "-" + Date.now() + ".txt");
+  fs.writeFileSync(target, "alpha\n", "utf8");
+  let calls = 0;
+  s.getResponse = async () => {
+    calls++;
+    if (calls === 1) {
+      return { type: "assistant", content: "", toolCalls: [{ id: "c1", name: "read", input: { filePath: target } }] };
+    }
+    if (calls === 2) {
+      fs.writeFileSync(target, "beta\n", "utf8");
+      return { type: "assistant", content: "", toolCalls: [{ id: "c2", name: "read", input: { filePath: target } }] };
+    }
+    return { type: "assistant", content: "done", toolCalls: [] };
+  };
+  try {
+    await s.runTurn({});
+    const rows = s.messages.filter((m) => m.role === "tool");
+    expect(rows).toHaveLength(2);
+    expect(String(rows[0].content)).toContain("1: alpha");
+    expect(String(rows[1].content)).toContain("1: beta");
+    expect(String(rows[1].content)).not.toContain("unchanged");
+  } finally {
+    fs.rmSync(target, { force: true });
+  }
+});

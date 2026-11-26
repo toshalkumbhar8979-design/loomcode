@@ -787,6 +787,27 @@ header("41: compaction row expands on click like thinking");
   ok("compaction toggles open and closed");
 }
 
+header("42: /review runs the reviewer agent with the review prompt");
+{
+  resetUi();
+  const before = getSession().messages.length;
+  await runSlash("/review");
+  await waitFor(
+    () => !thinking() && messages().some(m => m.role === "assistant" && m.agentLabel === "reviewer"),
+    "review turn"
+  );
+  const ui = messages();
+  const userBubble = ui.find(m => m.role === "user" && String(m.content || "").startsWith("/review"));
+  console.assert(!!userBubble, "FAIL: /review should show a concise user bubble");
+  const asst = ui.find(m => m.role === "assistant" && m.agentLabel === "reviewer");
+  console.assert(!!asst, "FAIL: /review should run as the reviewer agent");
+  const sent = getSession().messages.slice(before).map((m: any) => String(m.content || "")).join("\n");
+  console.assert(sent.includes("You are a code reviewer"), "FAIL: review prompt missing");
+  console.assert(sent.includes("uncommitted changes"), "FAIL: default review target missing");
+  console.assert(!sent.includes("$ARGUMENTS"), "FAIL: review prompt left $ARGUMENTS unsubstituted");
+  ok("review command");
+}
+
 console.log("");
 sessMock.sendUserMessage = realSendAll;
 timings.push({ name: curTest, ms: Date.now() - curTestStart });

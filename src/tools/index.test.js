@@ -80,6 +80,71 @@ test("edit: single replace, replaceAll, and error cases", async () => {
   expect(noFile.error).toContain("File not found");
 });
 
+test("write/edit: append LSP diagnostics when enabled", async () => {
+  const prev = process.env.LOOM_CONFIG_DIR;
+  const cfgDir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-tools-lsp-cfg-"));
+  const script = String.raw`
+const fs = require('fs');
+let buf = Buffer.alloc(0);
+function send(obj) {
+  const body = JSON.stringify(obj);
+  process.stdout.write('Content-Length: ' + Buffer.byteLength(body) + '\r\n\r\n' + body);
+}
+function diagsFor(text) {
+  return text.indexOf('BAD') >= 0
+    ? [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, severity: 1, source: 'fake', message: 'bad token' }]
+    : [];
+}
+process.stdin.on('data', (chunk) => {
+  buf = Buffer.concat([buf, chunk]);
+  while (true) {
+    const idx = buf.indexOf('\r\n\r\n');
+    if (idx < 0) break;
+    const header = buf.slice(0, idx).toString('utf8');
+    const m = /Content-Length:\s*(\d+)/i.exec(header);
+    if (!m) { buf = buf.slice(idx + 4); continue; }
+    const len = Number(m[1]);
+    if (buf.length < idx + 4 + len) break;
+    const body = buf.slice(idx + 4, idx + 4 + len).toString('utf8');
+    buf = buf.slice(idx + 4 + len);
+    let msg;
+    try { msg = JSON.parse(body); } catch { continue; }
+    if (msg.method === 'initialize') {
+      send({ jsonrpc: '2.0', id: msg.id, result: { capabilities: { textDocumentSync: 1 } } });
+    } else if (msg.method === 'textDocument/didOpen') {
+      const td = msg.params.textDocument;
+      send({ jsonrpc: '2.0', method: 'textDocument/publishDiagnostics', params: { uri: td.uri, version: td.version, diagnostics: diagsFor(td.text) } });
+    } else if (msg.method === 'textDocument/didChange') {
+      const td = msg.params.textDocument;
+      const text = msg.params.contentChanges && msg.params.contentChanges[0] ? msg.params.contentChanges[0].text : '';
+      send({ jsonrpc: '2.0', method: 'textDocument/publishDiagnostics', params: { uri: td.uri, version: td.version, diagnostics: diagsFor(text) } });
+    }
+  }
+});
+`;
+  const scriptPath = path.join(tmpDir, "fake-lsp-tools.js");
+  fs.writeFileSync(scriptPath, script, "utf8");
+  const lsp = require("../core/lsp.js");
+  const cfg = {};
+  for (const id of Object.keys(lsp.DEFAULT_LSP)) cfg[id] = { disabled: true };
+  cfg.fake = { command: ["node", scriptPath], extensions: [".fake"] };
+  fs.writeFileSync(path.join(cfgDir, "config.json"), JSON.stringify({ lsp: cfg }), "utf8");
+  process.env.LOOM_CONFIG_DIR = cfgDir;
+  try {
+    const p = path.join(tmpDir, "lsp-write.fake");
+    const w = await tools.executeTool("write", { filePath: p, content: "BAD" });
+    expect(String(w.result)).toContain("[lsp fake: 1 error(s), 0 warning(s)]");
+    expect(String(w.result)).toContain("E 1:1 [fake] bad token");
+    const e = await tools.executeTool("edit", { filePath: p, oldString: "BAD", newString: "ok" });
+    expect(String(e.result)).toContain("[lsp fake: clean]");
+  } finally {
+    lsp.shutdownAll();
+    if (prev === undefined) delete process.env.LOOM_CONFIG_DIR;
+    else process.env.LOOM_CONFIG_DIR = prev;
+    try { fs.rmSync(cfgDir, { recursive: true, force: true }); } catch {}
+  }
+});
+
 test("edit: ambiguous and no-op replacements are rejected", async () => {
   const p = tmpFile("ambiguous.txt", "aaa bbb aaa");
   const amb = await tools.executeTool("edit", { filePath: p, oldString: "aaa", newString: "XXX" });
@@ -249,6 +314,69 @@ test("grep: matches with line numbers, reports none", async () => {
   expect(String(hit.result).includes("grepme.txt:2")).toBe(true);
   const miss = await tools.executeTool("grep", { pattern: "zzz", path: tmpDir, include: "grepme.txt" });
   expect(String(miss.result)).toBe("No matches found");
+});
+
+test("grep: searches nested includes and ignores node_modules", async () => {
+  tmpFile("grep-nested/keep.txt", "needle\n");
+  tmpFile("grep-nested/sub/deep.txt", "needle\n");
+  tmpFile("grep-nested/node_modules/skip.txt", "needle\n");
+  const res = await tools.executeTool("grep", {
+    pattern: "needle",
+    path: path.join(tmpDir, "grep-nested"),
+    include: "**/*.txt",
+  });
+  const out = String(res.result);
+  expect(out).toContain("keep.txt:1");
+  expect(out).toContain("deep.txt:1");
+  expect(out).not.toContain("node_modules");
+});
+
+test("grep: falls back to JS regex for lookbehind patterns", async () => {
+  tmpFile("grep-look.txt", "alpha\nbeta\n");
+  const res = await tools.executeTool("grep", {
+    pattern: "(?<=a)lpha",
+    path: tmpDir,
+    include: "grep-look.txt",
+  });
+  expect(String(res.result)).toContain("grep-look.txt:1: alpha");
+});
+
+test("glob: absolute patterns resolve their own search root", async () => {
+  tmpFile("glob-abs/a.txt", "x");
+  tmpFile("glob-abs/sub/b.txt", "y");
+  const pattern = path.join(tmpDir, "glob-abs", "**/*.txt").replace(/\\/g, "/");
+  const res = await tools.executeTool("glob", { pattern });
+  const out = String(res.result);
+  expect(out).toContain("a.txt");
+  expect(out).toContain("b.txt");
+});
+
+test("read: cache reflects file changes", async () => {
+  const p = tmpFile("cache-read.txt", "one");
+  const first = await tools.executeTool("read", { filePath: p });
+  expect(String(first.result)).toBe("1: one");
+  await tools.executeTool("write", { filePath: p, content: "two-longer" });
+  const second = await tools.executeTool("read", { filePath: p });
+  expect(String(second.result)).toBe("1: two-longer");
+});
+
+test("grep: cache is invalidated by writes", async () => {
+  const p = tmpFile("cache-grep.txt", "alpha\n");
+  const hit = await tools.executeTool("grep", { pattern: "alpha", path: tmpDir, include: "cache-grep.txt" });
+  expect(String(hit.result)).toContain("alpha");
+  await tools.executeTool("write", { filePath: p, content: "beta\n" });
+  const miss = await tools.executeTool("grep", { pattern: "alpha", path: tmpDir, include: "cache-grep.txt" });
+  expect(String(miss.result)).toBe("No matches found");
+});
+
+test("glob: cache is invalidated by writes", async () => {
+  const dir = path.join(tmpDir, "cache-glob");
+  fs.mkdirSync(dir, { recursive: true });
+  const before = await tools.executeTool("glob", { pattern: "*.txt", path: dir });
+  expect(String(before.result)).toBe("No files found");
+  await tools.executeTool("write", { filePath: path.join(dir, "new.txt"), content: "x" });
+  const after = await tools.executeTool("glob", { pattern: "*.txt", path: dir });
+  expect(String(after.result)).toContain("new.txt");
 });
 
 test("todowrite: renders list with status summary", async () => {

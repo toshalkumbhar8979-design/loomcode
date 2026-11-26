@@ -23,7 +23,8 @@ An AI-powered coding agent for the terminal with multi-provider support and a fu
 - OpenCode-style agents — primary agents (`build`/`plan`/`chat`) plus delegating subagents (`explore`, `scout`, `general`) invoked automatically via the `task` tool or manually via `@agent` mentions
 - LOOM.md / AGENTS.md project memory (cwd + parent directories) 
 - Multi-provider: Anthropic, OpenAI, NVIDIA, Google Gemini, OpenRouter, Local (Ollama) — with automatic retries (Retry-After aware), rate-limit waits, quota-driven model switching, and compact-and-retry on context overflow
-- Built-in tools: read, write, edit (multi-edit), bash (timeouts + interrupt), grep, glob, webfetch, todowrite, todoread, tasks — results capped at 100k chars
+- Built-in tools: read, write, edit (multi-edit), bash (timeouts + interrupt), grep/glob (ripgrep-accelerated), webfetch, todowrite, todoread, tasks — results capped at 100k chars
+- Opt-in formatter + LSP verification: `formatter: true` formats writes/edits; `lsp: true` appends fresh diagnostics to the same tool result so the agent fixes type/lint errors in the same turn
 - Agentic tool loop (multiple tool calls per turn)
 - MCP (Model Context Protocol) server integration — MCP tools are permission-gated (`mcp` rule, default ask)
 - Drag-to-copy selections, paste support
@@ -189,12 +190,13 @@ Zed (add to `~/.config/zed/settings.json`, then Command Palette → `agent: new 
 Full transport spec, JetBrains/Neovim configs, the protocol walkthrough, and a
 self-test client (`node scripts/acp-smoke.js`) live in **[docs/acp.md](docs/acp.md)**.
 
-## Slash Commands (41 total)
+## Slash Commands (42 total)
 
 | Command | Args | Description |
 |---------|------|-------------|
 | `/help` | — | Show help |
 | `/agents` | — | List agents |
+| `/review` | `[commit\|branch\|pr]` | Review changes with the reviewer subagent |
 | `/build` | — | Build mode — full tools |
 | `/plan` | — | Plan mode — read only |
 | `/chat` | — | Chat mode — no tools |
@@ -292,7 +294,7 @@ so delegation always terminates. Tools run on the normal user system by default;
 the Docker sandbox is used only when the user or the agent explicitly selects
 the `sandbox` tool / `sandbox: true`.
 
-### Two ways to invoke a subagent
+### Three ways to invoke a subagent
 
 1. **Automatic — the main agent calls `task` itself.** When a turn would
    benefit from a focused subagent (e.g. a fast read-only sweep before editing),
@@ -316,6 +318,19 @@ the `sandbox` tool / `sandbox: true`.
 
    The `@agent` prefix is stripped from the user bubble shown in chat, so only
    your query renders. Type `@` to open an autocomplete of available subagents.
+
+3. **Built-in review — `/review [target]`.** Runs the `reviewer` subagent on
+   uncommitted changes by default, or on a commit hash, branch, or PR:
+
+   ```
+   /review
+   /review 12ab34c
+   /review feature/auth
+   /review https://github.com/org/repo/pull/42
+   ```
+
+   The reviewer reads the full changed files, not just the diff, and returns
+   severity-ranked findings with file:line references.
 
 ### Listing, configuring, and extending agents
 
@@ -404,7 +419,7 @@ LoomCode/
 │       ├── toolkit.ts        # Tool output formatting helpers
 │       ├── reports.ts        # /help, /status, /keybinds text
 │       ├── suite-home.ts     # Temp HOME for the interactive test suite
-│       ├── test-interactive.tsx  # 41 keyboard-interaction tests
+│       ├── test-interactive.tsx  # 42 keyboard-interaction tests
 │       ├── shell/
 │       │   ├── Boot.tsx      # Splash: anchored robot head, tagline, composer
 │       │   ├── LoomBar.tsx   # Composer + status rows
@@ -433,6 +448,9 @@ Config is stored at `~/.loom/config.json` (permissions: 0600). Includes:
   limits for model calls, tools, and delegated work (defaults: 10m, 3m, 15m)
 - `permission` — OpenCode-style permission tree (see below)
 - `permissionRules` — rules saved from the permission popup ("Always allow"/"Never")
+- `formatter`, `lsp` — opt-in post-edit formatting and LSP diagnostics (both
+  `false` by default; `true` enables all built-ins, or use an object of
+  per-tool overrides)
 
 API keys can also be set via environment variables: `.env` or `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `NVIDIA_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY` etc.
 

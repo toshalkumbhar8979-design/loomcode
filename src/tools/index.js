@@ -1,7 +1,7 @@
 const fs = require('fs').promises;
 const fsSync = require('fs');
 const path = require('path');
-const { execSync, spawn } = require('child_process');
+const { execSync, spawn, spawnSync } = require('child_process');
 const { glob: globLib } = require('glob');
 const { commandRiskLabel } = require('../core/permissions');
 const { loadConfig } = require('../config/settings');
@@ -15,6 +15,154 @@ function globIgnore(full) {
   if (!abs) return ['**/node_modules/**', '**/.git/**'];
   const base = path.posix.dirname(full);
   return ['node_modules', '.git'].map((n) => path.posix.join(base, '**', n, '**'));
+}
+
+/** @type {string|null|undefined} */
+let rgPathCache;
+
+function ripgrepPath() {
+  if (rgPathCache !== undefined) return rgPathCache;
+  for (const candidate of [process.env.LOOM_RG_PATH, 'rg']) {
+    if (!candidate) continue;
+    try {
+      const res = spawnSync(candidate, ['--version'], { stdio: 'ignore', timeout: 3000, windowsHide: true });
+      if (res.status === 0) {
+        rgPathCache = candidate;
+        return candidate;
+      }
+    } catch {}
+  }
+  rgPathCache = null;
+  return null;
+}
+
+function runRipgrep(args, ctx, timeoutMs) {
+  return new Promise((resolve) => {
+    const rg = ripgrepPath();
+    if (!rg) {
+      resolve({ unavailable: true });
+      return;
+    }
+    let child;
+    try {
+      child = spawn(rg, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (e) {
+      resolve({ error: e });
+      return;
+    }
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    let aborted = false;
+    let settled = false;
+    const onAbort = () => {
+      aborted = true;
+      try { child.kill(); } catch {}
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill(); } catch {}
+    }, timeoutMs || 30000);
+    const finish = (res) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (ctx && ctx.signal && ctx.signal.removeEventListener) {
+        try { ctx.signal.removeEventListener('abort', onAbort); } catch {}
+      }
+      resolve(res);
+    };
+    if (ctx && ctx.signal) {
+      if (ctx.signal.aborted) onAbort();
+      else {
+        try { ctx.signal.addEventListener('abort', onAbort, { once: true }); } catch {}
+      }
+    }
+    child.stdout.on('data', (d) => {
+      if (stdout.length < 8 * 1024 * 1024) stdout += d.toString();
+    });
+    child.stderr.on('data', (d) => {
+      if (stderr.length < 64 * 1024) stderr += d.toString();
+    });
+    child.on('error', (e) => finish({ error: e }));
+    child.on('close', (code) => finish({ code, stdout, stderr, timedOut, aborted }));
+  });
+}
+
+function globSearchBase(full) {
+  const idx = full.search(/[*?[{]/);
+  if (idx < 0) return { dir: path.posix.dirname(full), pattern: path.posix.basename(full) };
+  const prefix = full.slice(0, idx);
+  const slash = prefix.lastIndexOf('/');
+  let dir = slash >= 0 ? prefix.slice(0, slash) : '.';
+  if (/^[a-zA-Z]:$/.test(dir)) dir += '/';
+  const pattern = full.slice(slash + 1);
+  return { dir: dir || '/', pattern: pattern || '**/*' };
+}
+
+function relativeGlob(root, full) {
+  const rel = path.posix.relative(root, full);
+  if (!rel || rel.startsWith('..') || path.posix.isAbsolute(rel)) return null;
+  return rel;
+}
+
+function rgTextField(field) {
+  if (!field) return '';
+  if (typeof field.text === 'string') return field.text;
+  if (typeof field.bytes === 'string') return Buffer.from(field.bytes, 'base64').toString('utf8');
+  return '';
+}
+
+function rgIgnoreArgs() {
+  return ['--glob', '!**/node_modules/**', '--glob', '!**/.git/**'];
+}
+
+function normalizeSearchPath(file) {
+  return process.platform === 'win32' ? file.replace(/\//g, '\\') : file;
+}
+
+const TOOL_CACHE_MAX = 100;
+const TOOL_CACHE_TTL_MS = 1500;
+const READ_CACHE_TTL_MS = 10000;
+const TOOL_CACHE_MAX_CHARS = 256 * 1024;
+const toolResultCache = new Map();
+let toolCacheGeneration = 0;
+
+function toolCacheGet(key) {
+  const hit = toolResultCache.get(key);
+  if (!hit) return undefined;
+  const ttl = key.startsWith('read:') ? READ_CACHE_TTL_MS : TOOL_CACHE_TTL_MS;
+  if (Date.now() - hit.at > ttl) {
+    toolResultCache.delete(key);
+    return undefined;
+  }
+  toolResultCache.delete(key);
+  toolResultCache.set(key, hit);
+  return hit.value;
+}
+
+function toolCacheSet(key, value) {
+  if (typeof value !== 'string' || value.length > TOOL_CACHE_MAX_CHARS) return;
+  toolResultCache.delete(key);
+  toolResultCache.set(key, { value, at: Date.now() });
+  while (toolResultCache.size > TOOL_CACHE_MAX) {
+    const oldest = toolResultCache.keys().next().value;
+    if (oldest === undefined) break;
+    toolResultCache.delete(oldest);
+  }
+}
+
+function isToolCacheMutator(name) {
+  return name === 'write' || name === 'edit' || name === 'bash' || name === 'sandbox' ||
+    name === 'task' || name === 'spawn_agents' || name === 'mcp' ||
+    (typeof name === 'string' && name.indexOf('mcp__') === 0);
+}
+
+function toolCacheBump() {
+  toolCacheGeneration++;
+  for (const key of toolResultCache.keys()) {
+    if (key.startsWith('grep:') || key.startsWith('glob:')) toolResultCache.delete(key);
+  }
 }
 
 function unquoteToken(token) {
@@ -618,6 +766,9 @@ const TOOLS = {
           fsSync.closeSync(fd);
         }
       }
+      const cacheKey = 'read:' + JSON.stringify([filePath, stat.mtimeMs, stat.size, params.offset || 0, params.limit || 0]);
+      const cached = toolCacheGet(cacheKey);
+      if (cached !== undefined) return cached;
       // Size cap: huge files are read up to 2000 lines (or the requested
       // window) instead of slurping megabytes into the context.
       const MAX_FILE_BYTES = 512 * 1024;
@@ -629,6 +780,7 @@ const TOOLS = {
       const start = (params.offset || 1) - 1;
       const end = params.limit ? start + params.limit : lines.length;
       const result = lines.slice(start, end).map((l,i) => `${start+i+1}: ${l}`).join('\n');
+      toolCacheSet(cacheKey, result);
       return result;
     }
   },
@@ -647,6 +799,7 @@ const TOOLS = {
       await fs.writeFile(dest, params.content, 'utf8');
       let extra = '';
       try { extra = await require('../core/format').formatAfterWrite(dest); } catch {}
+      try { extra += await require('../core/lsp').autoVerify(dest); } catch {}
       return `File written: ${dest}${extra}`;
     }
   },
@@ -712,6 +865,7 @@ const TOOLS = {
       await fs.writeFile(filePath, content, 'utf8');
       let extra = '';
       try { extra = await require('../core/format').formatAfterWrite(filePath); } catch {}
+      try { extra += await require('../core/lsp').autoVerify(filePath); } catch {}
       return `Edited ${filePath}: ${applied.join('; ')}${extra}`;
     }
   },
@@ -927,14 +1081,61 @@ const TOOLS = {
       path: { type: 'string', required: false, description: 'Directory to search in' },
       include: { type: 'string', required: false, description: 'File pattern to include' },
     },
-    async execute(params) {
+    async execute(params, ctx) {
       const dir = (params.path || cwd).replace(/\\/g, '/');
       const include = (params.include || '**/*').replace(/\\/g, '/');
-      const regex = new RegExp(params.pattern);
       const full = include.startsWith('/') || /^[a-zA-Z]:/.test(include)
         ? include
         : path.posix.join(dir, include);
       if (!pathAllowed(dir) || !pathAllowed(full)) return { error: sandboxDenied('grep', full) };
+      let root = dir;
+      let glob = include;
+      if (include.startsWith('/') || /^[a-zA-Z]:/.test(include)) {
+        const rel = relativeGlob(dir, full);
+        if (rel) glob = rel;
+        else {
+          const base = globSearchBase(full);
+          root = base.dir;
+          glob = base.pattern;
+          if (!pathAllowed(root)) return { error: sandboxDenied('grep', root) };
+        }
+      }
+      const cacheKey = 'grep:' + toolCacheGeneration + ':' + JSON.stringify([String(params.pattern), root, glob]);
+      const cached = toolCacheGet(cacheKey);
+      if (cached !== undefined) return cached;
+      const finish = (value) => { toolCacheSet(cacheKey, value); return value; };
+      if (!glob.startsWith('..') && !path.posix.isAbsolute(glob)) {
+        const res = await runRipgrep([
+          '--json',
+          '--no-config',
+          '--no-ignore',
+          '--hidden',
+          '--color', 'never',
+          '--max-columns', '500',
+          '--glob', glob,
+          ...rgIgnoreArgs(),
+          params.pattern,
+          root,
+        ], ctx, 30000);
+        if (res && !res.error && !res.unavailable && !res.timedOut && !res.aborted) {
+          const results = [];
+          for (const line of res.stdout.split(/\r?\n/)) {
+            if (!line) continue;
+            let ev;
+            try { ev = JSON.parse(line); } catch { continue; }
+            if (!ev || ev.type !== 'match' || !ev.data) continue;
+            const file = normalizeSearchPath(rgTextField(ev.data.path));
+            const text = rgTextField(ev.data.lines).replace(/\r?\n$/, '').trim().slice(0, 200);
+            if (!file || typeof ev.data.line_number !== 'number') continue;
+            results.push(`${file}:${ev.data.line_number}: ${text}`);
+          }
+          if (results.length) return finish(results.join('\n'));
+          if (res.code === 0 || res.code === 1) return finish('No matches found');
+        }
+        if (res && res.aborted) return { error: 'grep aborted' };
+        if (res && res.timedOut) return { error: 'grep timed out after 30s' };
+      }
+      const regex = new RegExp(params.pattern);
       const files = globLib.sync(full, { nodir: true, ignore: globIgnore(full) });
       const results = [];
       for (const file of files.slice(0, 50)) {
@@ -946,7 +1147,7 @@ const TOOLS = {
           });
         } catch {}
       }
-      return results.join('\n') || 'No matches found';
+      return finish(results.join('\n') || 'No matches found');
     }
   },
   glob: {
@@ -956,15 +1157,46 @@ const TOOLS = {
       pattern: { type: 'string', required: true, description: 'Glob pattern' },
       path: { type: 'string', required: false, description: 'Directory to search in' },
     },
-    async execute(params) {
+    async execute(params, ctx) {
       const dir = (params.path || cwd).replace(/\\/g, '/');
       const pattern = params.pattern.replace(/\\/g, '/');
       const full = pattern.startsWith('/') || /^[a-zA-Z]:/.test(pattern)
         ? pattern
         : path.posix.join(dir, pattern);
       if (!pathAllowed(dir) || !pathAllowed(full)) return { error: sandboxDenied('glob', full) };
+      let root = dir;
+      let glob = pattern;
+      if (pattern.startsWith('/') || /^[a-zA-Z]:/.test(pattern)) {
+        const base = globSearchBase(full);
+        root = base.dir;
+        glob = base.pattern;
+        if (!pathAllowed(root)) return { error: sandboxDenied('glob', root) };
+      }
+      const cacheKey = 'glob:' + toolCacheGeneration + ':' + JSON.stringify([root, glob]);
+      const cached = toolCacheGet(cacheKey);
+      if (cached !== undefined) return cached;
+      const finish = (value) => { toolCacheSet(cacheKey, value); return value; };
+      if (!glob.startsWith('..') && !path.posix.isAbsolute(glob)) {
+        const res = await runRipgrep([
+          '--files',
+          '--no-config',
+          '--no-ignore',
+          '--hidden',
+          '--color', 'never',
+          '--glob', glob,
+          ...rgIgnoreArgs(),
+          root,
+        ], ctx, 30000);
+        if (res && !res.error && !res.unavailable && !res.timedOut && !res.aborted) {
+          const files = res.stdout.split(/\r?\n/).filter(Boolean).map(normalizeSearchPath);
+          if (files.length) return finish(files.slice(0, 100).join('\n'));
+          if (res.code === 0 || res.code === 1) return finish('No files found');
+        }
+        if (res && res.aborted) return { error: 'glob aborted' };
+        if (res && res.timedOut) return { error: 'glob timed out after 30s' };
+      }
       const files = globLib.sync(full, { nodir: true, ignore: globIgnore(full) });
-      return files.slice(0, 100).join('\n') || 'No files found';
+      return finish(files.slice(0, 100).join('\n') || 'No files found');
     }
   },
   webfetch: {
@@ -1343,7 +1575,7 @@ const TOOLS = {
   },
   lsp: {
     name: 'lsp',
-    description: 'Run a Language Server Protocol diagnostic check on a file and return any errors/warnings. Use this to get language-server feedback (syntax, types, lint) after writing or editing code. Configure which servers run via config.json "lsp": true.',
+    description: 'Run a Language Server Protocol diagnostic check on a file and return any errors/warnings. When LSP is enabled, write/edit already append diagnostics automatically; use this to re-check a file on demand. Configure which servers run via config.json "lsp": true.',
     parameters: {
       filePath: { type: 'string', required: true, description: 'Absolute path to the file to check' },
     },
@@ -1351,12 +1583,13 @@ const TOOLS = {
       const lsp = require('../core/lsp');
       const res = await lsp.checkFile(path.resolve(params.filePath));
       if (!res.ok) return { error: res.error };
-      if (!res.diagnostics.length) return `LSP (${res.id}): no diagnostics for ${params.filePath}`;
+      const stale = res.fresh === false ? ' [no fresh response; results may be stale]' : '';
+      if (!res.diagnostics.length) return `LSP (${res.id}): no diagnostics for ${params.filePath}${stale}`;
       const errors = res.diagnostics.filter((d) => d.severity === 'error');
       const warnings = res.diagnostics.filter((d) => d.severity === 'warning');
       const lines = res.diagnostics.map((d) =>
         `${d.severity === 'error' ? 'E' : d.severity === 'warning' ? 'W' : 'I'} ${d.line + 1}:${d.character + 1} [${d.source || res.id}] ${d.message}`);
-      return `LSP (${res.id}) — ${errors.length} error(s), ${warnings.length} warning(s):\n` + lines.join('\n');
+      return `LSP (${res.id}) — ${errors.length} error(s), ${warnings.length} warning(s)${stale}:\n` + lines.join('\n');
     }
   },
 };
@@ -1422,10 +1655,12 @@ async function executeTool(toolName, params, mode = 'build', ctx = null) {
       const res = await withDeadline('MCP tool "' + toolName + '"', timeoutMs, ctx && ctx.signal, (signal) =>
         mcp.callTool(server, tool, params || {}, { signal })
       );
+      toolCacheBump();
       if (res && typeof res === 'object' && res.error) return { error: truncateToolText(res.error) };
       if (res && typeof res === 'object' && typeof res.result === 'string') return { result: truncateToolText(res.result) };
       return res;
     } catch (e) {
+      toolCacheBump();
       return { error: truncateToolText('MCP error: ' + e.message) };
     }
   }
@@ -1438,9 +1673,11 @@ async function executeTool(toolName, params, mode = 'build', ctx = null) {
     const result = await withDeadline('Tool "' + toolName + '"', timeoutMs, ctx && ctx.signal, (signal) =>
       tool.execute(params, { ...(ctx || {}), signal })
     );
+    if (isToolCacheMutator(toolName)) toolCacheBump();
     if (result && typeof result === 'object' && result.error) return { error: truncateToolText(result.error) };
     return { result: typeof result === 'string' ? truncateToolText(result) : result };
   } catch (e) {
+    if (isToolCacheMutator(toolName)) toolCacheBump();
     return { error: truncateToolText(e.message) };
   }
 }

@@ -584,6 +584,7 @@ export const SLASH_LIST: SlashCmd[] = [
   { cmd: "export", desc: "Export chat as markdown" },
   { cmd: "resume", desc: "Resume the last session" },
   { cmd: "continue", desc: "Resume the last session" },
+  { cmd: "review", desc: "Review changes", args: "[commit|branch|pr]" },
 ];
 
 // ─── TUI prefs ───

@@ -147,6 +147,10 @@ class LspConnection {
     this.decoder = new FrameDecoder();
     this.pending = new Map();
     this.diagnostics = new Map(); // uri -> array of diagnostics
+    this.diagSeq = new Map(); // uri -> publish count
+    this.diagVersions = new Map(); // uri -> last published document version
+    this.versions = new Map(); // uri -> current document version
+    this.diagWaiters = new Map(); // uri -> array of resolve callbacks
     this.ready = null;
     this.openedFiles = new Set();
   }
@@ -209,8 +213,49 @@ class LspConnection {
     }
     if (msg.method === 'textDocument/publishDiagnostics') {
       const uri = msg.params && msg.params.uri;
-      if (uri) this.diagnostics.set(uri, msg.params.diagnostics || []);
+      if (uri) {
+        this.diagnostics.set(uri, msg.params.diagnostics || []);
+        this.diagSeq.set(uri, (this.diagSeq.get(uri) || 0) + 1);
+        if (msg.params.version != null) this.diagVersions.set(uri, msg.params.version);
+        const waiters = this.diagWaiters.get(uri);
+        if (waiters && waiters.length) {
+          this.diagWaiters.delete(uri);
+          for (const resolve of waiters) resolve();
+        }
+      }
     }
+  }
+
+  /** Wait until a publishDiagnostics notification arrives for `uri` after
+   *  `afterSeq`. Resolves immediately if one already arrived.
+   *  @param {string} uri
+   *  @param {number} afterSeq
+   *  @param {number} timeoutMs
+   *  @returns {Promise<void>} */
+  waitForDiagnostics(uri, afterSeq, timeoutMs) {
+    if ((this.diagSeq.get(uri) || 0) > afterSeq) return Promise.resolve();
+    return new Promise((resolve) => {
+      let done = false;
+      /** @type {NodeJS.Timeout|undefined} */
+      let timer;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        if (timer) clearTimeout(timer);
+        const list = this.diagWaiters.get(uri);
+        if (list) {
+          const i = list.indexOf(finish);
+          if (i >= 0) list.splice(i, 1);
+          if (!list.length) this.diagWaiters.delete(uri);
+        }
+        resolve();
+      };
+      timer = setTimeout(finish, timeoutMs);
+      const list = this.diagWaiters.get(uri) || [];
+      list.push(finish);
+      this.diagWaiters.set(uri, list);
+      if ((this.diagSeq.get(uri) || 0) > afterSeq) finish();
+    });
   }
 
   /** @param {string} method
@@ -243,15 +288,32 @@ class LspConnection {
   async didOpen(filePath) {
     if (this.openedFiles.has(filePath)) return;
     const text = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : '';
+    const uri = pathToUri(filePath);
     const languageId = {
       '.ts': 'typescript', '.tsx': 'typescriptreact',
       '.js': 'javascript', '.jsx': 'javascript', '.mjs': 'javascript', '.cjs': 'javascript',
       '.py': 'python',
     }[path.extname(filePath).toLowerCase()] || 'plaintext';
+    this.versions.set(uri, 1);
     this.sendNotification('textDocument/didOpen', {
-      textDocument: { uri: pathToUri(filePath), languageId, version: 1, text },
+      textDocument: { uri, languageId, version: 1, text },
     });
     this.openedFiles.add(filePath);
+  }
+
+  /** Push the on-disk contents after an edit so diagnostics are not stale.
+   *  @param {string} filePath
+   *  @returns {number} the new document version */
+  didChange(filePath) {
+    const uri = pathToUri(filePath);
+    const text = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : '';
+    const version = (this.versions.get(uri) || 1) + 1;
+    this.versions.set(uri, version);
+    this.sendNotification('textDocument/didChange', {
+      textDocument: { uri, version },
+      contentChanges: [{ text }],
+    });
+    return version;
   }
 
   /** @param {string} uri
@@ -301,16 +363,18 @@ function normalizeDiagnostics(diags) {
 }
 
 const STALE = new Map(); // filePath -> last diagnostics
-const OPEN_TIMER = new Map();
 
 /** Run diagnostics for a file: start the server if needed, open the doc,
- *  wait for publishDiagnostics, cache it, and return it.
+ *  refresh it when it is already open, wait for the new publishDiagnostics,
+ *  cache it, and return it.
  * @param {string} filePath
  * @param {object} [opts]
  * @param {number} [opts.timeoutMs]
- * @returns {Promise<{ok: boolean, diagnostics: Array<LspDiagnostic>, id?: string, error?: string}>} */
+ * @param {boolean} [opts.force] send didChange for already-open files (default true)
+ * @returns {Promise<{ok: boolean, diagnostics: Array<LspDiagnostic>, id?: string, fresh?: boolean, error?: string}>} */
 async function checkFile(filePath, opts = {}) {
   const timeoutMs = opts.timeoutMs || 4000;
+  const force = opts.force !== false;
   const ext = path.extname(filePath);
   const found = findServerForExt(ext);
   if (!found.found) return { ok: false, diagnostics: [], error: found.reason };
@@ -325,19 +389,87 @@ async function checkFile(filePath, opts = {}) {
     connections.delete(id);
     return { ok: false, diagnostics: [], error: `failed to start ${id}: ${e && e.message ? e.message : e}` };
   }
-  await conn.didOpen(filePath);
   const uri = pathToUri(filePath);
-  // Give the server a window to push diagnostics (may already be cached).
-  if (!conn.diagnostics.has(uri)) {
-    await new Promise((resolve) => {
-      const t = setTimeout(resolve, timeoutMs);
-      OPEN_TIMER.set(uri, t);
-    });
-    OPEN_TIMER.delete(uri);
+  const wasOpen = conn.openedFiles.has(filePath);
+  const beforeSeq = conn.diagSeq.get(uri) || 0;
+  await conn.didOpen(filePath);
+  if (force && wasOpen) conn.didChange(filePath);
+  const version = conn.versions.get(uri) || 1;
+  const deadline = Date.now() + timeoutMs;
+  let seen = beforeSeq;
+  let fresh = false;
+  while (Date.now() < deadline) {
+    const seq = conn.diagSeq.get(uri) || 0;
+    if (seq > seen) {
+      seen = seq;
+      const published = conn.diagVersions.get(uri);
+      if (published == null || published >= version) {
+        fresh = true;
+        break;
+      }
+      continue;
+    }
+    await conn.waitForDiagnostics(uri, seen, Math.max(1, deadline - Date.now()));
   }
   const diags = conn.getDiagnosticsForUri(uri);
   STALE.set(filePath, diags);
-  return { ok: true, diagnostics: diags, id };
+  return { ok: true, diagnostics: diags, id, fresh };
+}
+
+/** Render a compact note for an edit result. Only errors and warnings are
+ *  included; a clean check adds a short marker so the model knows it ran.
+ * @param {any} res
+ * @returns {string} */
+function formatDiagnosticNote(res) {
+  if (!res || !res.ok || res.fresh === false) return '';
+  const diags = /** @type {Array<LspDiagnostic>} */ (res.diagnostics || []);
+  const errors = diags.filter((d) => d.severity === 'error');
+  const warnings = diags.filter((d) => d.severity === 'warning');
+  const id = res.id || 'lsp';
+  if (!errors.length && !warnings.length) return `\n[lsp ${id}: clean]`;
+  const picked = errors.slice(0, 10).concat(warnings.slice(0, 5));
+  const lines = picked.map((d) =>
+    `${d.severity === 'error' ? 'E' : 'W'} ${d.line + 1}:${d.character + 1} [${d.source || id}] ${d.message.slice(0, 300)}`);
+  let note = `\n[lsp ${id}: ${errors.length} error(s), ${warnings.length} warning(s)]\n` + lines.join('\n');
+  const extra = errors.length + warnings.length - picked.length;
+  if (extra > 0) note += `\n... ${extra} more`;
+  return note.slice(0, 4000);
+}
+
+const AUTO_VERIFY_BACKOFF = new Map(); // server id -> retry-after timestamp
+const AUTO_VERIFY_BACKOFF_MS = 30000;
+
+/** Auto-verify a file after write/edit when an LSP server is enabled.
+ *  Returns '' when LSP is disabled, no server handles the extension, or the
+ *  check could not complete in time. A failed/slow start backs off for 30s so
+ *  repeated edits do not each pay the timeout.
+ * @param {string} filePath
+ * @returns {Promise<string>} */
+async function autoVerify(filePath) {
+  const found = findServerForExt(path.extname(filePath));
+  if (!found.found) return '';
+  const id = found.id || '';
+  if (Date.now() < (AUTO_VERIFY_BACKOFF.get(id) || 0)) return '';
+  /** @type {NodeJS.Timeout|undefined} */
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(null), 6000);
+  });
+  let res = null;
+  try {
+    res = await Promise.race([
+      checkFile(filePath, { timeoutMs: 4000 }).catch(() => null),
+      timeout,
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+  if (!res || !res.ok || res.fresh === false) {
+    AUTO_VERIFY_BACKOFF.set(id, Date.now() + AUTO_VERIFY_BACKOFF_MS);
+    return '';
+  }
+  AUTO_VERIFY_BACKOFF.delete(id);
+  return formatDiagnosticNote(res);
 }
 
 /** @param {string} filePath
@@ -376,6 +508,8 @@ module.exports = {
   enabledServers,
   findServerForExt,
   checkFile,
+  autoVerify,
+  formatDiagnosticNote,
   cachedDiagnostics,
   statusLines,
   shutdownAll,
